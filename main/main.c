@@ -296,6 +296,7 @@ void app_main(void)
     lv_obj_set_size(header, 720, 100);
     lv_obj_align(header, LV_ALIGN_TOP_MID, 0, 0);
     lv_obj_set_style_bg_color(header, lv_color_hex(0x20283a), 0);
+    lv_obj_set_style_text_color(header, lv_color_white(), 0);
     lv_obj_t *home = lv_button_create(header);
     lv_obj_set_size(home, 120, 64);
     lv_obj_align(home, LV_ALIGN_LEFT_MID, 0, 0);
@@ -312,6 +313,7 @@ void app_main(void)
     lv_obj_set_size(content, 720, 1180);
     lv_obj_align(content, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_set_style_bg_color(content, lv_color_hex(0x10141f), 0);
+    lv_obj_set_style_text_color(content, lv_color_white(), 0);
     lv_obj_set_style_border_width(content, 0, 0);
     lv_obj_set_style_pad_all(content, 28, 0);
     lv_obj_set_style_pad_row(content, 24, 0);

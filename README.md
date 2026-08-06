@@ -17,6 +17,15 @@ idf.py build
 idf.py -p <PORT> flash monitor
 ```
 
+For faster Windows iteration, put the ESP-IDF directory in `.idf-path`, then use the persistent Ninja build and app-only flash wrappers:
+
+```powershell
+.\tools\build_idf.ps1
+.\tools\flash_idf.ps1 -Port COM7
+```
+
+Use `-Full` after bootloader or partition-table changes. Normal source edits retain the build tree, use project-local ccache with four jobs, and flash only the app partition.
+
 Hold the Tab5 reset button until its green LED flashes rapidly before flashing. Use `Ctrl+]` to exit the monitor.
 
 The checked-in defaults include M5Stack's required QIO, 200 MHz PSRAM, and L2-cache settings. Removing them causes MIPI display underruns on the 720p panel.
