@@ -182,6 +182,31 @@ static lv_obj_t *button(lv_obj_t *parent, const char *text, lv_event_cb_t callba
     return btn;
 }
 
+static void app_icon(lv_obj_t *parent, const char *symbol, const char *name,
+                     uint32_t color, lv_event_cb_t callback, int column, int row)
+{
+    lv_obj_t *cell = lv_obj_create(parent);
+    lv_obj_remove_style_all(cell);
+    lv_obj_set_grid_cell(cell, LV_GRID_ALIGN_STRETCH, column, 1, LV_GRID_ALIGN_STRETCH, row, 1);
+    lv_obj_set_flex_flow(cell, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(cell, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(cell, 8, 0);
+
+    lv_obj_t *tile = lv_button_create(cell);
+    lv_obj_set_size(tile, 150, 150);
+    lv_obj_set_style_radius(tile, 28, 0);
+    lv_obj_set_style_bg_color(tile, lv_color_hex(color), 0);
+    lv_obj_add_event_cb(tile, callback, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *icon = lv_label_create(tile);
+    lv_label_set_text(icon, symbol);
+    lv_obj_set_style_text_font(icon, &lv_font_montserrat_48, 0);
+    lv_obj_center(icon);
+
+    lv_obj_t *label = lv_label_create(cell);
+    lv_label_set_text(label, name);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_28, 0);
+}
+
 static void clear_content(void)
 {
     lv_obj_clean(content);
@@ -396,14 +421,18 @@ static void system_clicked(lv_event_t *event)
 
 static void show_launcher(void)
 {
+    static int32_t columns[] = {
+        LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
+    static int32_t rows[] = {
+        LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
     clear_content();
-    lv_obj_t *title = lv_label_create(content);
-    lv_label_set_text(title, "Apps");
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_48, 0);
-    button(content, "Files", files_clicked);
-    button(content, "Notes", notes_clicked);
-    button(content, "Counter", counter_clicked);
-    button(content, "System", system_clicked);
+    lv_obj_set_grid_dsc_array(content, columns, rows);
+    lv_obj_set_style_pad_row(content, 12, 0);
+    lv_obj_set_style_pad_column(content, 12, 0);
+    app_icon(content, LV_SYMBOL_DIRECTORY, "Files", 0x2196F3, files_clicked, 0, 0);
+    app_icon(content, LV_SYMBOL_EDIT, "Notes", 0x00A896, notes_clicked, 1, 0);
+    app_icon(content, LV_SYMBOL_PLUS, "Counter", 0xF59E0B, counter_clicked, 2, 0);
+    app_icon(content, LV_SYMBOL_SETTINGS, "System", 0x7C4DFF, system_clicked, 0, 1);
 }
 
 void app_main(void)
