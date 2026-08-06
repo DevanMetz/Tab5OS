@@ -238,6 +238,8 @@ static void show_files(const char *path)
     lv_obj_set_size(list, 640, 940);
 
     if (!path) {
+        lv_obj_t *back = lv_list_add_button(list, LV_SYMBOL_LEFT, "Back to apps");
+        lv_obj_add_event_cb(back, home_clicked, LV_EVENT_CLICKED, NULL);
         if (internal_ready) {
             lv_obj_t *item = lv_list_add_button(list, LV_SYMBOL_DIRECTORY, "Internal storage");
             lv_obj_add_event_cb(item, file_clicked, LV_EVENT_CLICKED, INTERNAL_PATH);
