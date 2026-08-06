@@ -41,7 +41,7 @@
 #define VOICE_RATE 16000
 #define VOICE_CHANNELS 4
 #define VOICE_MIC_CHANNEL 0
-#define VOICE_SECONDS 5
+#define VOICE_MAX_SECONDS 30
 
 typedef struct __attribute__((packed)) {
     char magic[4];
@@ -109,6 +109,9 @@ static lv_obj_t *chat_input;
 static lv_obj_t *chat_status;
 static lv_obj_t *chat_send_button;
 static lv_obj_t *chat_voice_button;
+static lv_obj_t *chat_voice_label;
+static lv_obj_t *chat_wave;
+static lv_chart_series_t *chat_wave_series;
 static lv_timer_t *chat_timer;
 static TaskHandle_t chat_task;
 static esp_codec_dev_handle_t voice_mic;
@@ -117,6 +120,9 @@ static volatile bool chat_busy;
 static volatile bool chat_done;
 static volatile chat_job_t chat_job;
 static volatile chat_job_t chat_completed_job;
+static volatile bool voice_recording;
+static volatile bool voice_stop_requested;
+static volatile uint16_t voice_level;
 static bool chat_ok;
 static char chat_prompt[2001];
 static char chat_response[8192];
@@ -412,13 +418,52 @@ static char *capture_voice_wav(size_t *size)
 {
     if (!start_voice_mic()) return NULL;
 
-    const size_t sample_count = VOICE_SECONDS * VOICE_RATE;
-    const size_t data_size = sample_count * sizeof(int16_t);
-    char *wav = heap_caps_malloc(sizeof(wav_header_t) + data_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    const size_t sample_capacity = VOICE_MAX_SECONDS * VOICE_RATE;
+    char *wav = heap_caps_malloc(sizeof(wav_header_t) + sample_capacity * sizeof(int16_t),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!wav) {
         snprintf(chat_error, sizeof(chat_error), "Out of memory");
+        voice_recording = false;
         return NULL;
     }
+
+    int16_t raw[VOICE_CHANNELS * 3 * 160];
+    int16_t *pcm = (int16_t *)(wav + sizeof(wav_header_t));
+    size_t written = 0;
+    while (written < sample_capacity && !voice_stop_requested) {
+        size_t count = sample_capacity - written;
+        if (count > 160) count = 160;
+        size_t raw_bytes = count * 3 * VOICE_CHANNELS * sizeof(int16_t);
+        if (esp_codec_dev_read(voice_mic, raw, raw_bytes) != ESP_CODEC_DEV_OK) {
+            snprintf(chat_error, sizeof(chat_error), "Microphone read failed");
+            free(wav);
+            voice_recording = false;
+            return NULL;
+        }
+        uint16_t peak = 0;
+        for (size_t i = 0; i < count; ++i) {
+            int32_t sum = 0;
+            for (size_t j = 0; j < 3; ++j) {
+                sum += raw[(i * 3 + j) * VOICE_CHANNELS + VOICE_MIC_CHANNEL];
+                for (size_t channel = 0; channel < VOICE_CHANNELS; ++channel) {
+                    int32_t sample = raw[(i * 3 + j) * VOICE_CHANNELS + channel];
+                    uint16_t level = sample < 0 ? (uint16_t)-sample : (uint16_t)sample;
+                    if (level > peak) peak = level;
+                }
+            }
+            pcm[written + i] = sum / 3;
+        }
+        voice_level = peak / 32 > 100 ? 100 : peak / 32;
+        written += count;
+    }
+    voice_recording = false;
+    voice_level = 0;
+    if (written < VOICE_RATE / 4) {
+        snprintf(chat_error, sizeof(chat_error), "Recording was too short");
+        free(wav);
+        return NULL;
+    }
+    const size_t data_size = written * sizeof(int16_t);
     wav_header_t header = {
         .riff = {'R', 'I', 'F', 'F'}, .riff_size = 36 + data_size,
         .wave = {'W', 'A', 'V', 'E'}, .fmt = {'f', 'm', 't', ' '},
@@ -428,25 +473,6 @@ static char *capture_voice_wav(size_t *size)
         .data = {'d', 'a', 't', 'a'}, .data_size = data_size,
     };
     memcpy(wav, &header, sizeof(header));
-
-    int16_t raw[VOICE_CHANNELS * 3 * 160];
-    int16_t *pcm = (int16_t *)(wav + sizeof(header));
-    for (size_t written = 0; written < sample_count;) {
-        size_t count = sample_count - written;
-        if (count > 160) count = 160;
-        size_t raw_bytes = count * 3 * VOICE_CHANNELS * sizeof(int16_t);
-        if (esp_codec_dev_read(voice_mic, raw, raw_bytes) != ESP_CODEC_DEV_OK) {
-            snprintf(chat_error, sizeof(chat_error), "Microphone read failed");
-            free(wav);
-            return NULL;
-        }
-        for (size_t i = 0; i < count; ++i) {
-            int32_t sum = 0;
-            for (size_t j = 0; j < 3; ++j) sum += raw[(i * 3 + j) * VOICE_CHANNELS + VOICE_MIC_CHANNEL];
-            pcm[written + i] = sum / 3;
-        }
-        written += count;
-    }
     *size = sizeof(header) + data_size;
     return wav;
 }
@@ -566,6 +592,14 @@ static void chat_append(const char *role, const char *text)
 static void chat_tick(lv_timer_t *timer)
 {
     (void)timer;
+    if (chat_wave && chat_wave_series) {
+        lv_chart_set_next_value(chat_wave, chat_wave_series, voice_recording ? voice_level : 0);
+    }
+    if (chat_busy && chat_job == CHAT_JOB_VOICE && !voice_recording) {
+        lv_label_set_text(chat_status, "Transcribing...");
+        lv_label_set_text(chat_voice_label, "Start");
+        lv_obj_add_state(chat_voice_button, LV_STATE_DISABLED);
+    }
     if (!chat_done) return;
     chat_done = false;
     if (chat_completed_job == CHAT_JOB_VOICE) {
@@ -581,6 +615,7 @@ static void chat_tick(lv_timer_t *timer)
     }
     lv_obj_remove_state(chat_send_button, LV_STATE_DISABLED);
     lv_obj_remove_state(chat_voice_button, LV_STATE_DISABLED);
+    lv_label_set_text(chat_voice_label, "Start");
 }
 
 static bool chat_start_job(chat_job_t job)
@@ -630,6 +665,12 @@ static void chat_send_clicked(lv_event_t *event)
 static void chat_voice_clicked(lv_event_t *event)
 {
     (void)event;
+    if (voice_recording) {
+        voice_stop_requested = true;
+        lv_label_set_text(chat_status, "Finishing recording...");
+        lv_obj_add_state(chat_voice_button, LV_STATE_DISABLED);
+        return;
+    }
     if (chat_busy) return;
     if (!wifi_connected) {
         lv_label_set_text(chat_status, "Connect to Wi-Fi first");
@@ -639,12 +680,17 @@ static void chat_voice_clicked(lv_event_t *event)
         lv_label_set_text(chat_status, "Relay is not configured");
         return;
     }
-    lv_label_set_text(chat_status, "Listening for 5 seconds...");
+    voice_stop_requested = false;
+    voice_recording = true;
+    voice_level = 0;
+    lv_label_set_text(chat_status, "Recording - press Stop when done");
+    lv_label_set_text(chat_voice_label, "Stop");
     lv_obj_add_state(chat_send_button, LV_STATE_DISABLED);
-    lv_obj_add_state(chat_voice_button, LV_STATE_DISABLED);
     if (!chat_start_job(CHAT_JOB_VOICE)) {
+        voice_recording = false;
         lv_obj_remove_state(chat_send_button, LV_STATE_DISABLED);
         lv_obj_remove_state(chat_voice_button, LV_STATE_DISABLED);
+        lv_label_set_text(chat_voice_label, "Start");
         lv_label_set_text(chat_status, "Could not start microphone");
     }
 }
@@ -676,6 +722,9 @@ static void clear_content(void)
     chat_status = NULL;
     chat_send_button = NULL;
     chat_voice_button = NULL;
+    chat_voice_label = NULL;
+    chat_wave = NULL;
+    chat_wave_series = NULL;
     lv_obj_clean(content);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -1030,12 +1079,21 @@ static void show_chat(void)
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
 
     chat_status = lv_label_create(content);
-    lv_label_set_text(chat_status, chat_busy ? (chat_job == CHAT_JOB_VOICE ? "Listening..." : "Thinking...") :
+    lv_label_set_text(chat_status, voice_recording ? "Recording - press Stop when done" :
+        chat_busy ? (chat_job == CHAT_JOB_VOICE ? "Transcribing..." : "Thinking...") :
         (!CHAT_RELAY_URL[0] || !CHAT_DEVICE_TOKEN[0]) ? "Relay is not configured" : "Ready");
     lv_obj_set_width(chat_status, 640);
 
+    chat_wave = lv_chart_create(content);
+    lv_obj_set_size(chat_wave, 640, 100);
+    lv_chart_set_type(chat_wave, LV_CHART_TYPE_LINE);
+    lv_chart_set_point_count(chat_wave, 60);
+    lv_chart_set_range(chat_wave, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
+    lv_chart_set_div_line_count(chat_wave, 0, 0);
+    chat_wave_series = lv_chart_add_series(chat_wave, lv_color_hex(0x29B6F6), LV_CHART_AXIS_PRIMARY_Y);
+
     chat_output = lv_textarea_create(content);
-    lv_obj_set_size(chat_output, 640, 360);
+    lv_obj_set_size(chat_output, 640, 280);
     lv_textarea_set_text(chat_output, chat_history[0] ? chat_history : "Ask me anything.");
     lv_textarea_set_cursor_pos(chat_output, LV_TEXTAREA_CURSOR_LAST);
     lv_textarea_set_one_line(chat_output, false);
@@ -1051,17 +1109,18 @@ static void show_chat(void)
     lv_obj_set_flex_align(actions, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     chat_send_button = button(actions, "Send", chat_send_clicked);
     lv_obj_set_size(chat_send_button, 180, 76);
-    chat_voice_button = button(actions, "Talk", chat_voice_clicked);
+    chat_voice_button = button(actions, voice_recording ? "Stop" : "Start", chat_voice_clicked);
+    chat_voice_label = lv_obj_get_child(chat_voice_button, 0);
     lv_obj_set_size(chat_voice_button, 180, 76);
     lv_obj_t *new_chat = button(actions, "New", chat_new_clicked);
     lv_obj_set_size(new_chat, 180, 76);
     if (chat_busy) {
         lv_obj_add_state(chat_send_button, LV_STATE_DISABLED);
-        lv_obj_add_state(chat_voice_button, LV_STATE_DISABLED);
+        if (!voice_recording) lv_obj_add_state(chat_voice_button, LV_STATE_DISABLED);
     }
 
     lv_obj_t *keyboard = lv_keyboard_create(content);
-    lv_obj_set_size(keyboard, 640, 390);
+    lv_obj_set_size(keyboard, 640, 360);
     lv_keyboard_set_textarea(keyboard, chat_input);
     chat_timer = lv_timer_create(chat_tick, 200, NULL);
 }

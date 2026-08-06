@@ -1,7 +1,7 @@
 const OPENAI_URL = "https://api.openai.com/v1/responses";
 const TRANSCRIBE_URL = "https://api.openai.com/v1/audio/transcriptions";
 const MAX_MESSAGE = 2000;
-const MAX_AUDIO = 400000;
+const MAX_AUDIO = 1000000;
 
 function reply(body, status = 200) {
   return Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
