@@ -4,3 +4,6 @@ sdkconfig
 .ccache/
 .idf-path
 sdkconfig.old
+main/chat_secrets.h
+relay/.dev.vars
+__pycache__/

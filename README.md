@@ -51,7 +51,8 @@ The small board-support components in `components/` come from M5Stack's Apache-2
 - [x] Touch input
 - [x] SPIFFS/microSD file browser
 - [x] Notes, counter, and system apps
-- [ ] Wi-Fi settings
+- [x] Wi-Fi settings
+- [x] AI chat client through an authenticated HTTPS relay
 - [x] Application launcher
 - [x] USB remote desktop
 

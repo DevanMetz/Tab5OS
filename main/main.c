@@ -1,5 +1,7 @@
 #include <dirent.h>
+#include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -8,10 +10,12 @@
 #include "esp_chip_info.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
+#include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_spiffs.h"
 #include "esp_wifi.h"
+#include "esp_crt_bundle.h"
 #include "nvs_flash.h"
 #include "esp_lcd_mipi_dsi.h"
 #include "driver/usb_serial_jtag.h"
@@ -19,6 +23,14 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
+#include "cJSON.h"
+
+#ifdef CHAT_HAS_SECRETS
+#include "chat_secrets.h"
+#else
+#define CHAT_RELAY_URL ""
+#define CHAT_DEVICE_TOKEN ""
+#endif
 
 #define INTERNAL_PATH BSP_SPIFFS_MOUNT_POINT
 #define SD_PATH "/sdcard"
@@ -63,6 +75,20 @@ static lv_obj_t *wifi_status;
 static lv_obj_t *wifi_list;
 static lv_obj_t *wifi_password_area;
 static lv_timer_t *wifi_timer;
+static lv_obj_t *chat_output;
+static lv_obj_t *chat_input;
+static lv_obj_t *chat_status;
+static lv_obj_t *chat_send_button;
+static lv_timer_t *chat_timer;
+static TaskHandle_t chat_task;
+static volatile bool chat_busy;
+static volatile bool chat_done;
+static bool chat_ok;
+static char chat_prompt[2001];
+static char chat_response[8192];
+static char chat_error[96];
+static char chat_response_id[128];
+static char chat_history[12000];
 static volatile int16_t remote_x;
 static volatile int16_t remote_y;
 static volatile bool remote_pressed;
@@ -71,6 +97,13 @@ static uint32_t remote_frame_number;
 static void show_launcher(void);
 static void show_files(const char *path);
 static void show_settings(void);
+static void show_chat(void);
+
+typedef struct {
+    char *data;
+    size_t length;
+    size_t capacity;
+} http_buffer_t;
 
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -147,7 +180,7 @@ static void send_remote_frame(uint8_t *framebuffer, uint8_t *pixels, uint8_t *en
 {
     const size_t pixel_bytes = SCREEN_WIDTH * SCREEN_HEIGHT * 2;
     bsp_display_lock(0);
-    esp_cache_msync(framebuffer, pixel_bytes, ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+    esp_cache_msync(framebuffer, pixel_bytes, ESP_CACHE_MSYNC_FLAG_DIR_M2C);
     memcpy(pixels, framebuffer, pixel_bytes);
     bsp_display_unlock();
 
@@ -279,14 +312,177 @@ static void app_icon(lv_obj_t *parent, const char *symbol, const char *name,
     lv_obj_set_style_text_font(label, &lv_font_montserrat_28, 0);
 }
 
+static esp_err_t chat_http_event(esp_http_client_event_t *event)
+{
+    http_buffer_t *buffer = event->user_data;
+    if (event->event_id != HTTP_EVENT_ON_DATA || !buffer) return ESP_OK;
+    size_t available = buffer->capacity - buffer->length - 1;
+    if ((size_t)event->data_len > available) return ESP_ERR_NO_MEM;
+    memcpy(buffer->data + buffer->length, event->data, event->data_len);
+    buffer->length += event->data_len;
+    buffer->data[buffer->length] = '\0';
+    return ESP_OK;
+}
+
+static void chat_request_task(void *argument)
+{
+    (void)argument;
+    // ponytail: keep the worker alive; ESP-IDF rejects its PSRAM-linked pthread cleanup callback on deletion.
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        chat_ok = false;
+        chat_error[0] = '\0';
+    char *response_data = heap_caps_malloc(16384, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    cJSON *request_json = cJSON_CreateObject();
+    char *request_body = NULL;
+    esp_http_client_handle_t client = NULL;
+    if (!response_data || !request_json) {
+        snprintf(chat_error, sizeof(chat_error), "Out of memory");
+        goto done;
+    }
+
+    cJSON_AddStringToObject(request_json, "message", chat_prompt);
+    if (chat_response_id[0]) cJSON_AddStringToObject(request_json, "previous_response_id", chat_response_id);
+    request_body = cJSON_PrintUnformatted(request_json);
+    if (!request_body) {
+        snprintf(chat_error, sizeof(chat_error), "Could not prepare request");
+        goto done;
+    }
+
+    http_buffer_t buffer = {.data = response_data, .capacity = 16384};
+    esp_http_client_config_t config = {
+        .url = CHAT_RELAY_URL,
+        .event_handler = chat_http_event,
+        .user_data = &buffer,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .timeout_ms = 90000,
+        .buffer_size = 2048,
+    };
+    client = esp_http_client_init(&config);
+    if (!client) {
+        snprintf(chat_error, sizeof(chat_error), "Could not start HTTPS");
+        goto done;
+    }
+
+    char authorization[160];
+    snprintf(authorization, sizeof(authorization), "Bearer %s", CHAT_DEVICE_TOKEN);
+    esp_http_client_set_method(client, HTTP_METHOD_POST);
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_header(client, "Authorization", authorization);
+    esp_http_client_set_post_field(client, request_body, strlen(request_body));
+    esp_err_t error = esp_http_client_perform(client);
+    int status = esp_http_client_get_status_code(client);
+    if (error != ESP_OK || status != 200) {
+        snprintf(chat_error, sizeof(chat_error), "Relay request failed (%d)", status);
+        goto done;
+    }
+
+    cJSON *response_json = cJSON_Parse(response_data);
+    cJSON *text = response_json ? cJSON_GetObjectItemCaseSensitive(response_json, "text") : NULL;
+    cJSON *response_id = response_json ? cJSON_GetObjectItemCaseSensitive(response_json, "response_id") : NULL;
+    if (!cJSON_IsString(text) || !cJSON_IsString(response_id)) {
+        snprintf(chat_error, sizeof(chat_error), "Invalid relay response");
+    } else {
+        snprintf(chat_response, sizeof(chat_response), "%s", text->valuestring);
+        snprintf(chat_response_id, sizeof(chat_response_id), "%s", response_id->valuestring);
+        chat_ok = true;
+    }
+    cJSON_Delete(response_json);
+
+done:
+    if (client) esp_http_client_cleanup(client);
+    cJSON_free(request_body);
+    cJSON_Delete(request_json);
+    free(response_data);
+    chat_busy = false;
+    chat_done = true;
+    }
+}
+
+static void chat_append(const char *role, const char *text)
+{
+    size_t used = strlen(chat_history);
+    size_t needed = strlen(role) + strlen(text) + 5;
+    if (used + needed >= sizeof(chat_history)) {
+        // ponytail: keep only the current window; add persisted transcripts if users need long sessions.
+        snprintf(chat_history, sizeof(chat_history), "(Earlier messages omitted)\n\n");
+        used = strlen(chat_history);
+    }
+    snprintf(chat_history + used, sizeof(chat_history) - used, "%s: %s\n\n", role, text);
+}
+
+static void chat_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    if (!chat_done) return;
+    chat_done = false;
+    if (chat_ok) chat_append("AI", chat_response);
+    else chat_append("Error", chat_error[0] ? chat_error : "Unknown error");
+    lv_textarea_set_text(chat_output, chat_history);
+    lv_textarea_set_cursor_pos(chat_output, LV_TEXTAREA_CURSOR_LAST);
+    lv_label_set_text(chat_status, chat_ok ? "Ready" : "Request failed");
+    lv_obj_remove_state(chat_send_button, LV_STATE_DISABLED);
+}
+
+static void chat_send_clicked(lv_event_t *event)
+{
+    (void)event;
+    if (chat_busy) return;
+    if (!wifi_connected) {
+        lv_label_set_text(chat_status, "Connect to Wi-Fi first");
+        return;
+    }
+    if (!CHAT_RELAY_URL[0] || !CHAT_DEVICE_TOKEN[0]) {
+        lv_label_set_text(chat_status, "Relay is not configured");
+        return;
+    }
+
+    const char *input = lv_textarea_get_text(chat_input);
+    while (isspace((unsigned char)*input)) input++;
+    if (!input[0]) return;
+    snprintf(chat_prompt, sizeof(chat_prompt), "%s", input);
+    chat_append("You", chat_prompt);
+    lv_textarea_set_text(chat_output, chat_history);
+    lv_textarea_set_text(chat_input, "");
+    lv_label_set_text(chat_status, "Thinking...");
+    lv_obj_add_state(chat_send_button, LV_STATE_DISABLED);
+    chat_busy = true;
+    chat_done = false;
+    if (!chat_task && xTaskCreate(chat_request_task, "ai-chat", 16384, NULL, 4, &chat_task) != pdPASS) {
+        chat_busy = false;
+        lv_obj_remove_state(chat_send_button, LV_STATE_DISABLED);
+        lv_label_set_text(chat_status, "Could not start request");
+        return;
+    }
+    xTaskNotifyGive(chat_task);
+}
+
+static void chat_new_clicked(lv_event_t *event)
+{
+    (void)event;
+    if (chat_busy) return;
+    chat_history[0] = '\0';
+    chat_response_id[0] = '\0';
+    lv_textarea_set_text(chat_output, "Ask me anything.");
+    lv_label_set_text(chat_status, "New conversation");
+}
+
 static void clear_content(void)
 {
     if (wifi_timer) {
         lv_timer_delete(wifi_timer);
         wifi_timer = NULL;
     }
+    if (chat_timer) {
+        lv_timer_delete(chat_timer);
+        chat_timer = NULL;
+    }
     wifi_status = NULL;
     wifi_list = NULL;
+    chat_output = NULL;
+    chat_input = NULL;
+    chat_status = NULL;
+    chat_send_button = NULL;
     lv_obj_clean(content);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -632,6 +828,53 @@ static void settings_clicked(lv_event_t *event)
     show_settings();
 }
 
+static void show_chat(void)
+{
+    clear_content();
+    lv_obj_set_style_pad_row(content, 12, 0);
+
+    lv_obj_t *title = lv_label_create(content);
+    lv_label_set_text(title, "AI Chat");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+
+    chat_status = lv_label_create(content);
+    lv_label_set_text(chat_status, chat_busy ? "Thinking..." :
+        (!CHAT_RELAY_URL[0] || !CHAT_DEVICE_TOKEN[0]) ? "Relay is not configured" : "Ready");
+    lv_obj_set_width(chat_status, 640);
+
+    chat_output = lv_textarea_create(content);
+    lv_obj_set_size(chat_output, 640, 360);
+    lv_textarea_set_text(chat_output, chat_history[0] ? chat_history : "Ask me anything.");
+    lv_textarea_set_cursor_pos(chat_output, LV_TEXTAREA_CURSOR_LAST);
+    lv_textarea_set_one_line(chat_output, false);
+
+    chat_input = lv_textarea_create(content);
+    lv_obj_set_size(chat_input, 640, 90);
+    lv_textarea_set_placeholder_text(chat_input, "Message");
+    lv_textarea_set_max_length(chat_input, 2000);
+
+    lv_obj_t *actions = lv_obj_create(content);
+    lv_obj_set_size(actions, 640, 90);
+    lv_obj_set_flex_flow(actions, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(actions, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    chat_send_button = button(actions, "Send", chat_send_clicked);
+    lv_obj_set_height(chat_send_button, 76);
+    lv_obj_t *new_chat = button(actions, "New Chat", chat_new_clicked);
+    lv_obj_set_height(new_chat, 76);
+    if (chat_busy) lv_obj_add_state(chat_send_button, LV_STATE_DISABLED);
+
+    lv_obj_t *keyboard = lv_keyboard_create(content);
+    lv_obj_set_size(keyboard, 640, 390);
+    lv_keyboard_set_textarea(keyboard, chat_input);
+    chat_timer = lv_timer_create(chat_tick, 200, NULL);
+}
+
+static void chat_clicked(lv_event_t *event)
+{
+    (void)event;
+    show_chat();
+}
+
 static void system_clicked(lv_event_t *event)
 {
     (void)event;
@@ -663,6 +906,7 @@ static void show_launcher(void)
     app_icon(content, LV_SYMBOL_PLUS, "Counter", 0xF59E0B, counter_clicked, 2, 0);
     app_icon(content, LV_SYMBOL_SETTINGS, "System", 0x7C4DFF, system_clicked, 0, 1);
     app_icon(content, LV_SYMBOL_WIFI, "Settings", 0x0288D1, settings_clicked, 1, 1);
+    app_icon(content, LV_SYMBOL_ENVELOPE, "AI Chat", 0xE91E63, chat_clicked, 2, 1);
 }
 
 void app_main(void)

@@ -1,0 +1,64 @@
+const OPENAI_URL = "https://api.openai.com/v1/responses";
+const MAX_MESSAGE = 2000;
+
+function reply(body, status = 200) {
+  return Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
+}
+
+function outputText(response) {
+  return (response.output || [])
+    .flatMap((item) => item.content || [])
+    .filter((part) => part.type === "output_text")
+    .map((part) => part.text)
+    .join("");
+}
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/health") return reply({ ok: true });
+    if (request.method !== "POST" || url.pathname !== "/chat") return reply({ error: "Not found" }, 404);
+    if (!env.OPENAI_API_KEY || !env.DEVICE_TOKEN ||
+        request.headers.get("Authorization") !== `Bearer ${env.DEVICE_TOKEN}`) {
+      return reply({ error: "Unauthorized" }, 401);
+    }
+
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return reply({ error: "Invalid JSON" }, 400);
+    }
+    const message = typeof body.message === "string" ? body.message.trim() : "";
+    if (!message || message.length > MAX_MESSAGE) return reply({ error: "Message must be 1-2000 characters" }, 400);
+    if (body.previous_response_id && !/^resp_[A-Za-z0-9_-]+$/.test(body.previous_response_id)) {
+      return reply({ error: "Invalid conversation id" }, 400);
+    }
+
+    const openaiBody = {
+      model: "gpt-5.6-sol",
+      reasoning: { effort: "none" },
+      instructions: "You are a concise, helpful assistant on a small touchscreen device.",
+      input: message,
+      max_output_tokens: 700,
+      store: true,
+    };
+    if (body.previous_response_id) openaiBody.previous_response_id = body.previous_response_id;
+
+    const upstream = await fetch(OPENAI_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(openaiBody),
+    });
+    const response = await upstream.json().catch(() => null);
+    if (!upstream.ok || !response) return reply({ error: "OpenAI request failed" }, 502);
+    const text = outputText(response);
+    if (!text) return reply({ error: "OpenAI returned no text" }, 502);
+    return reply({ text, response_id: response.id });
+  },
+};
+
+export { outputText };

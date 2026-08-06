@@ -1,0 +1,6 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "tab5-openai-relay",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-08-06"
+}
