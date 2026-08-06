@@ -4,10 +4,12 @@
 #include <sys/stat.h>
 
 #include "bsp/esp-bsp.h"
+#include "esp_cache.h"
 #include "esp_chip_info.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_spiffs.h"
+#include "esp_lcd_mipi_dsi.h"
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
 #include "freertos/FreeRTOS.h"
@@ -69,16 +71,13 @@ static bool usb_write_all(const void *data, size_t size)
     return true;
 }
 
-static void send_remote_frame(uint8_t *pixels, uint8_t *encoded)
+static void send_remote_frame(uint8_t *framebuffer, uint8_t *pixels, uint8_t *encoded)
 {
-    lv_draw_buf_t draw_buf;
-    lv_draw_buf_init(&draw_buf, SCREEN_WIDTH, SCREEN_HEIGHT, LV_COLOR_FORMAT_RGB565,
-                     SCREEN_WIDTH * 2, pixels, SCREEN_WIDTH * SCREEN_HEIGHT * 2);
-
+    const size_t pixel_bytes = SCREEN_WIDTH * SCREEN_HEIGHT * 2;
     bsp_display_lock(0);
-    lv_result_t result = lv_snapshot_take_to_draw_buf(lv_screen_active(), LV_COLOR_FORMAT_RGB565, &draw_buf);
+    esp_cache_msync(framebuffer, pixel_bytes, ESP_CACHE_MSYNC_FLAG_DIR_M2C | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+    memcpy(pixels, framebuffer, pixel_bytes);
     bsp_display_unlock();
-    if (result != LV_RESULT_OK) return;
 
     const uint16_t *source = (const uint16_t *)pixels;
     size_t source_count = SCREEN_WIDTH * SCREEN_HEIGHT;
@@ -109,7 +108,10 @@ static void remote_desktop_task(void *argument)
     const size_t pixel_bytes = SCREEN_WIDTH * SCREEN_HEIGHT * 2;
     uint8_t *pixels = heap_caps_malloc(pixel_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     uint8_t *encoded = heap_caps_malloc(pixel_bytes * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!pixels || !encoded) {
+    uint8_t *framebuffer = NULL;
+    esp_err_t frame_error = esp_lcd_dpi_panel_get_frame_buffer(
+        bsp_display_get_panel_handle(), 1, (void **)&framebuffer);
+    if (!pixels || !encoded || frame_error != ESP_OK) {
         ESP_LOGE("tab5-os", "Remote desktop buffer allocation failed");
         vTaskDelete(NULL);
     }
@@ -129,7 +131,8 @@ static void remote_desktop_task(void *argument)
         used = 0;
 
         if (packet[2] == 1) {
-            send_remote_frame(pixels, encoded);
+            send_remote_frame(framebuffer, pixels, encoded);
+            vTaskDelay(pdMS_TO_TICKS(20));
         } else if (packet[2] == 2) {
             uint16_t x, y;
             memcpy(&x, packet + 4, sizeof(x));

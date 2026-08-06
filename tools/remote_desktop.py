@@ -40,13 +40,23 @@ def ppm_from_rle(payload, width, height):
 class Client:
     def __init__(self, port):
         self.serial = serial.Serial(port, timeout=0.1, write_timeout=1)
-        self.commands = queue.Queue()
+        self.write_lock = threading.Lock()
         self.frames = queue.Queue(maxsize=1)
         self.running = True
         threading.Thread(target=self._worker, daemon=True).start()
 
     def send_touch(self, pressed, x, y):
-        self.commands.put(command(2, pressed, x, y))
+        self._write(command(2, pressed, x, y))
+
+    def _write(self, data):
+        try:
+            with self.write_lock:
+                if self.running:
+                    self.serial.write(data)
+            return self.running
+        except serial.SerialException:
+            self.running = False
+            return False
 
     def _read_exact(self, size, deadline):
         data = bytearray()
@@ -78,9 +88,8 @@ class Client:
     def _worker(self):
         time.sleep(2.5)
         while self.running:
-            while not self.commands.empty():
-                self.serial.write(self.commands.get_nowait())
-            self.serial.write(command(1))
+            if not self._write(command(1)):
+                break
             frame = self._read_frame()
             if frame:
                 if self.frames.full():
@@ -89,7 +98,8 @@ class Client:
 
     def close(self):
         self.running = False
-        self.serial.close()
+        with self.write_lock:
+            self.serial.close()
 
 
 def run(port, scale):
