@@ -112,6 +112,9 @@ static lv_obj_t *chat_voice_button;
 static lv_obj_t *chat_voice_label;
 static lv_obj_t *chat_wave;
 static lv_chart_series_t *chat_wave_series;
+static lv_obj_t *chat_keyboard;
+static lv_obj_t *chat_keyboard_label;
+static lv_obj_t *chat_text_label;
 static lv_timer_t *chat_timer;
 static TaskHandle_t chat_task;
 static esp_codec_dev_handle_t voice_mic;
@@ -124,6 +127,8 @@ static volatile bool voice_recording;
 static volatile bool voice_stop_requested;
 static volatile uint16_t voice_level;
 static bool chat_ok;
+static bool chat_keyboard_visible = true;
+static bool chat_large_text;
 static char chat_prompt[2001];
 static char chat_response[8192];
 static char chat_error[96];
@@ -705,6 +710,36 @@ static void chat_new_clicked(lv_event_t *event)
     lv_label_set_text(chat_status, "New conversation");
 }
 
+static void chat_apply_preferences(void)
+{
+    const lv_font_t *font = chat_large_text ? &lv_font_montserrat_28 : &lv_font_montserrat_14;
+    lv_obj_set_style_text_font(chat_output, font, 0);
+    lv_obj_set_style_text_font(chat_input, font, 0);
+    lv_label_set_text(chat_text_label, chat_large_text ? "Text: Large" : "Text: Small");
+    lv_label_set_text(chat_keyboard_label, chat_keyboard_visible ? "Hide keys" : "Show keys");
+    if (chat_keyboard_visible) {
+        lv_obj_remove_flag(chat_keyboard, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_height(chat_output, 230);
+    } else {
+        lv_obj_add_flag(chat_keyboard, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_height(chat_output, 560);
+    }
+}
+
+static void chat_keyboard_clicked(lv_event_t *event)
+{
+    (void)event;
+    chat_keyboard_visible = !chat_keyboard_visible;
+    chat_apply_preferences();
+}
+
+static void chat_text_clicked(lv_event_t *event)
+{
+    (void)event;
+    chat_large_text = !chat_large_text;
+    chat_apply_preferences();
+}
+
 static void clear_content(void)
 {
     if (wifi_timer) {
@@ -725,6 +760,9 @@ static void clear_content(void)
     chat_voice_label = NULL;
     chat_wave = NULL;
     chat_wave_series = NULL;
+    chat_keyboard = NULL;
+    chat_keyboard_label = NULL;
+    chat_text_label = NULL;
     lv_obj_clean(content);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -1093,7 +1131,7 @@ static void show_chat(void)
     chat_wave_series = lv_chart_add_series(chat_wave, lv_color_hex(0x29B6F6), LV_CHART_AXIS_PRIMARY_Y);
 
     chat_output = lv_textarea_create(content);
-    lv_obj_set_size(chat_output, 640, 280);
+    lv_obj_set_size(chat_output, 640, 230);
     lv_textarea_set_text(chat_output, chat_history[0] ? chat_history : "Ask me anything.");
     lv_textarea_set_cursor_pos(chat_output, LV_TEXTAREA_CURSOR_LAST);
     lv_textarea_set_one_line(chat_output, false);
@@ -1105,6 +1143,7 @@ static void show_chat(void)
 
     lv_obj_t *actions = lv_obj_create(content);
     lv_obj_set_size(actions, 640, 90);
+    lv_obj_remove_flag(actions, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(actions, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(actions, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     chat_send_button = button(actions, "Send", chat_send_clicked);
@@ -1119,9 +1158,22 @@ static void show_chat(void)
         if (!voice_recording) lv_obj_add_state(chat_voice_button, LV_STATE_DISABLED);
     }
 
-    lv_obj_t *keyboard = lv_keyboard_create(content);
-    lv_obj_set_size(keyboard, 640, 360);
-    lv_keyboard_set_textarea(keyboard, chat_input);
+    lv_obj_t *controls = lv_obj_create(content);
+    lv_obj_set_size(controls, 640, 64);
+    lv_obj_remove_flag(controls, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(controls, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(controls, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *keyboard_button = button(controls, "Hide keys", chat_keyboard_clicked);
+    lv_obj_set_size(keyboard_button, 290, 54);
+    chat_keyboard_label = lv_obj_get_child(keyboard_button, 0);
+    lv_obj_t *text_button = button(controls, "Text: Small", chat_text_clicked);
+    lv_obj_set_size(text_button, 290, 54);
+    chat_text_label = lv_obj_get_child(text_button, 0);
+
+    chat_keyboard = lv_keyboard_create(content);
+    lv_obj_set_size(chat_keyboard, 640, 330);
+    lv_keyboard_set_textarea(chat_keyboard, chat_input);
+    chat_apply_preferences();
     chat_timer = lv_timer_create(chat_tick, 200, NULL);
 }
 
