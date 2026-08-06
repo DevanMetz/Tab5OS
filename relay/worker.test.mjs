@@ -32,3 +32,27 @@ test("proxies a valid conversation turn", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("transcribes a valid WAV upload", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    assert.equal(url, "https://api.openai.com/v1/audio/transcriptions");
+    assert.equal(init.body.get("model"), "gpt-4o-mini-transcribe");
+    assert.equal(init.body.get("file").type, "audio/wav");
+    return Response.json({ text: "voice works" });
+  };
+  try {
+    const wav = new Uint8Array(44);
+    wav.set(new TextEncoder().encode("RIFF"), 0);
+    wav.set(new TextEncoder().encode("WAVE"), 8);
+    const request = new Request("https://relay/transcribe", {
+      method: "POST",
+      headers: { Authorization: "Bearer device", "Content-Type": "audio/wav" },
+      body: wav,
+    });
+    const response = await worker.fetch(request, env);
+    assert.deepEqual(await response.json(), { text: "voice works" });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

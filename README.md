@@ -53,6 +53,7 @@ The small board-support components in `components/` come from M5Stack's Apache-2
 - [x] Notes, counter, and system apps
 - [x] Wi-Fi settings
 - [x] AI chat client through an authenticated HTTPS relay
+- [x] Five-second microphone transcription for AI chat
 - [x] Application launcher
 - [x] USB remote desktop
 

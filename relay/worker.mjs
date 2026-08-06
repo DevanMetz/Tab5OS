@@ -1,5 +1,7 @@
 const OPENAI_URL = "https://api.openai.com/v1/responses";
+const TRANSCRIBE_URL = "https://api.openai.com/v1/audio/transcriptions";
 const MAX_MESSAGE = 2000;
+const MAX_AUDIO = 400000;
 
 function reply(body, status = 200) {
   return Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
@@ -17,10 +19,35 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/health") return reply({ ok: true });
-    if (request.method !== "POST" || url.pathname !== "/chat") return reply({ error: "Not found" }, 404);
+    if (request.method !== "POST" || !["/chat", "/transcribe"].includes(url.pathname)) {
+      return reply({ error: "Not found" }, 404);
+    }
     if (!env.OPENAI_API_KEY || !env.DEVICE_TOKEN ||
         request.headers.get("Authorization") !== `Bearer ${env.DEVICE_TOKEN}`) {
       return reply({ error: "Unauthorized" }, 401);
+    }
+
+    if (url.pathname === "/transcribe") {
+      const audio = await request.arrayBuffer();
+      const bytes = new Uint8Array(audio);
+      if (!audio.byteLength || audio.byteLength > MAX_AUDIO ||
+          new TextDecoder().decode(bytes.slice(0, 4)) !== "RIFF" ||
+          new TextDecoder().decode(bytes.slice(8, 12)) !== "WAVE") {
+        return reply({ error: "Invalid WAV audio" }, 400);
+      }
+      const form = new FormData();
+      form.append("file", new Blob([audio], { type: "audio/wav" }), "speech.wav");
+      form.append("model", "gpt-4o-mini-transcribe");
+      const upstream = await fetch(TRANSCRIBE_URL, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}` },
+        body: form,
+      });
+      const response = await upstream.json().catch(() => null);
+      if (!upstream.ok || typeof response?.text !== "string") {
+        return reply({ error: "OpenAI transcription failed" }, 502);
+      }
+      return reply({ text: response.text });
     }
 
     let body;

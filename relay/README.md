@@ -11,6 +11,8 @@ npx wrangler deploy --config relay/wrangler.jsonc
 
 The provisioning script creates a device token, uploads it to Cloudflare, and writes the ignored `main/chat_secrets.h` without printing the token. Rebuild and flash the firmware afterward.
 
+The same authenticated Worker also accepts `POST /transcribe` WAV uploads for the tablet's Talk button.
+
 Run the relay check with:
 
 ```powershell

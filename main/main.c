@@ -16,6 +16,7 @@
 #include "esp_spiffs.h"
 #include "esp_wifi.h"
 #include "esp_crt_bundle.h"
+#include "esp_codec_dev.h"
 #include "nvs_flash.h"
 #include "esp_lcd_mipi_dsi.h"
 #include "driver/usb_serial_jtag.h"
@@ -36,6 +37,11 @@
 #define SD_PATH "/sdcard"
 #define SCREEN_WIDTH 720
 #define SCREEN_HEIGHT 1280
+#define VOICE_INPUT_RATE 48000
+#define VOICE_RATE 16000
+#define VOICE_CHANNELS 4
+#define VOICE_MIC_CHANNEL 0
+#define VOICE_SECONDS 5
 
 typedef struct __attribute__((packed)) {
     char magic[4];
@@ -48,6 +54,28 @@ typedef struct __attribute__((packed)) {
     uint32_t payload_size;
     uint32_t frame_number;
 } remote_frame_header_t;
+
+typedef struct __attribute__((packed)) {
+    char riff[4];
+    uint32_t riff_size;
+    char wave[4];
+    char fmt[4];
+    uint32_t fmt_size;
+    uint16_t format;
+    uint16_t channels;
+    uint32_t sample_rate;
+    uint32_t byte_rate;
+    uint16_t block_align;
+    uint16_t bits_per_sample;
+    char data[4];
+    uint32_t data_size;
+} wav_header_t;
+_Static_assert(sizeof(wav_header_t) == 44, "WAV header must be 44 bytes");
+
+typedef enum {
+    CHAT_JOB_MESSAGE,
+    CHAT_JOB_VOICE,
+} chat_job_t;
 
 static lv_obj_t *content;
 static lv_obj_t *note_area;
@@ -75,14 +103,20 @@ static lv_obj_t *wifi_status;
 static lv_obj_t *wifi_list;
 static lv_obj_t *wifi_password_area;
 static lv_timer_t *wifi_timer;
+static TaskHandle_t wifi_connect_task_handle;
 static lv_obj_t *chat_output;
 static lv_obj_t *chat_input;
 static lv_obj_t *chat_status;
 static lv_obj_t *chat_send_button;
+static lv_obj_t *chat_voice_button;
 static lv_timer_t *chat_timer;
 static TaskHandle_t chat_task;
+static esp_codec_dev_handle_t voice_mic;
+static bool voice_mic_open;
 static volatile bool chat_busy;
 static volatile bool chat_done;
+static volatile chat_job_t chat_job;
+static volatile chat_job_t chat_completed_job;
 static bool chat_ok;
 static char chat_prompt[2001];
 static char chat_response[8192];
@@ -105,17 +139,44 @@ typedef struct {
     size_t capacity;
 } http_buffer_t;
 
+static void wifi_connect_task(void *argument)
+{
+    (void)argument;
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        esp_err_t error = ESP_FAIL;
+        for (int attempt = 0; attempt < 3 && wifi_should_connect; ++attempt) {
+            wifi_connecting = true;
+            error = esp_wifi_connect();
+            if (error == ESP_OK) break;
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+        if (error != ESP_OK) {
+            wifi_connecting = false;
+            ESP_LOGE("tab5-os", "Wi-Fi connect failed: %s", esp_err_to_name(error));
+        }
+    }
+}
+
+static bool request_wifi_connect(void)
+{
+    if (!wifi_connect_task_handle &&
+        xTaskCreate(wifi_connect_task, "wifi-connect", 4096, NULL, 4, &wifi_connect_task_handle) != pdPASS) {
+        return false;
+    }
+    xTaskNotifyGive(wifi_connect_task_handle);
+    return true;
+}
+
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START && wifi_should_connect) {
-        wifi_connecting = true;
-        esp_wifi_connect();
+        request_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         wifi_connected = false;
         if (wifi_should_connect && wifi_retries++ < 3) {
-            wifi_connecting = true;
-            esp_wifi_connect();
+            request_wifi_connect();
         } else {
             wifi_connecting = false;
         }
@@ -324,78 +385,169 @@ static esp_err_t chat_http_event(esp_http_client_event_t *event)
     return ESP_OK;
 }
 
+static bool start_voice_mic(void)
+{
+    if (!voice_mic) voice_mic = bsp_audio_codec_microphone_init();
+    if (!voice_mic) {
+        snprintf(chat_error, sizeof(chat_error), "Microphone unavailable");
+        return false;
+    }
+    if (!voice_mic_open) {
+        esp_codec_dev_sample_info_t format = {
+            .sample_rate = VOICE_INPUT_RATE,
+            .channel = VOICE_CHANNELS,
+            .bits_per_sample = 16,
+        };
+        if (esp_codec_dev_open(voice_mic, &format) != ESP_CODEC_DEV_OK) {
+            snprintf(chat_error, sizeof(chat_error), "Could not start microphone");
+            return false;
+        }
+        esp_codec_dev_set_in_gain(voice_mic, 80.0f);
+        voice_mic_open = true;
+    }
+    return true;
+}
+
+static char *capture_voice_wav(size_t *size)
+{
+    if (!start_voice_mic()) return NULL;
+
+    const size_t sample_count = VOICE_SECONDS * VOICE_RATE;
+    const size_t data_size = sample_count * sizeof(int16_t);
+    char *wav = heap_caps_malloc(sizeof(wav_header_t) + data_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!wav) {
+        snprintf(chat_error, sizeof(chat_error), "Out of memory");
+        return NULL;
+    }
+    wav_header_t header = {
+        .riff = {'R', 'I', 'F', 'F'}, .riff_size = 36 + data_size,
+        .wave = {'W', 'A', 'V', 'E'}, .fmt = {'f', 'm', 't', ' '},
+        .fmt_size = 16, .format = 1, .channels = 1,
+        .sample_rate = VOICE_RATE, .byte_rate = VOICE_RATE * sizeof(int16_t),
+        .block_align = sizeof(int16_t), .bits_per_sample = 16,
+        .data = {'d', 'a', 't', 'a'}, .data_size = data_size,
+    };
+    memcpy(wav, &header, sizeof(header));
+
+    int16_t raw[VOICE_CHANNELS * 3 * 160];
+    int16_t *pcm = (int16_t *)(wav + sizeof(header));
+    for (size_t written = 0; written < sample_count;) {
+        size_t count = sample_count - written;
+        if (count > 160) count = 160;
+        size_t raw_bytes = count * 3 * VOICE_CHANNELS * sizeof(int16_t);
+        if (esp_codec_dev_read(voice_mic, raw, raw_bytes) != ESP_CODEC_DEV_OK) {
+            snprintf(chat_error, sizeof(chat_error), "Microphone read failed");
+            free(wav);
+            return NULL;
+        }
+        for (size_t i = 0; i < count; ++i) {
+            int32_t sum = 0;
+            for (size_t j = 0; j < 3; ++j) sum += raw[(i * 3 + j) * VOICE_CHANNELS + VOICE_MIC_CHANNEL];
+            pcm[written + i] = sum / 3;
+        }
+        written += count;
+    }
+    *size = sizeof(header) + data_size;
+    return wav;
+}
+
 static void chat_request_task(void *argument)
 {
     (void)argument;
     // ponytail: keep the worker alive; ESP-IDF rejects its PSRAM-linked pthread cleanup callback on deletion.
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        chat_job_t job = chat_job;
         chat_ok = false;
         chat_error[0] = '\0';
-    char *response_data = heap_caps_malloc(16384, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    cJSON *request_json = cJSON_CreateObject();
-    char *request_body = NULL;
-    esp_http_client_handle_t client = NULL;
-    if (!response_data || !request_json) {
-        snprintf(chat_error, sizeof(chat_error), "Out of memory");
-        goto done;
-    }
+        char *response_data = heap_caps_malloc(16384, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        cJSON *request_json = NULL;
+        char *request_body = NULL;
+        size_t request_size = 0;
+        esp_http_client_handle_t client = NULL;
+        char url[192];
+        snprintf(url, sizeof(url), "%s", CHAT_RELAY_URL);
+        if (!response_data) {
+            snprintf(chat_error, sizeof(chat_error), "Out of memory");
+            goto done;
+        }
 
-    cJSON_AddStringToObject(request_json, "message", chat_prompt);
-    if (chat_response_id[0]) cJSON_AddStringToObject(request_json, "previous_response_id", chat_response_id);
-    request_body = cJSON_PrintUnformatted(request_json);
-    if (!request_body) {
-        snprintf(chat_error, sizeof(chat_error), "Could not prepare request");
-        goto done;
-    }
+        if (job == CHAT_JOB_VOICE) {
+            char *path = strrchr(url, '/');
+            if (!path || sizeof(url) - (size_t)(path - url) < sizeof("/transcribe")) {
+                snprintf(chat_error, sizeof(chat_error), "Invalid relay URL");
+                goto done;
+            }
+            snprintf(path, sizeof(url) - (size_t)(path - url), "/transcribe");
+            request_body = capture_voice_wav(&request_size);
+        } else {
+            request_json = cJSON_CreateObject();
+            if (request_json) {
+                cJSON_AddStringToObject(request_json, "message", chat_prompt);
+                if (chat_response_id[0]) {
+                    cJSON_AddStringToObject(request_json, "previous_response_id", chat_response_id);
+                }
+                request_body = cJSON_PrintUnformatted(request_json);
+                if (request_body) request_size = strlen(request_body);
+            }
+        }
+        if (!request_body) {
+            if (!chat_error[0]) snprintf(chat_error, sizeof(chat_error), "Could not prepare request");
+            goto done;
+        }
 
-    http_buffer_t buffer = {.data = response_data, .capacity = 16384};
-    esp_http_client_config_t config = {
-        .url = CHAT_RELAY_URL,
-        .event_handler = chat_http_event,
-        .user_data = &buffer,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = 90000,
-        .buffer_size = 2048,
-    };
-    client = esp_http_client_init(&config);
-    if (!client) {
-        snprintf(chat_error, sizeof(chat_error), "Could not start HTTPS");
-        goto done;
-    }
+        http_buffer_t buffer = {.data = response_data, .capacity = 16384};
+        esp_http_client_config_t config = {
+            .url = url,
+            .event_handler = chat_http_event,
+            .user_data = &buffer,
+            .crt_bundle_attach = esp_crt_bundle_attach,
+            .timeout_ms = 90000,
+            .buffer_size = 2048,
+        };
+        client = esp_http_client_init(&config);
+        if (!client) {
+            snprintf(chat_error, sizeof(chat_error), "Could not start HTTPS");
+            goto done;
+        }
 
-    char authorization[160];
-    snprintf(authorization, sizeof(authorization), "Bearer %s", CHAT_DEVICE_TOKEN);
-    esp_http_client_set_method(client, HTTP_METHOD_POST);
-    esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_header(client, "Authorization", authorization);
-    esp_http_client_set_post_field(client, request_body, strlen(request_body));
-    esp_err_t error = esp_http_client_perform(client);
-    int status = esp_http_client_get_status_code(client);
-    if (error != ESP_OK || status != 200) {
-        snprintf(chat_error, sizeof(chat_error), "Relay request failed (%d)", status);
-        goto done;
-    }
+        char authorization[160];
+        snprintf(authorization, sizeof(authorization), "Bearer %s", CHAT_DEVICE_TOKEN);
+        esp_http_client_set_method(client, HTTP_METHOD_POST);
+        esp_http_client_set_header(client, "Content-Type", job == CHAT_JOB_VOICE ? "audio/wav" : "application/json");
+        esp_http_client_set_header(client, "Authorization", authorization);
+        esp_http_client_set_post_field(client, request_body, request_size);
+        esp_err_t error = esp_http_client_perform(client);
+        int status = esp_http_client_get_status_code(client);
+        if (error != ESP_OK || status != 200) {
+            snprintf(chat_error, sizeof(chat_error), "Relay request failed (%d)", status);
+            goto done;
+        }
 
-    cJSON *response_json = cJSON_Parse(response_data);
-    cJSON *text = response_json ? cJSON_GetObjectItemCaseSensitive(response_json, "text") : NULL;
-    cJSON *response_id = response_json ? cJSON_GetObjectItemCaseSensitive(response_json, "response_id") : NULL;
-    if (!cJSON_IsString(text) || !cJSON_IsString(response_id)) {
-        snprintf(chat_error, sizeof(chat_error), "Invalid relay response");
-    } else {
-        snprintf(chat_response, sizeof(chat_response), "%s", text->valuestring);
-        snprintf(chat_response_id, sizeof(chat_response_id), "%s", response_id->valuestring);
-        chat_ok = true;
-    }
-    cJSON_Delete(response_json);
+        cJSON *response_json = cJSON_Parse(response_data);
+        cJSON *text = response_json ? cJSON_GetObjectItemCaseSensitive(response_json, "text") : NULL;
+        cJSON *response_id = response_json ? cJSON_GetObjectItemCaseSensitive(response_json, "response_id") : NULL;
+        if (!cJSON_IsString(text) || (job == CHAT_JOB_MESSAGE && !cJSON_IsString(response_id))) {
+            snprintf(chat_error, sizeof(chat_error), "Invalid relay response");
+        } else if (!text->valuestring[0]) {
+            snprintf(chat_error, sizeof(chat_error), "No speech heard");
+        } else {
+            snprintf(chat_response, sizeof(chat_response), "%s", text->valuestring);
+            if (job == CHAT_JOB_MESSAGE) {
+                snprintf(chat_response_id, sizeof(chat_response_id), "%s", response_id->valuestring);
+            }
+            chat_ok = true;
+        }
+        cJSON_Delete(response_json);
 
 done:
-    if (client) esp_http_client_cleanup(client);
-    cJSON_free(request_body);
-    cJSON_Delete(request_json);
-    free(response_data);
-    chat_busy = false;
-    chat_done = true;
+        if (client) esp_http_client_cleanup(client);
+        free(request_body);
+        cJSON_Delete(request_json);
+        free(response_data);
+        chat_completed_job = job;
+        chat_busy = false;
+        chat_done = true;
     }
 }
 
@@ -416,12 +568,33 @@ static void chat_tick(lv_timer_t *timer)
     (void)timer;
     if (!chat_done) return;
     chat_done = false;
-    if (chat_ok) chat_append("AI", chat_response);
-    else chat_append("Error", chat_error[0] ? chat_error : "Unknown error");
-    lv_textarea_set_text(chat_output, chat_history);
-    lv_textarea_set_cursor_pos(chat_output, LV_TEXTAREA_CURSOR_LAST);
-    lv_label_set_text(chat_status, chat_ok ? "Ready" : "Request failed");
+    if (chat_completed_job == CHAT_JOB_VOICE) {
+        if (chat_ok) lv_textarea_set_text(chat_input, chat_response);
+        lv_label_set_text(chat_status, chat_ok ? "Ready to send" :
+            (chat_error[0] ? chat_error : "Transcription failed"));
+    } else {
+        if (chat_ok) chat_append("AI", chat_response);
+        else chat_append("Error", chat_error[0] ? chat_error : "Unknown error");
+        lv_textarea_set_text(chat_output, chat_history);
+        lv_textarea_set_cursor_pos(chat_output, LV_TEXTAREA_CURSOR_LAST);
+        lv_label_set_text(chat_status, chat_ok ? "Ready" : "Request failed");
+    }
     lv_obj_remove_state(chat_send_button, LV_STATE_DISABLED);
+    lv_obj_remove_state(chat_voice_button, LV_STATE_DISABLED);
+}
+
+static bool chat_start_job(chat_job_t job)
+{
+    chat_job = job;
+    chat_busy = true;
+    chat_done = false;
+    if (!chat_task && xTaskCreateWithCaps(chat_request_task, "ai-chat", 16384, NULL, 4, &chat_task,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+        chat_busy = false;
+        return false;
+    }
+    xTaskNotifyGive(chat_task);
+    return true;
 }
 
 static void chat_send_clicked(lv_event_t *event)
@@ -446,15 +619,34 @@ static void chat_send_clicked(lv_event_t *event)
     lv_textarea_set_text(chat_input, "");
     lv_label_set_text(chat_status, "Thinking...");
     lv_obj_add_state(chat_send_button, LV_STATE_DISABLED);
-    chat_busy = true;
-    chat_done = false;
-    if (!chat_task && xTaskCreate(chat_request_task, "ai-chat", 16384, NULL, 4, &chat_task) != pdPASS) {
-        chat_busy = false;
+    lv_obj_add_state(chat_voice_button, LV_STATE_DISABLED);
+    if (!chat_start_job(CHAT_JOB_MESSAGE)) {
         lv_obj_remove_state(chat_send_button, LV_STATE_DISABLED);
+        lv_obj_remove_state(chat_voice_button, LV_STATE_DISABLED);
         lv_label_set_text(chat_status, "Could not start request");
+    }
+}
+
+static void chat_voice_clicked(lv_event_t *event)
+{
+    (void)event;
+    if (chat_busy) return;
+    if (!wifi_connected) {
+        lv_label_set_text(chat_status, "Connect to Wi-Fi first");
         return;
     }
-    xTaskNotifyGive(chat_task);
+    if (!CHAT_RELAY_URL[0] || !CHAT_DEVICE_TOKEN[0]) {
+        lv_label_set_text(chat_status, "Relay is not configured");
+        return;
+    }
+    lv_label_set_text(chat_status, "Listening for 5 seconds...");
+    lv_obj_add_state(chat_send_button, LV_STATE_DISABLED);
+    lv_obj_add_state(chat_voice_button, LV_STATE_DISABLED);
+    if (!chat_start_job(CHAT_JOB_VOICE)) {
+        lv_obj_remove_state(chat_send_button, LV_STATE_DISABLED);
+        lv_obj_remove_state(chat_voice_button, LV_STATE_DISABLED);
+        lv_label_set_text(chat_status, "Could not start microphone");
+    }
 }
 
 static void chat_new_clicked(lv_event_t *event)
@@ -483,6 +675,7 @@ static void clear_content(void)
     chat_input = NULL;
     chat_status = NULL;
     chat_send_button = NULL;
+    chat_voice_button = NULL;
     lv_obj_clean(content);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -717,8 +910,7 @@ static void wifi_connect_clicked(lv_event_t *event)
         snprintf(wifi_ssid, sizeof(wifi_ssid), "%s", selected_ssid);
         wifi_retries = 0;
         wifi_should_connect = true;
-        wifi_connecting = true;
-        error = esp_wifi_connect();
+        error = request_wifi_connect() ? ESP_OK : ESP_FAIL;
     }
     if (error != ESP_OK) {
         wifi_connecting = false;
@@ -838,7 +1030,7 @@ static void show_chat(void)
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
 
     chat_status = lv_label_create(content);
-    lv_label_set_text(chat_status, chat_busy ? "Thinking..." :
+    lv_label_set_text(chat_status, chat_busy ? (chat_job == CHAT_JOB_VOICE ? "Listening..." : "Thinking...") :
         (!CHAT_RELAY_URL[0] || !CHAT_DEVICE_TOKEN[0]) ? "Relay is not configured" : "Ready");
     lv_obj_set_width(chat_status, 640);
 
@@ -858,10 +1050,15 @@ static void show_chat(void)
     lv_obj_set_flex_flow(actions, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(actions, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     chat_send_button = button(actions, "Send", chat_send_clicked);
-    lv_obj_set_height(chat_send_button, 76);
-    lv_obj_t *new_chat = button(actions, "New Chat", chat_new_clicked);
-    lv_obj_set_height(new_chat, 76);
-    if (chat_busy) lv_obj_add_state(chat_send_button, LV_STATE_DISABLED);
+    lv_obj_set_size(chat_send_button, 180, 76);
+    chat_voice_button = button(actions, "Talk", chat_voice_clicked);
+    lv_obj_set_size(chat_voice_button, 180, 76);
+    lv_obj_t *new_chat = button(actions, "New", chat_new_clicked);
+    lv_obj_set_size(new_chat, 180, 76);
+    if (chat_busy) {
+        lv_obj_add_state(chat_send_button, LV_STATE_DISABLED);
+        lv_obj_add_state(chat_voice_button, LV_STATE_DISABLED);
+    }
 
     lv_obj_t *keyboard = lv_keyboard_create(content);
     lv_obj_set_size(keyboard, 640, 390);
@@ -922,6 +1119,7 @@ void app_main(void)
     sd_ready = bsp_sdcard_init(SD_PATH, 5) == ESP_OK;
 
     lv_display_t *display = bsp_display_start();
+    if (!start_voice_mic()) ESP_LOGW("tab5-os", "%s", chat_error);
     bsp_display_lock(0);
 
     lv_obj_t *screen = lv_screen_active();
