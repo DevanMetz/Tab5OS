@@ -6,9 +6,13 @@
 #include "bsp/esp-bsp.h"
 #include "esp_cache.h"
 #include "esp_chip_info.h"
+#include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_netif.h"
 #include "esp_spiffs.h"
+#include "esp_wifi.h"
+#include "nvs_flash.h"
 #include "esp_lcd_mipi_dsi.h"
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
@@ -42,6 +46,23 @@ static int counter;
 static char current_directory[256];
 static char file_paths[64][256];
 static size_t file_path_count;
+static bool wifi_ready;
+static volatile bool wifi_connecting;
+static volatile bool wifi_connected;
+static volatile bool wifi_scan_busy;
+static volatile bool wifi_scan_done;
+static esp_err_t wifi_scan_error;
+static unsigned wifi_retries;
+static bool wifi_should_connect;
+static char wifi_ssid[33];
+static char wifi_ip[16];
+static char selected_ssid[33];
+static wifi_ap_record_t wifi_aps[12];
+static uint16_t wifi_ap_count;
+static lv_obj_t *wifi_status;
+static lv_obj_t *wifi_list;
+static lv_obj_t *wifi_password_area;
+static lv_timer_t *wifi_timer;
 static volatile int16_t remote_x;
 static volatile int16_t remote_y;
 static volatile bool remote_pressed;
@@ -49,6 +70,57 @@ static uint32_t remote_frame_number;
 
 static void show_launcher(void);
 static void show_files(const char *path);
+static void show_settings(void);
+
+static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START && wifi_should_connect) {
+        wifi_connecting = true;
+        esp_wifi_connect();
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        wifi_connected = false;
+        if (wifi_should_connect && wifi_retries++ < 3) {
+            wifi_connecting = true;
+            esp_wifi_connect();
+        } else {
+            wifi_connecting = false;
+        }
+    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t *event = data;
+        snprintf(wifi_ip, sizeof(wifi_ip), IPSTR, IP2STR(&event->ip_info.ip));
+        wifi_retries = 0;
+        wifi_connecting = false;
+        wifi_connected = true;
+    }
+}
+
+static bool start_wifi(void)
+{
+    esp_err_t error = nvs_flash_init();
+    if (error == ESP_ERR_NVS_NO_FREE_PAGES || error == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        error = nvs_flash_init();
+    }
+    if (error != ESP_OK || esp_netif_init() != ESP_OK ||
+        esp_event_loop_create_default() != ESP_OK || !esp_netif_create_default_wifi_sta()) return false;
+
+    wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
+    if (esp_wifi_init(&init) != ESP_OK ||
+        esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event, NULL) != ESP_OK ||
+        esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event, NULL) != ESP_OK ||
+        esp_wifi_set_storage(WIFI_STORAGE_FLASH) != ESP_OK ||
+        esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK) return false;
+
+    wifi_config_t saved = {0};
+    if (esp_wifi_get_config(WIFI_IF_STA, &saved) == ESP_OK) {
+        snprintf(wifi_ssid, sizeof(wifi_ssid), "%s", (char *)saved.sta.ssid);
+        wifi_should_connect = wifi_ssid[0] != '\0';
+    }
+    error = esp_wifi_start();
+    if (error != ESP_OK) ESP_LOGE("tab5-os", "Wi-Fi start failed: %s", esp_err_to_name(error));
+    return error == ESP_OK;
+}
 
 static void remote_pointer_read(lv_indev_t *indev, lv_indev_data_t *data)
 {
@@ -209,6 +281,12 @@ static void app_icon(lv_obj_t *parent, const char *symbol, const char *name,
 
 static void clear_content(void)
 {
+    if (wifi_timer) {
+        lv_timer_delete(wifi_timer);
+        wifi_timer = NULL;
+    }
+    wifi_status = NULL;
+    wifi_list = NULL;
     lv_obj_clean(content);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -403,6 +481,157 @@ static void counter_clicked(lv_event_t *event)
     button(content, "Reset", counter_reset);
 }
 
+static void wifi_scan_task(void *argument)
+{
+    (void)argument;
+    wifi_scan_error = esp_wifi_scan_start(NULL, true);
+    wifi_ap_count = 12;
+    if (wifi_scan_error == ESP_OK) wifi_scan_error = esp_wifi_scan_get_ap_records(&wifi_ap_count, wifi_aps);
+    else wifi_ap_count = 0;
+    wifi_scan_busy = false;
+    wifi_scan_done = true;
+    vTaskDelete(NULL);
+}
+
+static void wifi_scan_clicked(lv_event_t *event)
+{
+    (void)event;
+    if (!wifi_ready || wifi_scan_busy) return;
+    wifi_scan_busy = true;
+    wifi_scan_done = false;
+    lv_obj_clean(wifi_list);
+    lv_list_add_text(wifi_list, "Scanning...");
+    if (xTaskCreate(wifi_scan_task, "wifi-scan", 4096, NULL, 4, NULL) != pdPASS) {
+        wifi_scan_busy = false;
+        lv_obj_clean(wifi_list);
+        lv_list_add_text(wifi_list, "Could not start scan");
+    }
+}
+
+static void wifi_connect_clicked(lv_event_t *event)
+{
+    (void)event;
+    wifi_config_t config = {0};
+    memcpy(config.sta.ssid, selected_ssid, strnlen(selected_ssid, sizeof(config.sta.ssid)));
+    snprintf((char *)config.sta.password, sizeof(config.sta.password), "%s", lv_textarea_get_text(wifi_password_area));
+    wifi_should_connect = false;
+    esp_wifi_disconnect();
+    esp_err_t error = esp_wifi_set_config(WIFI_IF_STA, &config);
+    if (error == ESP_OK) {
+        snprintf(wifi_ssid, sizeof(wifi_ssid), "%s", selected_ssid);
+        wifi_retries = 0;
+        wifi_should_connect = true;
+        wifi_connecting = true;
+        error = esp_wifi_connect();
+    }
+    if (error != ESP_OK) {
+        wifi_connecting = false;
+        ESP_LOGE("tab5-os", "Wi-Fi connect failed: %s", esp_err_to_name(error));
+    }
+    show_settings();
+}
+
+static void wifi_network_clicked(lv_event_t *event)
+{
+    wifi_ap_record_t *ap = lv_event_get_user_data(event);
+    snprintf(selected_ssid, sizeof(selected_ssid), "%s", (char *)ap->ssid);
+    clear_content();
+
+    lv_obj_t *title = lv_label_create(content);
+    lv_label_set_text_fmt(title, "Connect to\n%s", selected_ssid);
+    lv_obj_set_width(title, 640);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+
+    wifi_password_area = lv_textarea_create(content);
+    lv_obj_set_size(wifi_password_area, 640, 100);
+    lv_textarea_set_placeholder_text(wifi_password_area, "Wi-Fi password (blank for open networks)");
+    lv_textarea_set_password_mode(wifi_password_area, true);
+    lv_textarea_set_max_length(wifi_password_area, 63);
+    lv_textarea_set_one_line(wifi_password_area, true);
+    button(content, "Connect", wifi_connect_clicked);
+
+    lv_obj_t *keyboard = lv_keyboard_create(content);
+    lv_obj_set_size(keyboard, 640, 540);
+    lv_keyboard_set_textarea(keyboard, wifi_password_area);
+}
+
+static void wifi_forget_clicked(lv_event_t *event)
+{
+    (void)event;
+    if (!wifi_ready) return;
+    wifi_config_t empty = {0};
+    wifi_should_connect = false;
+    wifi_connecting = false;
+    wifi_connected = false;
+    wifi_ssid[0] = '\0';
+    wifi_ip[0] = '\0';
+    esp_wifi_disconnect();
+    esp_wifi_set_config(WIFI_IF_STA, &empty);
+}
+
+static void wifi_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    if (!wifi_ready) lv_label_set_text(wifi_status, "Wi-Fi hardware unavailable");
+    else if (wifi_connected) lv_label_set_text_fmt(wifi_status, "Connected: %s\nIP: %s", wifi_ssid, wifi_ip);
+    else if (wifi_connecting) lv_label_set_text_fmt(wifi_status, "Connecting to %s...", wifi_ssid);
+    else if (wifi_ssid[0]) lv_label_set_text_fmt(wifi_status, "Not connected: %s", wifi_ssid);
+    else lv_label_set_text(wifi_status, "Not connected");
+
+    if (!wifi_scan_done) return;
+    wifi_scan_done = false;
+    lv_obj_clean(wifi_list);
+    if (wifi_scan_error != ESP_OK) {
+        lv_list_add_text(wifi_list, "Scan failed - try again");
+        return;
+    }
+    if (!wifi_ap_count) {
+        lv_list_add_text(wifi_list, "No networks found");
+        return;
+    }
+    for (uint16_t i = 0; i < wifi_ap_count; i++) {
+        char label[96];
+        snprintf(label, sizeof(label), "%s   %d dBm%s", wifi_aps[i].ssid, wifi_aps[i].rssi,
+                 wifi_aps[i].authmode == WIFI_AUTH_OPEN ? "" : "   locked");
+        lv_obj_t *network = lv_list_add_button(wifi_list, LV_SYMBOL_WIFI, label);
+        lv_obj_add_event_cb(network, wifi_network_clicked, LV_EVENT_CLICKED, &wifi_aps[i]);
+    }
+}
+
+static void show_settings(void)
+{
+    clear_content();
+    lv_obj_t *title = lv_label_create(content);
+    lv_label_set_text(title, "Wi-Fi Settings");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+
+    wifi_status = lv_label_create(content);
+    lv_obj_set_size(wifi_status, 640, 75);
+
+    lv_obj_t *actions = lv_obj_create(content);
+    lv_obj_set_size(actions, 640, 100);
+    lv_obj_set_flex_flow(actions, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(actions, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *scan = button(actions, "Scan", wifi_scan_clicked);
+    lv_obj_t *forget = button(actions, "Forget", wifi_forget_clicked);
+
+    wifi_list = lv_list_create(content);
+    lv_obj_set_size(wifi_list, 640, 800);
+    lv_list_add_text(wifi_list, wifi_ready ? "Tap Scan to find networks" : "Wi-Fi hardware unavailable");
+    if (!wifi_ready) {
+        lv_obj_add_state(scan, LV_STATE_DISABLED);
+        lv_obj_add_state(forget, LV_STATE_DISABLED);
+    }
+    wifi_timer = lv_timer_create(wifi_tick, 250, NULL);
+    wifi_tick(wifi_timer);
+}
+
+static void settings_clicked(lv_event_t *event)
+{
+    (void)event;
+    show_settings();
+}
+
 static void system_clicked(lv_event_t *event)
 {
     (void)event;
@@ -433,6 +662,7 @@ static void show_launcher(void)
     app_icon(content, LV_SYMBOL_EDIT, "Notes", 0x00A896, notes_clicked, 1, 0);
     app_icon(content, LV_SYMBOL_PLUS, "Counter", 0xF59E0B, counter_clicked, 2, 0);
     app_icon(content, LV_SYMBOL_SETTINGS, "System", 0x7C4DFF, system_clicked, 0, 1);
+    app_icon(content, LV_SYMBOL_WIFI, "Settings", 0x0288D1, settings_clicked, 1, 1);
 }
 
 void app_main(void)
@@ -441,6 +671,8 @@ void app_main(void)
     ESP_ERROR_CHECK(bsp_i2c_init());
     bsp_io_expander_pi4ioe_init(bsp_i2c_get_handle());
     vTaskDelay(pdMS_TO_TICKS(300));
+
+    wifi_ready = start_wifi();
 
     internal_ready = mount_internal();
     sd_ready = bsp_sdcard_init(SD_PATH, 5) == ESP_OK;
