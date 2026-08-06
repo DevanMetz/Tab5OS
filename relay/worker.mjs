@@ -15,6 +15,18 @@ function outputText(response) {
     .join("");
 }
 
+function tabletText(text) {
+  return text
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2013\u2014]/g, "-")
+    .replace(/\u2026/g, "...")
+    .replace(/\u2022/g, "*")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\x09\x0A\x0D\x20-\x7E]+/gu, "?");
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -47,7 +59,7 @@ export default {
       if (!upstream.ok || typeof response?.text !== "string") {
         return reply({ error: "OpenAI transcription failed" }, 502);
       }
-      return reply({ text: response.text });
+      return reply({ text: tabletText(response.text) });
     }
 
     let body;
@@ -63,9 +75,9 @@ export default {
     }
 
     const openaiBody = {
-      model: "gpt-5.6-sol",
-      reasoning: { effort: "none" },
-      instructions: "You are a concise, helpful assistant on a small touchscreen device.",
+      model: "gpt-5.6-luna",
+      reasoning: { effort: "high" },
+      instructions: "You are a concise, helpful assistant on a small touchscreen device. Use plain ASCII text; avoid emoji and typographic punctuation.",
       input: message,
       max_output_tokens: 700,
       store: true,
@@ -82,10 +94,10 @@ export default {
     });
     const response = await upstream.json().catch(() => null);
     if (!upstream.ok || !response) return reply({ error: "OpenAI request failed" }, 502);
-    const text = outputText(response);
+    const text = tabletText(outputText(response));
     if (!text) return reply({ error: "OpenAI returned no text" }, 502);
     return reply({ text, response_id: response.id });
   },
 };
 
-export { outputText };
+export { outputText, tabletText };

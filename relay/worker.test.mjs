@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import worker, { outputText } from "./worker.mjs";
+import worker, { outputText, tabletText } from "./worker.mjs";
 
 const env = { OPENAI_API_KEY: "openai", DEVICE_TOKEN: "device" };
 
 test("extracts assistant text", () => {
   assert.equal(outputText({ output: [{ content: [{ type: "output_text", text: "hello" }] }] }), "hello");
+});
+
+test("converts unsupported tablet glyphs", () => {
+  assert.equal(tabletText("caf\u00e9 \u2014 \u201chello\u201d \ud83d\ude80"), 'cafe - "hello" ?');
 });
 
 test("rejects unauthorized clients", async () => {
@@ -18,6 +22,8 @@ test("proxies a valid conversation turn", async () => {
   globalThis.fetch = async (_url, init) => {
     const body = JSON.parse(init.body);
     assert.equal(body.previous_response_id, "resp_previous");
+    assert.equal(body.model, "gpt-5.6-luna");
+    assert.equal(body.reasoning.effort, "high");
     return Response.json({ id: "resp_next", output: [{ content: [{ type: "output_text", text: "Hi!" }] }] });
   };
   try {
