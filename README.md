@@ -1,6 +1,6 @@
 # Tab5 OS
 
-A small, open operating environment for the M5Stack Tab5. It currently boots an LVGL home screen and verifies the display, touch controller, and ESP32-P4 runtime.
+A small, open operating environment for the M5Stack Tab5. It boots an LVGL launcher with a file browser and basic apps.
 
 ## Hardware
 
@@ -30,9 +30,10 @@ The small board-support components in `components/` come from M5Stack's Apache-2
 - [x] ESP32-P4 boot
 - [x] Display and backlight
 - [x] Touch input
-- [ ] Storage and file browser
+- [x] SPIFFS/microSD file browser
+- [x] Notes, counter, and system apps
 - [ ] Wi-Fi settings
-- [ ] Application launcher
+- [x] Application launcher
 
 ## License
 
