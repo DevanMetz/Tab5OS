@@ -300,14 +300,14 @@ static void files_clicked(lv_event_t *event)
 static void save_note(lv_event_t *event)
 {
     lv_obj_t *status = lv_event_get_user_data(event);
-    FILE *file = fopen(INTERNAL_PATH "/note.txt", "wb");
+    FILE *file = fopen(SD_PATH "/DOCS/NOTE.TXT", "wb");
     if (!file) {
         lv_label_set_text(status, "Save failed");
         return;
     }
     fputs(lv_textarea_get_text(note_area), file);
     fclose(file);
-    lv_label_set_text(status, "Saved to /spiffs/note.txt");
+    lv_label_set_text(status, "Saved to /sdcard/DOCS/NOTE.TXT");
 }
 
 static void notes_clicked(lv_event_t *event)
@@ -320,17 +320,17 @@ static void notes_clicked(lv_event_t *event)
     lv_obj_set_size(row, 640, 70);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     lv_obj_t *status = lv_label_create(row);
-    lv_label_set_text(status, internal_ready ? "Notes" : "Internal storage unavailable");
+    lv_label_set_text(status, sd_ready ? "Notes" : "SD card unavailable");
     lv_obj_set_flex_grow(status, 1);
     lv_obj_t *save = lv_button_create(row);
     lv_obj_add_event_cb(save, save_note, LV_EVENT_CLICKED, status);
     lv_obj_t *save_label = lv_label_create(save);
     lv_label_set_text(save_label, "Save");
     lv_obj_center(save_label);
-    if (!internal_ready) lv_obj_add_state(save, LV_STATE_DISABLED);
+    if (!sd_ready) lv_obj_add_state(save, LV_STATE_DISABLED);
 
     static char note[2048];
-    FILE *file = fopen(INTERNAL_PATH "/note.txt", "rb");
+    FILE *file = fopen(SD_PATH "/DOCS/NOTE.TXT", "rb");
     size_t read = file ? fread(note, 1, sizeof(note) - 1, file) : 0;
     if (file) fclose(file);
     note[read] = '\0';
