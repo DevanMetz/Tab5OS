@@ -26,6 +26,16 @@ For faster Windows iteration, put the ESP-IDF directory in `.idf-path`, then use
 
 Use `-Full` after bootloader or partition-table changes. Normal source edits retain the build tree, use project-local ccache with four jobs, and flash only the app partition.
 
+## USB remote desktop
+
+With Tab5 OS running over USB:
+
+```powershell
+python .\tools\remote_desktop.py --port COM7
+```
+
+The window mirrors the display at half size and sends clicks and drags back as touch input. Pass `--scale 1` for full size.
+
 Hold the Tab5 reset button until its green LED flashes rapidly before flashing. Use `Ctrl+]` to exit the monitor.
 
 The checked-in defaults include M5Stack's required QIO, 200 MHz PSRAM, and L2-cache settings. Removing them causes MIPI display underruns on the 720p panel.
@@ -43,6 +53,7 @@ The small board-support components in `components/` come from M5Stack's Apache-2
 - [x] Notes, counter, and system apps
 - [ ] Wi-Fi settings
 - [x] Application launcher
+- [x] USB remote desktop
 
 ## License
 

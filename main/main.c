@@ -8,12 +8,28 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_spiffs.h"
+#include "driver/usb_serial_jtag.h"
+#include "driver/usb_serial_jtag_vfs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
 
 #define INTERNAL_PATH BSP_SPIFFS_MOUNT_POINT
 #define SD_PATH "/sdcard"
+#define SCREEN_WIDTH 720
+#define SCREEN_HEIGHT 1280
+
+typedef struct __attribute__((packed)) {
+    char magic[4];
+    uint8_t version;
+    uint8_t type;
+    uint8_t encoding;
+    uint8_t reserved;
+    uint16_t width;
+    uint16_t height;
+    uint32_t payload_size;
+    uint32_t frame_number;
+} remote_frame_header_t;
 
 static lv_obj_t *content;
 static lv_obj_t *note_area;
@@ -24,9 +40,119 @@ static int counter;
 static char current_directory[256];
 static char file_paths[64][256];
 static size_t file_path_count;
+static volatile int16_t remote_x;
+static volatile int16_t remote_y;
+static volatile bool remote_pressed;
+static uint32_t remote_frame_number;
 
 static void show_launcher(void);
 static void show_files(const char *path);
+
+static void remote_pointer_read(lv_indev_t *indev, lv_indev_data_t *data)
+{
+    (void)indev;
+    data->point.x = remote_x;
+    data->point.y = remote_y;
+    data->state = remote_pressed ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+}
+
+static bool usb_write_all(const void *data, size_t size)
+{
+    const uint8_t *bytes = data;
+    while (size) {
+        size_t chunk = size < 4096 ? size : 4096;
+        int written = usb_serial_jtag_write_bytes(bytes, chunk, pdMS_TO_TICKS(2000));
+        if (written <= 0) return false;
+        bytes += written;
+        size -= written;
+    }
+    return true;
+}
+
+static void send_remote_frame(uint8_t *pixels, uint8_t *encoded)
+{
+    lv_draw_buf_t draw_buf;
+    lv_draw_buf_init(&draw_buf, SCREEN_WIDTH, SCREEN_HEIGHT, LV_COLOR_FORMAT_RGB565,
+                     SCREEN_WIDTH * 2, pixels, SCREEN_WIDTH * SCREEN_HEIGHT * 2);
+
+    bsp_display_lock(0);
+    lv_result_t result = lv_snapshot_take_to_draw_buf(lv_screen_active(), LV_COLOR_FORMAT_RGB565, &draw_buf);
+    bsp_display_unlock();
+    if (result != LV_RESULT_OK) return;
+
+    const uint16_t *source = (const uint16_t *)pixels;
+    size_t source_count = SCREEN_WIDTH * SCREEN_HEIGHT;
+    size_t output = 0;
+    for (size_t i = 0; i < source_count;) {
+        uint16_t value = source[i];
+        uint16_t count = 1;
+        while (i + count < source_count && source[i + count] == value && count < UINT16_MAX) count++;
+        memcpy(encoded + output, &count, sizeof(count));
+        memcpy(encoded + output + 2, &value, sizeof(value));
+        output += 4;
+        i += count;
+    }
+
+    remote_frame_header_t header = {
+        .magic = {'T', '5', 'R', 'D'}, .version = 1, .type = 1, .encoding = 1,
+        .width = SCREEN_WIDTH, .height = SCREEN_HEIGHT,
+        .payload_size = output, .frame_number = ++remote_frame_number,
+    };
+    usb_write_all(&header, sizeof(header));
+    usb_write_all(encoded, output);
+    usb_serial_jtag_wait_tx_done(pdMS_TO_TICKS(5000));
+}
+
+static void remote_desktop_task(void *argument)
+{
+    (void)argument;
+    const size_t pixel_bytes = SCREEN_WIDTH * SCREEN_HEIGHT * 2;
+    uint8_t *pixels = heap_caps_malloc(pixel_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    uint8_t *encoded = heap_caps_malloc(pixel_bytes * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!pixels || !encoded) {
+        ESP_LOGE("tab5-os", "Remote desktop buffer allocation failed");
+        vTaskDelete(NULL);
+    }
+
+    uint8_t packet[10];
+    size_t used = 0;
+    while (true) {
+        uint8_t byte;
+        if (usb_serial_jtag_read_bytes(&byte, 1, portMAX_DELAY) != 1) continue;
+        if (used == 0 && byte != 'T') continue;
+        if (used == 1 && byte != '5') {
+            used = byte == 'T' ? 1 : 0;
+            continue;
+        }
+        packet[used++] = byte;
+        if (used != sizeof(packet)) continue;
+        used = 0;
+
+        if (packet[2] == 1) {
+            send_remote_frame(pixels, encoded);
+        } else if (packet[2] == 2) {
+            uint16_t x, y;
+            memcpy(&x, packet + 4, sizeof(x));
+            memcpy(&y, packet + 6, sizeof(y));
+            remote_x = x < SCREEN_WIDTH ? x : SCREEN_WIDTH - 1;
+            remote_y = y < SCREEN_HEIGHT ? y : SCREEN_HEIGHT - 1;
+            remote_pressed = packet[3] != 0;
+        }
+    }
+}
+
+static void start_remote_desktop(lv_display_t *display)
+{
+    lv_indev_t *remote_pointer = lv_indev_create();
+    lv_indev_set_type(remote_pointer, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_read_cb(remote_pointer, remote_pointer_read);
+    lv_indev_set_display(remote_pointer, display);
+
+    usb_serial_jtag_driver_config_t config = {.tx_buffer_size = 16384, .rx_buffer_size = 256};
+    ESP_ERROR_CHECK(usb_serial_jtag_driver_install(&config));
+    usb_serial_jtag_vfs_use_driver();
+    xTaskCreate(remote_desktop_task, "remote-desktop", 6144, NULL, 4, NULL);
+}
 
 static bool mount_internal(void)
 {
@@ -285,7 +411,7 @@ void app_main(void)
     internal_ready = mount_internal();
     sd_ready = bsp_sdcard_init(SD_PATH, 5) == ESP_OK;
 
-    bsp_display_start();
+    lv_display_t *display = bsp_display_start();
     bsp_display_lock(0);
 
     lv_obj_t *screen = lv_screen_active();
@@ -318,6 +444,7 @@ void app_main(void)
     lv_obj_set_style_pad_all(content, 28, 0);
     lv_obj_set_style_pad_row(content, 24, 0);
     show_launcher();
+    start_remote_desktop(display);
 
     bsp_display_unlock();
     bsp_display_backlight_on();
