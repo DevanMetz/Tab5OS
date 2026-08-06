@@ -2,6 +2,8 @@
 #include "esp_chip_info.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "lvgl.h"
 
 static void show_about(lv_event_t *event)
@@ -16,6 +18,9 @@ void app_main(void)
     esp_chip_info(&chip);
     ESP_LOGI("tab5-os", "Booted on %d-core ESP32-P4", chip.cores);
 
+    ESP_ERROR_CHECK(bsp_i2c_init());
+    bsp_io_expander_pi4ioe_init(bsp_i2c_get_handle());
+    vTaskDelay(pdMS_TO_TICKS(300));
     bsp_display_start();
     bsp_display_lock(0);
 
