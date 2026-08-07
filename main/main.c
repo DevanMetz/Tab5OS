@@ -1499,6 +1499,7 @@ static void clear_content(void)
     clock_date = NULL;
     clock_status = NULL;
     lv_obj_clean(content);
+    lv_obj_scroll_to(content, 0, 0, LV_ANIM_OFF);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 }
