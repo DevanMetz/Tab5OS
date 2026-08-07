@@ -30,6 +30,7 @@
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
 #include "driver/i2c_master.h"
+#include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
@@ -100,11 +101,34 @@ typedef struct {
     const char *url;
 } ebook_default_t;
 
+typedef struct {
+    gpio_num_t pin;
+    const char *port;
+    uint8_t mode;
+    lv_obj_t *mode_label;
+    lv_obj_t *level_label;
+} gpio_control_t;
+
 static const ebook_default_t ebook_defaults[] = {
     {"ALICE.TXT", "https://www.gutenberg.org/cache/epub/11/pg11.txt"},
     {"FRANK.TXT", "https://www.gutenberg.org/cache/epub/84/pg84.txt"},
     {"HOLMES.TXT", "https://www.gutenberg.org/cache/epub/1661/pg1661.txt"},
 };
+
+#define GPIO_CONTROL(p, name) {.pin = (p), .port = (name)}
+static gpio_control_t gpio_controls[] = {
+    GPIO_CONTROL(GPIO_NUM_49, "EXT"), GPIO_CONTROL(GPIO_NUM_50, "EXT"), GPIO_CONTROL(GPIO_NUM_0, "EXT"),
+    GPIO_CONTROL(GPIO_NUM_1, "EXT"), GPIO_CONTROL(GPIO_NUM_54, "EXT"), GPIO_CONTROL(GPIO_NUM_53, "EXT"),
+    GPIO_CONTROL(GPIO_NUM_18, "M-BUS"), GPIO_CONTROL(GPIO_NUM_19, "M-BUS"), GPIO_CONTROL(GPIO_NUM_5, "M-BUS"),
+    GPIO_CONTROL(GPIO_NUM_38, "M-BUS"), GPIO_CONTROL(GPIO_NUM_7, "M-BUS"), GPIO_CONTROL(GPIO_NUM_3, "M-BUS"),
+    GPIO_CONTROL(GPIO_NUM_2, "M-BUS"), GPIO_CONTROL(GPIO_NUM_47, "M-BUS"), GPIO_CONTROL(GPIO_NUM_16, "M-BUS"),
+    GPIO_CONTROL(GPIO_NUM_17, "M-BUS"), GPIO_CONTROL(GPIO_NUM_45, "M-BUS"), GPIO_CONTROL(GPIO_NUM_52, "M-BUS"),
+    GPIO_CONTROL(GPIO_NUM_37, "M-BUS"), GPIO_CONTROL(GPIO_NUM_6, "M-BUS"), GPIO_CONTROL(GPIO_NUM_4, "M-BUS"),
+    GPIO_CONTROL(GPIO_NUM_48, "M-BUS"), GPIO_CONTROL(GPIO_NUM_35, "M-BUS"), GPIO_CONTROL(GPIO_NUM_51, "M-BUS"),
+};
+#undef GPIO_CONTROL
+#define GPIO_CONTROL_COUNT (sizeof(gpio_controls) / sizeof(gpio_controls[0]))
+_Static_assert(GPIO_CONTROL_COUNT == 24, "Tab5 exposes 24 user GPIO pins");
 
 static lv_obj_t *content;
 static lv_obj_t *battery_label;
@@ -221,6 +245,7 @@ static volatile bool ebook_download_done;
 static lv_obj_t *ota_status;
 static lv_obj_t *ota_button;
 static lv_timer_t *ota_timer;
+static lv_timer_t *gpio_timer;
 static TaskHandle_t ota_task_handle;
 static volatile bool ota_busy;
 static volatile bool ota_done;
@@ -238,8 +263,43 @@ static void show_chat(void);
 static void show_browser(void);
 static void show_ebooks(void);
 static void show_clock(void);
+static void show_gpio(void);
 static void clear_content(void);
 static void browser_link_clicked(lv_event_t *event);
+
+static esp_err_t gpio_apply(gpio_control_t *control)
+{
+    gpio_config_t config = {
+        .pin_bit_mask = 1ULL << control->pin,
+        .mode = control->mode ? GPIO_MODE_OUTPUT : GPIO_MODE_INPUT,
+        .pull_up_en = control->mode ? GPIO_PULLUP_DISABLE : GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    esp_err_t error = gpio_config(&config);
+    if (error == ESP_OK && control->mode) error = gpio_set_level(control->pin, control->mode == 2);
+    return error;
+}
+
+static void gpio_mode_clicked(lv_event_t *event)
+{
+    gpio_control_t *control = lv_event_get_user_data(event);
+    control->mode = (control->mode + 1) % 3;
+    if (gpio_apply(control) != ESP_OK) {
+        lv_label_set_text(control->mode_label, "ERROR");
+        return;
+    }
+    lv_label_set_text(control->mode_label, control->mode == 0 ? "INPUT" : control->mode == 1 ? "LOW" : "HIGH");
+}
+
+static void gpio_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    for (size_t i = 0; i < GPIO_CONTROL_COUNT; i++) {
+        if (gpio_controls[i].level_label)
+            lv_label_set_text_fmt(gpio_controls[i].level_label, "%d", gpio_get_level(gpio_controls[i].pin));
+    }
+}
 
 static uint8_t bcd(int value)
 {
@@ -1399,6 +1459,15 @@ static void clear_content(void)
         lv_timer_delete(ota_timer);
         ota_timer = NULL;
     }
+    if (gpio_timer) {
+        lv_timer_delete(gpio_timer);
+        gpio_timer = NULL;
+        for (size_t i = 0; i < GPIO_CONTROL_COUNT; i++) {
+            gpio_reset_pin(gpio_controls[i].pin);
+            gpio_controls[i].mode_label = NULL;
+            gpio_controls[i].level_label = NULL;
+        }
+    }
     wifi_status = NULL;
     wifi_list = NULL;
     chat_output = NULL;
@@ -2303,6 +2372,53 @@ static void show_clock(void)
     clock_tick(NULL);
 }
 
+static void gpio_clicked(lv_event_t *event)
+{
+    (void)event;
+    show_gpio();
+}
+
+static void show_gpio(void)
+{
+    clear_content();
+    lv_obj_t *title = lv_label_create(content);
+    lv_label_set_text(title, "GPIO");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+    lv_obj_t *help = lv_label_create(content);
+    lv_label_set_text(help, "Tap mode: INPUT (pull-up) -> LOW -> HIGH\n3.3V logic only. Do not connect GPIO directly to 5V.");
+    lv_obj_set_width(help, 640);
+
+    lv_obj_t *list = lv_obj_create(content);
+    lv_obj_set_size(list, 650, 930);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(list, 10, 0);
+    lv_obj_set_style_pad_row(list, 8, 0);
+    for (size_t i = 0; i < GPIO_CONTROL_COUNT; i++) {
+        gpio_control_t *control = &gpio_controls[i];
+        control->mode = 0;
+        gpio_apply(control);
+        lv_obj_t *row = lv_obj_create(list);
+        lv_obj_set_size(row, 600, 66);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_all(row, 6, 0);
+        lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_t *name = lv_label_create(row);
+        lv_label_set_text_fmt(name, "%s  G%d", control->port, control->pin);
+        lv_obj_set_width(name, 220);
+        control->level_label = lv_label_create(row);
+        lv_label_set_text(control->level_label, "1");
+        lv_obj_t *mode = lv_button_create(row);
+        lv_obj_set_size(mode, 180, 50);
+        lv_obj_add_event_cb(mode, gpio_mode_clicked, LV_EVENT_CLICKED, control);
+        control->mode_label = lv_label_create(mode);
+        lv_label_set_text(control->mode_label, "INPUT");
+        lv_obj_center(control->mode_label);
+    }
+    gpio_timer = lv_timer_create(gpio_tick, 200, NULL);
+    gpio_tick(NULL);
+}
+
 static void show_launcher(void)
 {
     static int32_t columns[] = {
@@ -2322,6 +2438,7 @@ static void show_launcher(void)
     app_icon(content, LV_SYMBOL_EYE_OPEN, "Browser", 0x3F51B5, browser_clicked, 0, 2);
     app_icon(content, LV_SYMBOL_FILE, "Ebooks", 0x8D6E63, ebooks_clicked, 1, 2);
     app_icon(content, LV_SYMBOL_LOOP, "Clock", 0x009688, clock_clicked, 2, 2);
+    app_icon(content, LV_SYMBOL_CHARGE, "GPIO", 0xE65100, gpio_clicked, 0, 3);
 }
 
 static void confirm_running_ota(void)
