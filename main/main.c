@@ -26,6 +26,7 @@
 #include "esp_lcd_mipi_dsi.h"
 #include "driver/usb_serial_jtag.h"
 #include "driver/usb_serial_jtag_vfs.h"
+#include "driver/i2c_master.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
@@ -52,6 +53,8 @@
 #define BROWSER_MAX_LINKS 12
 #define EBOOK_PAGE_BYTES 8192
 #define OTA_URL "https://github.com/DevanMetz/Tab5OS/releases/latest/download/tab5_os.bin"
+#define BATTERY_EMPTY_MV 6000
+#define BATTERY_FULL_MV 8230
 
 typedef struct __attribute__((packed)) {
     char magic[4];
@@ -99,6 +102,8 @@ static const ebook_default_t ebook_defaults[] = {
 };
 
 static lv_obj_t *content;
+static lv_obj_t *battery_label;
+static i2c_master_dev_handle_t battery_monitor;
 static lv_obj_t *note_area;
 static lv_obj_t *counter_label;
 static bool internal_ready;
@@ -211,6 +216,31 @@ static void show_browser(void);
 static void show_ebooks(void);
 static void clear_content(void);
 static void browser_link_clicked(lv_event_t *event);
+
+static void battery_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    uint8_t reg = 0x02;
+    uint8_t raw[2];
+    if (!battery_monitor || i2c_master_transmit_receive(battery_monitor, &reg, 1, raw, 2, 50) != ESP_OK) {
+        lv_label_set_text(battery_label, "BAT --");
+        return;
+    }
+    int millivolts = ((raw[0] << 8) | raw[1]) * 5 / 4;
+    int percent = (millivolts - BATTERY_EMPTY_MV) * 100 / (BATTERY_FULL_MV - BATTERY_EMPTY_MV);
+    percent = percent < 0 ? 0 : percent > 100 ? 100 : percent;
+    lv_label_set_text_fmt(battery_label, "BAT %d%%", percent);
+}
+
+static void battery_init(i2c_master_bus_handle_t bus)
+{
+    i2c_device_config_t config = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = 0x41,
+        .scl_speed_hz = 400000,
+    };
+    if (i2c_master_bus_add_device(bus, &config, &battery_monitor) != ESP_OK) battery_monitor = NULL;
+}
 
 typedef struct {
     char *data;
@@ -2123,7 +2153,11 @@ void app_main(void)
     ESP_LOGI("tab5-os", "Starting Tab5 OS");
     ESP_ERROR_CHECK(bsp_i2c_init());
     bsp_io_expander_pi4ioe_init(bsp_i2c_get_handle());
-    vTaskDelay(pdMS_TO_TICKS(300));
+    bsp_set_charge_qc_en(true);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    bsp_set_charge_en(true);
+    battery_init(bsp_i2c_get_handle());
+    vTaskDelay(pdMS_TO_TICKS(250));
 
     wifi_ready = start_wifi();
     load_chat_config();
@@ -2154,6 +2188,10 @@ void app_main(void)
     lv_label_set_text(brand, "Tab5 OS");
     lv_obj_set_style_text_font(brand, &lv_font_montserrat_28, 0);
     lv_obj_align(brand, LV_ALIGN_CENTER, 0, 0);
+    battery_label = lv_label_create(header);
+    lv_obj_align(battery_label, LV_ALIGN_RIGHT_MID, -20, 0);
+    battery_tick(NULL);
+    lv_timer_create(battery_tick, 5000, NULL);
 
     content = lv_obj_create(screen);
     lv_obj_set_size(content, 720, 1180);
