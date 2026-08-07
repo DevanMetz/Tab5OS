@@ -271,25 +271,25 @@ static esp_err_t gpio_apply(gpio_control_t *control)
 {
     gpio_config_t config = {
         .pin_bit_mask = 1ULL << control->pin,
-        .mode = control->mode ? GPIO_MODE_OUTPUT : GPIO_MODE_INPUT,
-        .pull_up_en = control->mode ? GPIO_PULLUP_DISABLE : GPIO_PULLUP_ENABLE,
+        .mode = control->mode == 1 ? GPIO_MODE_INPUT : GPIO_MODE_OUTPUT,
+        .pull_up_en = control->mode == 1 ? GPIO_PULLUP_ENABLE : GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
     esp_err_t error = gpio_config(&config);
-    if (error == ESP_OK && control->mode) error = gpio_set_level(control->pin, control->mode == 2);
+    if (error == ESP_OK && control->mode > 1) error = gpio_set_level(control->pin, control->mode == 3);
     return error;
 }
 
 static void gpio_mode_clicked(lv_event_t *event)
 {
     gpio_control_t *control = lv_event_get_user_data(event);
-    control->mode = (control->mode + 1) % 3;
+    control->mode = control->mode == 3 ? 1 : control->mode + 1;
     if (gpio_apply(control) != ESP_OK) {
         lv_label_set_text(control->mode_label, "ERROR");
         return;
     }
-    lv_label_set_text(control->mode_label, control->mode == 0 ? "INPUT" : control->mode == 1 ? "LOW" : "HIGH");
+    lv_label_set_text(control->mode_label, control->mode == 1 ? "INPUT" : control->mode == 2 ? "LOW" : "HIGH");
 }
 
 static void gpio_tick(lv_timer_t *timer)
@@ -1463,7 +1463,7 @@ static void clear_content(void)
         lv_timer_delete(gpio_timer);
         gpio_timer = NULL;
         for (size_t i = 0; i < GPIO_CONTROL_COUNT; i++) {
-            gpio_reset_pin(gpio_controls[i].pin);
+            if (gpio_controls[i].mode) gpio_reset_pin(gpio_controls[i].pin);
             gpio_controls[i].mode_label = NULL;
             gpio_controls[i].level_label = NULL;
         }
@@ -2396,7 +2396,6 @@ static void show_gpio(void)
     for (size_t i = 0; i < GPIO_CONTROL_COUNT; i++) {
         gpio_control_t *control = &gpio_controls[i];
         control->mode = 0;
-        gpio_apply(control);
         lv_obj_t *row = lv_obj_create(list);
         lv_obj_set_size(row, 600, 66);
         lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
@@ -2412,7 +2411,7 @@ static void show_gpio(void)
         lv_obj_set_size(mode, 180, 50);
         lv_obj_add_event_cb(mode, gpio_mode_clicked, LV_EVENT_CLICKED, control);
         control->mode_label = lv_label_create(mode);
-        lv_label_set_text(control->mode_label, "INPUT");
+        lv_label_set_text(control->mode_label, "SET");
         lv_obj_center(control->mode_label);
     }
     gpio_timer = lv_timer_create(gpio_tick, 200, NULL);
