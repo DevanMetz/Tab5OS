@@ -67,6 +67,8 @@
 #define SCOPE_RING_POINTS 1200
 #define SCOPE_CHART_POINTS 300
 #define ALARM_COUNT 3
+#define WEATHER_HOURS 12
+#define WEATHER_DAYS 7
 #define TIME_ZONE "CST6CDT,M3.2.0,M11.1.0"
 
 typedef struct __attribute__((packed)) {
@@ -128,6 +130,44 @@ typedef struct {
     uint8_t minute;
     uint8_t enabled;
 } alarm_setting_t;
+
+typedef struct {
+    char time[17];
+    float temperature;
+    uint8_t precipitation;
+    uint8_t code;
+    float wind;
+} weather_hour_t;
+
+typedef struct {
+    char date[11];
+    char sunrise[17];
+    char sunset[17];
+    float high;
+    float low;
+    uint8_t precipitation;
+    uint8_t code;
+} weather_day_t;
+
+typedef struct {
+    char place[96];
+    char updated[17];
+    float temperature;
+    float apparent;
+    float precipitation;
+    float pressure;
+    float wind;
+    float gust;
+    uint16_t wind_direction;
+    uint8_t humidity;
+    uint8_t cloud;
+    uint8_t code;
+    uint8_t is_day;
+    weather_hour_t hourly[WEATHER_HOURS];
+    weather_day_t daily[WEATHER_DAYS];
+    uint8_t hour_count;
+    uint8_t day_count;
+} weather_data_t;
 
 static const ebook_default_t ebook_defaults[] = {
     {"ALICE.TXT", "https://www.gutenberg.org/cache/epub/11/pg11.txt"},
@@ -325,6 +365,22 @@ static volatile int16_t remote_x;
 static volatile int16_t remote_y;
 static volatile bool remote_pressed;
 static uint32_t remote_frame_number;
+static lv_obj_t *weather_status;
+static lv_obj_t *weather_location_area;
+static lv_obj_t *weather_body;
+static lv_obj_t *weather_keyboard;
+static lv_obj_t *weather_keys_label;
+static lv_timer_t *weather_timer;
+static TaskHandle_t weather_task_handle;
+static volatile bool weather_busy;
+static volatile bool weather_done;
+static bool weather_ok;
+static bool weather_keyboard_visible;
+static bool weather_has_data;
+static char weather_location[64] = "Chicago";
+static char weather_pending_location[64];
+static char weather_error[96];
+static weather_data_t weather_data;
 
 static void show_launcher(void);
 static void show_files(const char *path);
@@ -335,6 +391,7 @@ static void show_ebooks(void);
 static void show_clock(void);
 static void show_gpio(void);
 static void show_scope(void);
+static void show_weather(void);
 static void clear_content(void);
 static void browser_link_clicked(lv_event_t *event);
 static lv_obj_t *button(lv_obj_t *parent, const char *text, lv_event_cb_t callback);
@@ -1156,6 +1213,253 @@ static esp_err_t chat_http_event(esp_http_client_event_t *event)
     return ESP_OK;
 }
 
+static bool weather_url_encode(const char *input, char *output, size_t capacity)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    size_t used = 0;
+    for (const unsigned char *p = (const unsigned char *)input; *p; p++) {
+        bool plain = isalnum(*p) || strchr("-_.~", *p);
+        size_t needed = plain ? 1 : 3;
+        if (used + needed >= capacity) return false;
+        if (plain) output[used++] = *p;
+        else {
+            output[used++] = '%';
+            output[used++] = hex[*p >> 4];
+            output[used++] = hex[*p & 15];
+        }
+    }
+    output[used] = '\0';
+    return true;
+}
+
+static void weather_ascii(char *output, size_t capacity, const char *input)
+{
+    // ponytail: ASCII avoids missing LVGL glyph boxes; enable a Unicode font for native place spelling.
+    size_t used = 0;
+    for (const unsigned char *p = (const unsigned char *)input; *p && used + 1 < capacity; p++)
+        if (*p >= 32 && *p < 127) output[used++] = *p;
+    output[used] = '\0';
+}
+
+static void weather_self_test(void)
+{
+    char encoded[32];
+    assert(weather_url_encode("St. Paul, MN", encoded, sizeof(encoded)));
+    assert(strcmp(encoded, "St.%20Paul%2C%20MN") == 0);
+}
+
+static bool weather_http_get(const char *url, char *response, size_t capacity)
+{
+    http_buffer_t buffer = {.data = response, .capacity = capacity};
+    response[0] = '\0';
+    esp_http_client_config_t config = {
+        .url = url,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .event_handler = chat_http_event,
+        .user_data = &buffer,
+        .timeout_ms = 20000,
+        .buffer_size = 2048,
+        .buffer_size_tx = 1024,
+        .keep_alive_enable = true,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) return false;
+    esp_http_client_set_header(client, "Accept", "application/json");
+    esp_http_client_set_header(client, "User-Agent", "Tab5OS/1.0");
+    esp_err_t error = esp_http_client_perform(client);
+    int status = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+    if (error != ESP_OK || status != 200) {
+        snprintf(weather_error, sizeof(weather_error), "Weather failed: %s (%d)", esp_err_to_name(error), status);
+        ESP_LOGE("weather", "%s", weather_error);
+        return false;
+    }
+    return true;
+}
+
+static bool weather_number(cJSON *object, const char *key, float *value)
+{
+    cJSON *item = cJSON_GetObjectItemCaseSensitive(object, key);
+    if (!cJSON_IsNumber(item)) return false;
+    *value = (float)item->valuedouble;
+    return true;
+}
+
+static bool weather_array_number(cJSON *array, int index, float *value)
+{
+    cJSON *item = cJSON_GetArrayItem(array, index);
+    if (!cJSON_IsNumber(item)) return false;
+    *value = (float)item->valuedouble;
+    return true;
+}
+
+static bool weather_array_text(cJSON *array, int index, char *output, size_t capacity)
+{
+    cJSON *item = cJSON_GetArrayItem(array, index);
+    if (!cJSON_IsString(item)) return false;
+    snprintf(output, capacity, "%s", item->valuestring);
+    return true;
+}
+
+static bool weather_parse_forecast(const char *json, weather_data_t *data)
+{
+    cJSON *root = cJSON_Parse(json);
+    cJSON *current = root ? cJSON_GetObjectItemCaseSensitive(root, "current") : NULL;
+    cJSON *hourly = root ? cJSON_GetObjectItemCaseSensitive(root, "hourly") : NULL;
+    cJSON *daily = root ? cJSON_GetObjectItemCaseSensitive(root, "daily") : NULL;
+    float value;
+    cJSON *updated = current ? cJSON_GetObjectItemCaseSensitive(current, "time") : NULL;
+    bool valid = cJSON_IsObject(current) && cJSON_IsObject(hourly) && cJSON_IsObject(daily) &&
+        cJSON_IsString(updated) &&
+        weather_number(current, "temperature_2m", &data->temperature) &&
+        weather_number(current, "apparent_temperature", &data->apparent) &&
+        weather_number(current, "relative_humidity_2m", &value);
+    if (!valid) {
+        cJSON_Delete(root);
+        return false;
+    }
+    data->humidity = value;
+    valid = weather_number(current, "precipitation", &data->precipitation) &&
+        weather_number(current, "surface_pressure", &data->pressure) &&
+        weather_number(current, "wind_speed_10m", &data->wind) &&
+        weather_number(current, "wind_gusts_10m", &data->gust) &&
+        weather_number(current, "wind_direction_10m", &value);
+    data->wind_direction = value;
+    valid = valid && weather_number(current, "cloud_cover", &value);
+    data->cloud = value;
+    valid = valid && weather_number(current, "weather_code", &value);
+    data->code = value;
+    valid = valid && weather_number(current, "is_day", &value);
+    data->is_day = value;
+    snprintf(data->updated, sizeof(data->updated), "%s", updated->valuestring);
+
+    cJSON *times = cJSON_GetObjectItemCaseSensitive(hourly, "time");
+    cJSON *temperatures = cJSON_GetObjectItemCaseSensitive(hourly, "temperature_2m");
+    cJSON *rain = cJSON_GetObjectItemCaseSensitive(hourly, "precipitation_probability");
+    cJSON *codes = cJSON_GetObjectItemCaseSensitive(hourly, "weather_code");
+    cJSON *winds = cJSON_GetObjectItemCaseSensitive(hourly, "wind_speed_10m");
+    int start = 0, count = cJSON_GetArraySize(times);
+    for (int i = 0; i < count; i++) {
+        cJSON *time_item = cJSON_GetArrayItem(times, i);
+        if (cJSON_IsString(time_item) && strncmp(time_item->valuestring, data->updated, 13) == 0) {
+            start = i;
+            break;
+        }
+    }
+    data->hour_count = 0;
+    for (int i = start; valid && i < count && data->hour_count < WEATHER_HOURS; i++) {
+        weather_hour_t *hour = &data->hourly[data->hour_count];
+        valid = weather_array_text(times, i, hour->time, sizeof(hour->time)) &&
+            weather_array_number(temperatures, i, &hour->temperature) &&
+            weather_array_number(rain, i, &value);
+        hour->precipitation = value;
+        valid = valid && weather_array_number(codes, i, &value);
+        hour->code = value;
+        valid = valid && weather_array_number(winds, i, &hour->wind);
+        if (valid) data->hour_count++;
+    }
+
+    cJSON *dates = cJSON_GetObjectItemCaseSensitive(daily, "time");
+    cJSON *highs = cJSON_GetObjectItemCaseSensitive(daily, "temperature_2m_max");
+    cJSON *lows = cJSON_GetObjectItemCaseSensitive(daily, "temperature_2m_min");
+    cJSON *daily_rain = cJSON_GetObjectItemCaseSensitive(daily, "precipitation_probability_max");
+    cJSON *daily_codes = cJSON_GetObjectItemCaseSensitive(daily, "weather_code");
+    cJSON *sunrises = cJSON_GetObjectItemCaseSensitive(daily, "sunrise");
+    cJSON *sunsets = cJSON_GetObjectItemCaseSensitive(daily, "sunset");
+    count = cJSON_GetArraySize(dates);
+    data->day_count = 0;
+    for (int i = 0; valid && i < count && data->day_count < WEATHER_DAYS; i++) {
+        weather_day_t *day = &data->daily[data->day_count];
+        valid = weather_array_text(dates, i, day->date, sizeof(day->date)) &&
+            weather_array_text(sunrises, i, day->sunrise, sizeof(day->sunrise)) &&
+            weather_array_text(sunsets, i, day->sunset, sizeof(day->sunset)) &&
+            weather_array_number(highs, i, &day->high) && weather_array_number(lows, i, &day->low) &&
+            weather_array_number(daily_rain, i, &value);
+        day->precipitation = value;
+        valid = valid && weather_array_number(daily_codes, i, &value);
+        day->code = value;
+        if (valid) data->day_count++;
+    }
+    cJSON_Delete(root);
+    return valid && data->hour_count && data->day_count;
+}
+
+static void load_weather_location(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open("tab5", NVS_READONLY, &handle) != ESP_OK) return;
+    size_t size = sizeof(weather_location);
+    nvs_get_str(handle, "weather_loc", weather_location, &size);
+    nvs_close(handle);
+}
+
+static void save_weather_location(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open("tab5", NVS_READWRITE, &handle) != ESP_OK) return;
+    if (nvs_set_str(handle, "weather_loc", weather_location) == ESP_OK) nvs_commit(handle);
+    nvs_close(handle);
+}
+
+static void weather_task(void *argument)
+{
+    (void)argument;
+    char *response = heap_caps_malloc(32768, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    char url[1024], encoded[192];
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        weather_data_t next = {0};
+        weather_ok = false;
+        if (!response || !weather_url_encode(weather_pending_location, encoded, sizeof(encoded))) {
+            snprintf(weather_error, sizeof(weather_error), "Location is too long");
+            goto done;
+        }
+        snprintf(url, sizeof(url),
+            "https://geocoding-api.open-meteo.com/v1/search?name=%s&count=1&language=en&format=json", encoded);
+        if (!weather_http_get(url, response, 32768)) goto done;
+        cJSON *root = cJSON_Parse(response);
+        cJSON *results = root ? cJSON_GetObjectItemCaseSensitive(root, "results") : NULL;
+        cJSON *result = cJSON_IsArray(results) ? cJSON_GetArrayItem(results, 0) : NULL;
+        cJSON *name = result ? cJSON_GetObjectItemCaseSensitive(result, "name") : NULL;
+        cJSON *admin = result ? cJSON_GetObjectItemCaseSensitive(result, "admin1") : NULL;
+        cJSON *country = result ? cJSON_GetObjectItemCaseSensitive(result, "country") : NULL;
+        cJSON *latitude = result ? cJSON_GetObjectItemCaseSensitive(result, "latitude") : NULL;
+        cJSON *longitude = result ? cJSON_GetObjectItemCaseSensitive(result, "longitude") : NULL;
+        if (!cJSON_IsString(name) || !cJSON_IsNumber(latitude) || !cJSON_IsNumber(longitude)) {
+            cJSON_Delete(root);
+            snprintf(weather_error, sizeof(weather_error), "Location not found");
+            goto done;
+        }
+        char raw_place[160];
+        snprintf(raw_place, sizeof(raw_place), "%s%s%s%s%s", name->valuestring,
+            cJSON_IsString(admin) ? ", " : "", cJSON_IsString(admin) ? admin->valuestring : "",
+            cJSON_IsString(country) ? ", " : "", cJSON_IsString(country) ? country->valuestring : "");
+        weather_ascii(next.place, sizeof(next.place), raw_place);
+        double lat = latitude->valuedouble, lon = longitude->valuedouble;
+        cJSON_Delete(root);
+
+        snprintf(url, sizeof(url), "https://api.open-meteo.com/v1/forecast?latitude=%.6f&longitude=%.6f"
+            "&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,cloud_cover,surface_pressure,wind_speed_10m,wind_direction_10m,wind_gusts_10m"
+            "&hourly=temperature_2m,precipitation_probability,weather_code,wind_speed_10m"
+            "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset"
+            "&temperature_unit=fahrenheit&wind_speed_unit=mph&precipitation_unit=inch&timezone=auto&forecast_days=7&forecast_hours=12",
+            lat, lon);
+        if (!weather_http_get(url, response, 32768)) goto done;
+        if (!weather_parse_forecast(response, &next)) {
+            snprintf(weather_error, sizeof(weather_error), "Invalid weather response");
+            goto done;
+        }
+        weather_data = next;
+        weather_has_data = true;
+        weather_ok = true;
+        snprintf(weather_location, sizeof(weather_location), "%s", weather_pending_location);
+        save_weather_location();
+done:
+        weather_busy = false;
+        weather_done = true;
+    }
+}
+
 static esp_err_t ebook_http_event(esp_http_client_event_t *event)
 {
     FILE *file = event->user_data;
@@ -1911,6 +2215,10 @@ static void clear_content(void)
         lv_timer_delete(scope_timer);
         scope_timer = NULL;
     }
+    if (weather_timer) {
+        lv_timer_delete(weather_timer);
+        weather_timer = NULL;
+    }
     scope_active = false;
     wifi_status = NULL;
     wifi_list = NULL;
@@ -1955,6 +2263,11 @@ static void clear_content(void)
     scope_scale_label = NULL;
     scope_trigger_label = NULL;
     scope_level_label = NULL;
+    weather_status = NULL;
+    weather_location_area = NULL;
+    weather_body = NULL;
+    weather_keyboard = NULL;
+    weather_keys_label = NULL;
     lv_obj_clean(content);
     lv_obj_scroll_to(content, 0, 0, LV_ANIM_OFF);
     lv_async_call(reset_content_scroll, content);
@@ -3028,6 +3341,275 @@ static void show_scope(void)
     scope_timer = lv_timer_create(scope_tick, 150, NULL);
 }
 
+static const char *weather_condition(uint8_t code)
+{
+    if (code == 0) return "Clear";
+    if (code <= 2) return "Partly cloudy";
+    if (code == 3) return "Overcast";
+    if (code == 45 || code == 48) return "Fog";
+    if (code >= 51 && code <= 57) return "Drizzle";
+    if (code >= 61 && code <= 67) return "Rain";
+    if (code >= 71 && code <= 77) return "Snow";
+    if (code >= 80 && code <= 82) return "Showers";
+    if (code == 85 || code == 86) return "Snow showers";
+    if (code >= 95) return "Thunderstorm";
+    return "Mixed weather";
+}
+
+static const char *weather_wind_direction(uint16_t degrees)
+{
+    static const char *directions[] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+    return directions[((degrees + 22) / 45) % 8];
+}
+
+static int weather_round(float value)
+{
+    return (int)(value + (value < 0 ? -0.5f : 0.5f));
+}
+
+static void weather_short_time(const char *iso, char output[12])
+{
+    int hour = 0, minute = 0;
+    if (strlen(iso) >= 16) sscanf(iso + 11, "%d:%d", &hour, &minute);
+    snprintf(output, 12, "%d:%02d %s", hour % 12 ? hour % 12 : 12, minute, hour < 12 ? "AM" : "PM");
+}
+
+static void weather_render(void)
+{
+    if (!weather_body || !weather_has_data) return;
+    lv_obj_clean(weather_body);
+    lv_obj_t *place = lv_label_create(weather_body);
+    lv_label_set_text(place, weather_data.place);
+    lv_obj_set_width(place, 600);
+    lv_obj_set_style_text_font(place, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_align(place, LV_TEXT_ALIGN_CENTER, 0);
+
+    lv_obj_t *current = lv_obj_create(weather_body);
+    lv_obj_set_size(current, 610, 245);
+    lv_obj_clear_flag(current, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(current, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(current, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(current, 12, 0);
+    lv_obj_set_style_pad_row(current, 5, 0);
+    lv_obj_t *temperature = lv_label_create(current);
+    lv_label_set_text_fmt(temperature, "%d F", weather_round(weather_data.temperature));
+    lv_obj_set_style_text_font(temperature, &lv_font_montserrat_48, 0);
+    lv_obj_t *condition = lv_label_create(current);
+    lv_label_set_text(condition, weather_condition(weather_data.code));
+    lv_obj_set_style_text_font(condition, &lv_font_montserrat_28, 0);
+    lv_obj_t *details = lv_label_create(current);
+    lv_label_set_text_fmt(details,
+        "Feels %d F  |  Humidity %u%%  |  Clouds %u%%\n"
+        "Wind %s %d mph, gusts %d  |  Pressure %d hPa\n"
+        "Precipitation %d.%02d in",
+        weather_round(weather_data.apparent), weather_data.humidity, weather_data.cloud,
+        weather_wind_direction(weather_data.wind_direction), weather_round(weather_data.wind),
+        weather_round(weather_data.gust), weather_round(weather_data.pressure),
+        (int)(weather_data.precipitation * 100) / 100, (int)(weather_data.precipitation * 100) % 100);
+    lv_obj_set_width(details, 570);
+    lv_obj_set_style_text_align(details, LV_TEXT_ALIGN_CENTER, 0);
+    if (weather_data.day_count) {
+        char sunrise[12], sunset[12];
+        weather_short_time(weather_data.daily[0].sunrise, sunrise);
+        weather_short_time(weather_data.daily[0].sunset, sunset);
+        lv_obj_t *sun = lv_label_create(current);
+        lv_label_set_text_fmt(sun, "Sunrise %s  |  Sunset %s", sunrise, sunset);
+    }
+
+    lv_obj_t *hourly_title = lv_label_create(weather_body);
+    lv_label_set_text(hourly_title, "Next 12 hours");
+    lv_obj_set_style_text_font(hourly_title, &lv_font_montserrat_28, 0);
+    lv_obj_t *hourly = lv_obj_create(weather_body);
+    lv_obj_set_size(hourly, 610, 170);
+    lv_obj_set_flex_flow(hourly, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(hourly, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(hourly, 8, 0);
+    lv_obj_set_style_pad_column(hourly, 8, 0);
+    for (uint8_t i = 0; i < weather_data.hour_count; i++) {
+        weather_hour_t *hour = &weather_data.hourly[i];
+        lv_obj_t *card = lv_obj_create(hourly);
+        lv_obj_set_size(card, 130, 135);
+        lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_all(card, 5, 0);
+        lv_obj_set_style_pad_row(card, 3, 0);
+        char time[12];
+        weather_short_time(hour->time, time);
+        lv_obj_t *label = lv_label_create(card);
+        lv_label_set_text(label, time);
+        label = lv_label_create(card);
+        lv_label_set_text_fmt(label, "%d F", weather_round(hour->temperature));
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_28, 0);
+        label = lv_label_create(card);
+        lv_label_set_text_fmt(label, "%u%% rain", hour->precipitation);
+        label = lv_label_create(card);
+        lv_label_set_text(label, weather_condition(hour->code));
+        lv_obj_set_width(label, 115);
+        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
+    }
+
+    lv_obj_t *daily_title = lv_label_create(weather_body);
+    lv_label_set_text(daily_title, "7-day forecast");
+    lv_obj_set_style_text_font(daily_title, &lv_font_montserrat_28, 0);
+    for (uint8_t i = 0; i < weather_data.day_count; i++) {
+        weather_day_t *day = &weather_data.daily[i];
+        lv_obj_t *row = lv_obj_create(weather_body);
+        lv_obj_set_size(row, 610, 70);
+        lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_all(row, 10, 0);
+        lv_obj_t *date = lv_label_create(row);
+        lv_label_set_text_fmt(date, "%c%c/%c%c", day->date[5], day->date[6], day->date[8], day->date[9]);
+        lv_obj_set_width(date, 65);
+        lv_obj_t *description = lv_label_create(row);
+        lv_label_set_text(description, weather_condition(day->code));
+        lv_obj_set_width(description, 190);
+        lv_obj_t *rain = lv_label_create(row);
+        lv_label_set_text_fmt(rain, "%u%% rain", day->precipitation);
+        lv_obj_set_width(rain, 100);
+        lv_obj_t *range = lv_label_create(row);
+        lv_label_set_text_fmt(range, "%d / %d F", weather_round(day->high), weather_round(day->low));
+        lv_obj_set_width(range, 130);
+        lv_obj_set_style_text_align(range, LV_TEXT_ALIGN_RIGHT, 0);
+    }
+    lv_obj_t *source = lv_label_create(weather_body);
+    lv_label_set_text(source, "Weather data: Open-Meteo");
+}
+
+static void weather_start(const char *location)
+{
+    if (weather_busy) return;
+    if (!wifi_connected) {
+        if (weather_status) lv_label_set_text(weather_status, "Connect to Wi-Fi first");
+        return;
+    }
+    while (*location && isspace((unsigned char)*location)) location++;
+    if (strlen(location) < 2) {
+        if (weather_status) lv_label_set_text(weather_status, "Enter a city or postal code");
+        return;
+    }
+    snprintf(weather_pending_location, sizeof(weather_pending_location), "%.63s", location);
+    weather_busy = true;
+    weather_done = false;
+    if (weather_status) lv_label_set_text(weather_status, "Updating forecast...");
+    if (weather_task_handle) xTaskNotifyGive(weather_task_handle);
+    else if (xTaskCreate(weather_task, "weather", 7168, NULL, 4, &weather_task_handle) == pdPASS)
+        xTaskNotifyGive(weather_task_handle);
+    else {
+        weather_busy = false;
+        if (weather_status) lv_label_set_text(weather_status, "Could not start weather service");
+    }
+}
+
+static void weather_search_clicked(lv_event_t *event)
+{
+    (void)event;
+    weather_start(lv_textarea_get_text(weather_location_area));
+}
+
+static void weather_refresh_clicked(lv_event_t *event)
+{
+    (void)event;
+    weather_start(weather_location);
+}
+
+static void weather_keys_clicked(lv_event_t *event)
+{
+    (void)event;
+    weather_keyboard_visible = !weather_keyboard_visible;
+    if (weather_keyboard_visible) {
+        lv_obj_clear_flag(weather_keyboard, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_scroll_to_view_recursive(weather_keyboard, LV_ANIM_ON);
+    } else {
+        lv_obj_add_flag(weather_keyboard, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_scroll_to_y(content, 0, LV_ANIM_ON);
+    }
+    lv_label_set_text(weather_keys_label, weather_keyboard_visible ? "Hide" : "Keys");
+}
+
+static void weather_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    if (!weather_done || !weather_status) return;
+    weather_done = false;
+    lv_label_set_text(weather_status, weather_ok ? "Forecast updated" : weather_error);
+    if (weather_ok) {
+        lv_textarea_set_text(weather_location_area, weather_location);
+        weather_render();
+    }
+}
+
+static void show_weather(void)
+{
+    clear_content();
+    lv_obj_set_style_pad_row(content, 10, 0);
+    lv_obj_t *title = lv_label_create(content);
+    lv_label_set_text(title, "Weather");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+
+    lv_obj_t *search = lv_obj_create(content);
+    lv_obj_set_size(search, 650, 76);
+    lv_obj_clear_flag(search, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(search, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(search, LV_FLEX_ALIGN_SPACE_AROUND, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(search, 4, 0);
+    weather_location_area = lv_textarea_create(search);
+    lv_obj_set_size(weather_location_area, 385, 62);
+    lv_textarea_set_one_line(weather_location_area, true);
+    lv_textarea_set_max_length(weather_location_area, sizeof(weather_location) - 1);
+    lv_textarea_set_text(weather_location_area, weather_location);
+    lv_obj_add_event_cb(weather_location_area, weather_search_clicked, LV_EVENT_READY, NULL);
+    lv_obj_t *find = button(search, "Find", weather_search_clicked);
+    lv_obj_set_size(find, 110, 62);
+    lv_obj_t *keys = button(search, weather_keyboard_visible ? "Hide" : "Keys", weather_keys_clicked);
+    weather_keys_label = lv_obj_get_child(keys, 0);
+    lv_obj_set_size(keys, 125, 62);
+
+    lv_obj_t *tools = lv_obj_create(content);
+    lv_obj_set_size(tools, 650, 58);
+    lv_obj_clear_flag(tools, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(tools, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(tools, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(tools, 3, 0);
+    weather_status = lv_label_create(tools);
+    lv_obj_set_width(weather_status, 450);
+    lv_label_set_text(weather_status, weather_busy ? "Updating forecast..." : weather_has_data ? "Saved forecast" : "Ready");
+    lv_obj_t *refresh = button(tools, "Refresh", weather_refresh_clicked);
+    lv_obj_set_size(refresh, 150, 52);
+
+    weather_body = lv_obj_create(content);
+    lv_obj_set_width(weather_body, 650);
+    lv_obj_set_height(weather_body, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(weather_body, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(weather_body, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(weather_body, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(weather_body, 8, 0);
+    lv_obj_set_style_pad_row(weather_body, 10, 0);
+    if (weather_has_data) weather_render();
+    else {
+        lv_obj_t *message = lv_label_create(weather_body);
+        lv_label_set_text(message, "Search for a city or postal code to load weather.");
+        lv_obj_set_width(message, 600);
+        lv_obj_set_style_text_align(message, LV_TEXT_ALIGN_CENTER, 0);
+    }
+
+    weather_keyboard = lv_keyboard_create(content);
+    lv_obj_set_size(weather_keyboard, 640, 330);
+    lv_keyboard_set_textarea(weather_keyboard, weather_location_area);
+    lv_obj_move_to_index(weather_keyboard, 3);
+    if (!weather_keyboard_visible) lv_obj_add_flag(weather_keyboard, LV_OBJ_FLAG_HIDDEN);
+    weather_timer = lv_timer_create(weather_tick, 200, NULL);
+    if (!weather_has_data && !weather_busy && wifi_connected) weather_start(weather_location);
+}
+
+static void weather_clicked(lv_event_t *event)
+{
+    (void)event;
+    show_weather();
+}
+
 static void show_launcher(void)
 {
     static int32_t columns[] = {
@@ -3049,6 +3631,7 @@ static void show_launcher(void)
     app_icon(content, LV_SYMBOL_LOOP, "Clock", 0x009688, clock_clicked, 2, 2);
     app_icon(content, LV_SYMBOL_SETTINGS, "System", 0x7C4DFF, system_clicked, 0, 3);
     app_icon(content, LV_SYMBOL_BARS, "Scope", 0x00897B, scope_clicked, 1, 3);
+    app_icon(content, LV_SYMBOL_REFRESH, "Weather", 0x039BE5, weather_clicked, 2, 3);
 }
 
 static void confirm_running_ota(void)
@@ -3065,6 +3648,7 @@ void app_main(void)
 {
     scope_self_test();
     alarm_self_test();
+    weather_self_test();
     ESP_LOGI("tab5-os", "Starting Tab5 OS");
     ESP_ERROR_CHECK(bsp_i2c_init());
     bsp_io_expander_pi4ioe_init(bsp_i2c_get_handle());
@@ -3077,6 +3661,7 @@ void app_main(void)
 
     wifi_ready = start_wifi();
     load_alarms();
+    load_weather_location();
     load_chat_config();
 
     internal_ready = mount_internal();
