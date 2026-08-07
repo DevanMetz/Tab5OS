@@ -55,7 +55,7 @@ The small board-support components in `components/` come from M5Stack's Apache-2
 - [x] AI chat client through an authenticated HTTPS relay
 - [x] Start/stop microphone transcription with a live waveform
 - [x] Reader-mode web browser with HTTPS and clickable links
-- [x] SD-card ebook reader for paged `.txt` books
+- [x] SD-card ebook reader with three first-run Project Gutenberg classics
 - [x] Application launcher
 - [x] USB remote desktop
 

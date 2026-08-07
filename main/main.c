@@ -81,6 +81,17 @@ typedef enum {
     CHAT_JOB_VOICE,
 } chat_job_t;
 
+typedef struct {
+    const char *filename;
+    const char *url;
+} ebook_default_t;
+
+static const ebook_default_t ebook_defaults[] = {
+    {"ALICE.TXT", "https://www.gutenberg.org/cache/epub/11/pg11.txt"},
+    {"FRANK.TXT", "https://www.gutenberg.org/cache/epub/84/pg84.txt"},
+    {"HOLMES.TXT", "https://www.gutenberg.org/cache/epub/1661/pg1661.txt"},
+};
+
 static lv_obj_t *content;
 static lv_obj_t *note_area;
 static lv_obj_t *counter_label;
@@ -167,6 +178,10 @@ static char ebook_path[256];
 static long ebook_offset;
 static long ebook_next_offset;
 static bool ebook_large_text;
+static lv_timer_t *ebook_timer;
+static TaskHandle_t ebook_download_task_handle;
+static volatile bool ebook_download_busy;
+static volatile bool ebook_download_done;
 static volatile int16_t remote_x;
 static volatile int16_t remote_y;
 static volatile bool remote_pressed;
@@ -431,6 +446,13 @@ static esp_err_t chat_http_event(esp_http_client_event_t *event)
     buffer->length += event->data_len;
     buffer->data[buffer->length] = '\0';
     return ESP_OK;
+}
+
+static esp_err_t ebook_http_event(esp_http_client_event_t *event)
+{
+    FILE *file = event->user_data;
+    if (event->event_id != HTTP_EVENT_ON_DATA || !file) return ESP_OK;
+    return fwrite(event->data, 1, event->data_len, file) == (size_t)event->data_len ? ESP_OK : ESP_FAIL;
 }
 
 static bool start_voice_mic(void)
@@ -1160,6 +1182,10 @@ static void clear_content(void)
         lv_timer_delete(browser_timer);
         browser_timer = NULL;
     }
+    if (ebook_timer) {
+        lv_timer_delete(ebook_timer);
+        ebook_timer = NULL;
+    }
     wifi_status = NULL;
     wifi_list = NULL;
     chat_output = NULL;
@@ -1302,6 +1328,91 @@ static bool ebook_supported(const char *name)
 {
     const char *extension = strrchr(name, '.');
     return extension && browser_prefix(extension, ".txt") && !extension[4];
+}
+
+static bool ebook_default_installed(const ebook_default_t *book)
+{
+    char path[256];
+    snprintf(path, sizeof(path), SD_PATH "/BOOKS/%s", book->filename);
+    struct stat info;
+    return stat(path, &info) == 0 && info.st_size > 1024;
+}
+
+static bool ebook_download_default(const ebook_default_t *book)
+{
+    if (ebook_default_installed(book)) return true;
+    char path[256];
+    char temporary[256];
+    snprintf(path, sizeof(path), SD_PATH "/BOOKS/%s", book->filename);
+    snprintf(temporary, sizeof(temporary), "%s", path);
+    snprintf(strrchr(temporary, '.'), 5, ".TMP");
+    FILE *file = fopen(temporary, "wb");
+    if (!file) {
+        ESP_LOGE("tab5-os", "Could not create %s", temporary);
+        return false;
+    }
+    esp_http_client_config_t config = {
+        .url = book->url,
+        .event_handler = ebook_http_event,
+        .user_data = file,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .timeout_ms = 30000,
+        .buffer_size = 1024,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (!client) {
+        fclose(file);
+        remove(temporary);
+        ESP_LOGE("tab5-os", "Could not start download for %s", book->filename);
+        return false;
+    }
+    esp_http_client_set_header(client, "User-Agent", "Tab5OS/1.0");
+    esp_err_t error = esp_http_client_perform(client);
+    int status = esp_http_client_get_status_code(client);
+    esp_http_client_cleanup(client);
+    bool saved = fclose(file) == 0 && error == ESP_OK && status >= 200 && status < 300 && rename(temporary, path) == 0;
+    if (!saved) remove(temporary);
+    ESP_LOGI("tab5-os", "Default ebook %s: %s (%d)", book->filename, saved ? "saved" : "failed", status);
+    return saved;
+}
+
+static void ebook_download_task(void *argument)
+{
+    (void)argument;
+    while (!wifi_connected) vTaskDelay(pdMS_TO_TICKS(500));
+    for (size_t i = 0; i < sizeof(ebook_defaults) / sizeof(ebook_defaults[0]); ++i) {
+        ebook_download_default(&ebook_defaults[i]);
+    }
+    ebook_download_busy = false;
+    ebook_download_done = true;
+    ebook_download_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+static void ebook_download_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    if (ebook_download_done) {
+        ebook_download_done = false;
+        show_ebooks();
+    }
+}
+
+static bool ebook_defaults_missing(void)
+{
+    for (size_t i = 0; i < sizeof(ebook_defaults) / sizeof(ebook_defaults[0]); ++i) {
+        if (!ebook_default_installed(&ebook_defaults[i])) return true;
+    }
+    return false;
+}
+
+static void ebook_start_default_downloads(void)
+{
+    if (!sd_ready || !ebook_defaults_missing() || ebook_download_busy) return;
+    ebook_download_busy = true;
+    ebook_download_done = false;
+    if (xTaskCreateWithCaps(ebook_download_task, "ebooks", 10240, NULL, 4, &ebook_download_task_handle,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) ebook_download_busy = false;
 }
 
 static void ebook_load_page(void)
@@ -1459,6 +1570,12 @@ static void show_ebooks(void)
     }
     closedir(dir);
     if (!file_path_count) lv_list_add_text(list, "Copy .txt books into /sdcard/BOOKS");
+    if (ebook_download_busy) {
+        lv_list_add_text(list, "Downloading free classics...");
+    } else if (ebook_defaults_missing()) {
+        lv_list_add_text(list, "Classics download failed; restart to retry");
+    }
+    ebook_timer = lv_timer_create(ebook_download_tick, 500, NULL);
 }
 
 static void ebooks_clicked(lv_event_t *event)
@@ -1924,4 +2041,6 @@ void app_main(void)
 
     bsp_display_unlock();
     bsp_display_backlight_on();
+    mkdir(SD_PATH "/BOOKS", 0775);
+    ebook_start_default_downloads();
 }
