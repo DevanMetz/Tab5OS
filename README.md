@@ -56,7 +56,7 @@ The small board-support components in `components/` come from M5Stack's Apache-2
 - [x] SPIFFS/microSD file browser
 - [x] Notes, counter, and system apps
 - [x] Internet-synced RTC clock with persistent daily alarms and snooze
-- [x] Milwaukee-default global weather plus an idle weather/time/date screensaver
+- [x] Milwaukee weather plus a static time/date screensaver with hourly and daily forecasts
 - [x] GPIO control and eight-channel ADC oscilloscope
 - [x] Wi-Fi settings
 - [x] AI chat client through an authenticated HTTPS relay

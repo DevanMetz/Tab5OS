@@ -70,6 +70,7 @@
 #define WEATHER_HOURS 12
 #define WEATHER_DAYS 7
 #define SCREENSAVER_IDLE_MS (2 * 60 * 1000)
+#define SCREENSAVER_FORECAST_ITEMS 5
 #define TIME_ZONE "CST6CDT,M3.2.0,M11.1.0"
 
 typedef struct __attribute__((packed)) {
@@ -388,6 +389,8 @@ static lv_obj_t *screensaver_panel;
 static lv_obj_t *screensaver_time;
 static lv_obj_t *screensaver_date;
 static lv_obj_t *screensaver_weather;
+static lv_obj_t *screensaver_hour_labels[SCREENSAVER_FORECAST_ITEMS];
+static lv_obj_t *screensaver_day_labels[SCREENSAVER_FORECAST_ITEMS];
 
 static void show_launcher(void);
 static void show_files(const char *path);
@@ -3618,12 +3621,21 @@ static void screensaver_close(void)
     if (!screensaver) return;
     lv_obj_delete_async(screensaver);
     screensaver = screensaver_panel = screensaver_time = screensaver_date = screensaver_weather = NULL;
+    memset(screensaver_hour_labels, 0, sizeof(screensaver_hour_labels));
+    memset(screensaver_day_labels, 0, sizeof(screensaver_day_labels));
 }
 
 static void screensaver_touched(lv_event_t *event)
 {
     (void)event;
     screensaver_close();
+}
+
+static const char *screensaver_symbol(uint8_t code)
+{
+    if (code <= 1) return "\\ | /\n--O--\n/ | \\";
+    if (code <= 3 || code == 45 || code == 48) return " .--.\n(___)\n     ";
+    return " .--.\n(___)\n /// ";
 }
 
 static void screensaver_update(void)
@@ -3639,16 +3651,28 @@ static void screensaver_update(void)
     strftime(text, sizeof(text), "%A, %B %d, %Y", &local);
     lv_label_set_text(screensaver_date, text);
     if (weather_has_data) {
-        lv_label_set_text_fmt(screensaver_weather, "%d F\n%s\n%s\n\nBAT %d%%",
+        lv_label_set_text_fmt(screensaver_weather, "%d F  |  %s\n%s\nBAT %d%%",
             weather_round(weather_data.temperature), weather_condition(weather_data.code),
             weather_data.place, battery_percent);
+        for (size_t i = 0; i < SCREENSAVER_FORECAST_ITEMS; i++) {
+            char hour[12];
+            weather_short_time(weather_data.hourly[i].time, hour);
+            lv_label_set_text_fmt(screensaver_hour_labels[i], "%s\n%s\n%d F\n%u%% rain", hour,
+                screensaver_symbol(weather_data.hourly[i].code), weather_round(weather_data.hourly[i].temperature),
+                (unsigned)weather_data.hourly[i].precipitation);
+            weather_day_t *day = &weather_data.daily[i];
+            lv_label_set_text_fmt(screensaver_day_labels[i], "%c%c/%c%c\n%s\n%d/%d F\n%u%% rain",
+                day->date[5], day->date[6], day->date[8], day->date[9], screensaver_symbol(day->code),
+                weather_round(day->high), weather_round(day->low), (unsigned)day->precipitation);
+        }
     } else {
         lv_label_set_text(screensaver_weather, wifi_connected ? "Loading Milwaukee weather..." :
             "Milwaukee weather needs Wi-Fi");
+        for (size_t i = 0; i < SCREENSAVER_FORECAST_ITEMS; i++) {
+            lv_label_set_text(screensaver_hour_labels[i], "--\n\n-- F");
+            lv_label_set_text(screensaver_day_labels[i], "--/--\n\n--/-- F");
+        }
     }
-    static const int16_t offsets[][2] = {{-45, -70}, {45, -35}, {-30, 15}, {35, 60}};
-    size_t position = local.tm_min % (sizeof(offsets) / sizeof(offsets[0]));
-    lv_obj_align(screensaver_panel, LV_ALIGN_CENTER, offsets[position][0], offsets[position][1]);
 }
 
 static void screensaver_show(void)
@@ -3668,18 +3692,57 @@ static void screensaver_show(void)
 
     screensaver_panel = lv_obj_create(screensaver);
     lv_obj_remove_style_all(screensaver_panel);
-    lv_obj_set_size(screensaver_panel, 620, 650);
+    lv_obj_set_size(screensaver_panel, 690, 1040);
+    lv_obj_align(screensaver_panel, LV_ALIGN_CENTER, 0, 0);
     lv_obj_set_flex_flow(screensaver_panel, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(screensaver_panel, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(screensaver_panel, 28, 0);
+    lv_obj_set_style_pad_row(screensaver_panel, 10, 0);
     screensaver_time = lv_label_create(screensaver_panel);
     lv_obj_set_style_text_font(screensaver_time, &lv_font_montserrat_48, 0);
     screensaver_date = lv_label_create(screensaver_panel);
     lv_obj_set_style_text_font(screensaver_date, &lv_font_montserrat_28, 0);
     screensaver_weather = lv_label_create(screensaver_panel);
-    lv_obj_set_width(screensaver_weather, 600);
+    lv_obj_set_width(screensaver_weather, 660);
     lv_obj_set_style_text_font(screensaver_weather, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_align(screensaver_weather, LV_TEXT_ALIGN_CENTER, 0);
+
+    lv_obj_t *heading = lv_label_create(screensaver_panel);
+    lv_label_set_text(heading, "HOURLY");
+    lv_obj_set_style_text_font(heading, &lv_font_montserrat_28, 0);
+    lv_obj_t *row = lv_obj_create(screensaver_panel);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, 680, 205);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_AROUND, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    for (size_t i = 0; i < SCREENSAVER_FORECAST_ITEMS; i++) {
+        lv_obj_t *card = lv_obj_create(row);
+        lv_obj_set_size(card, 128, 200);
+        lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_pad_all(card, 4, 0);
+        screensaver_hour_labels[i] = lv_label_create(card);
+        lv_obj_set_width(screensaver_hour_labels[i], 116);
+        lv_obj_set_style_text_align(screensaver_hour_labels[i], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_center(screensaver_hour_labels[i]);
+    }
+
+    heading = lv_label_create(screensaver_panel);
+    lv_label_set_text(heading, "DAILY");
+    lv_obj_set_style_text_font(heading, &lv_font_montserrat_28, 0);
+    row = lv_obj_create(screensaver_panel);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, 680, 205);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_AROUND, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    for (size_t i = 0; i < SCREENSAVER_FORECAST_ITEMS; i++) {
+        lv_obj_t *card = lv_obj_create(row);
+        lv_obj_set_size(card, 128, 200);
+        lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_pad_all(card, 4, 0);
+        screensaver_day_labels[i] = lv_label_create(card);
+        lv_obj_set_width(screensaver_day_labels[i], 116);
+        lv_obj_set_style_text_align(screensaver_day_labels[i], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_center(screensaver_day_labels[i]);
+    }
     lv_obj_t *source = lv_label_create(screensaver_panel);
     lv_label_set_text(source, "Weather data: Open-Meteo  |  Touch to wake");
     screensaver_update();
