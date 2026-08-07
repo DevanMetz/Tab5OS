@@ -2000,28 +2000,31 @@ static void browser_clicked(lv_event_t *event)
 static void ota_update_task(void *argument)
 {
     (void)argument;
-    esp_http_client_config_t http = {
-        .url = OTA_URL,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = 30000,
-        .buffer_size = 2048,
-        .keep_alive_enable = true,
-        .max_redirection_count = 5,
-    };
-    esp_https_ota_config_t config = {.http_config = &http};
-    ESP_LOGI("tab5-os", "OTA update starting");
-    esp_err_t error = esp_https_ota(&config);
-    ota_ok = error == ESP_OK;
-    if (!ota_ok) snprintf(ota_error, sizeof(ota_error), "Update failed: %s", esp_err_to_name(error));
-    ota_busy = false;
-    ota_done = true;
-    if (ota_ok) {
-        ESP_LOGI("tab5-os", "OTA update installed; restarting");
-        vTaskDelay(pdMS_TO_TICKS(2000));
-        esp_restart();
+    for (;;) {
+        esp_http_client_config_t http = {
+            .url = OTA_URL,
+            .crt_bundle_attach = esp_crt_bundle_attach,
+            .timeout_ms = 30000,
+            .buffer_size = 1024,
+            .buffer_size_tx = 1536,
+            .keep_alive_enable = true,
+            .max_redirection_count = 5,
+        };
+        esp_https_ota_config_t config = {.http_config = &http};
+        ESP_LOGI("tab5-os", "OTA update starting");
+        esp_err_t error = esp_https_ota(&config);
+        ota_ok = error == ESP_OK;
+        if (!ota_ok) snprintf(ota_error, sizeof(ota_error), "Update failed: %s", esp_err_to_name(error));
+        ota_busy = false;
+        ota_done = true;
+        if (ota_ok) {
+            ESP_LOGI("tab5-os", "OTA update installed; restarting");
+            vTaskDelay(pdMS_TO_TICKS(2000));
+            esp_restart();
+        }
+        // ponytail: keep the PSRAM worker alive; ESP-IDF rejects its cleanup callback on deletion.
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     }
-    ota_task_handle = NULL;
-    vTaskDelete(NULL);
 }
 
 static void ota_clicked(lv_event_t *event)
@@ -2041,8 +2044,9 @@ static void ota_clicked(lv_event_t *event)
     ota_ok = false;
     lv_label_set_text(ota_status, "Downloading update...");
     lv_obj_add_state(ota_button, LV_STATE_DISABLED);
-    if (xTaskCreateWithCaps(ota_update_task, "ota", 12288, NULL, 4, &ota_task_handle,
-            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+    if (ota_task_handle) {
+        xTaskNotifyGive(ota_task_handle);
+    } else if (xTaskCreate(ota_update_task, "ota", 6144, NULL, 4, &ota_task_handle) != pdPASS) {
         ota_busy = false;
         lv_obj_remove_state(ota_button, LV_STATE_DISABLED);
         lv_label_set_text(ota_status, "Could not start updater");
