@@ -13,7 +13,8 @@ jobs:
     container: espressif/idf:v5.4.2
     steps:
       - uses: actions/checkout@v4
-      - run: idf.py build
+      - shell: bash
+        run: . "$IDF_PATH/export.sh" && idf.py build
       - uses: actions/upload-artifact@v4
         with:
           name: firmware
