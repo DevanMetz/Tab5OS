@@ -43,6 +43,7 @@
 #define VOICE_MIC_CHANNEL 0
 #define VOICE_MAX_SECONDS 30
 #define BROWSER_MAX_HTML 65536
+#define BROWSER_MAX_TEXT 12288
 #define BROWSER_MAX_LINKS 12
 
 typedef struct __attribute__((packed)) {
@@ -444,6 +445,13 @@ static bool start_voice_mic(void)
     return true;
 }
 
+static void stop_voice_mic(void)
+{
+    if (!voice_mic_open) return;
+    esp_codec_dev_close(voice_mic);
+    voice_mic_open = false;
+}
+
 static char *capture_voice_wav(size_t *size)
 {
     if (!start_voice_mic()) return NULL;
@@ -454,6 +462,7 @@ static char *capture_voice_wav(size_t *size)
     if (!wav) {
         snprintf(chat_error, sizeof(chat_error), "Out of memory");
         voice_recording = false;
+        stop_voice_mic();
         return NULL;
     }
 
@@ -468,6 +477,7 @@ static char *capture_voice_wav(size_t *size)
             snprintf(chat_error, sizeof(chat_error), "Microphone read failed");
             free(wav);
             voice_recording = false;
+            stop_voice_mic();
             return NULL;
         }
         uint16_t peak = 0;
@@ -488,6 +498,7 @@ static char *capture_voice_wav(size_t *size)
     }
     voice_recording = false;
     voice_level = 0;
+    stop_voice_mic();
     if (written < VOICE_RATE / 4) {
         snprintf(chat_error, sizeof(chat_error), "Recording was too short");
         free(wav);
@@ -951,7 +962,7 @@ static void browser_request_task(void *argument)
         browser_ok = false;
         browser_error[0] = '\0';
         char *html = heap_caps_calloc(1, BROWSER_MAX_HTML, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        char *text = heap_caps_malloc(BROWSER_MAX_HTML, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        char *text = heap_caps_malloc(BROWSER_MAX_TEXT, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!html || !text) {
             snprintf(browser_error, sizeof(browser_error), "Out of memory");
             free(html);
@@ -987,7 +998,7 @@ static void browser_request_task(void *argument)
             goto done;
         }
         browser_extract_links(html, browser_pending_url);
-        browser_html_to_text(html, text, BROWSER_MAX_HTML);
+        browser_html_to_text(html, text, BROWSER_MAX_TEXT);
         ESP_LOGI("tab5-os", "Browser loaded %u bytes, %u links", (unsigned)buffer.length, (unsigned)browser_link_count);
         free(html);
         free(browser_result);
@@ -1692,7 +1703,6 @@ void app_main(void)
     sd_ready = bsp_sdcard_init(SD_PATH, 5) == ESP_OK;
 
     lv_display_t *display = bsp_display_start();
-    if (!start_voice_mic()) ESP_LOGW("tab5-os", "%s", chat_error);
     bsp_display_lock(0);
 
     lv_obj_t *screen = lv_screen_active();
