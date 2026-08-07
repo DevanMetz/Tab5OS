@@ -69,6 +69,7 @@
 #define ALARM_COUNT 3
 #define WEATHER_HOURS 12
 #define WEATHER_DAYS 7
+#define SCREENSAVER_IDLE_MS (2 * 60 * 1000)
 #define TIME_ZONE "CST6CDT,M3.2.0,M11.1.0"
 
 typedef struct __attribute__((packed)) {
@@ -377,10 +378,16 @@ static volatile bool weather_done;
 static bool weather_ok;
 static bool weather_keyboard_visible;
 static bool weather_has_data;
-static char weather_location[64] = "Chicago";
+static char weather_location[64] = "Milwaukee, Wisconsin";
 static char weather_pending_location[64];
 static char weather_error[96];
 static weather_data_t weather_data;
+static time_t weather_fetched_at;
+static lv_obj_t *screensaver;
+static lv_obj_t *screensaver_panel;
+static lv_obj_t *screensaver_time;
+static lv_obj_t *screensaver_date;
+static lv_obj_t *screensaver_weather;
 
 static void show_launcher(void);
 static void show_files(const char *path);
@@ -392,6 +399,7 @@ static void show_clock(void);
 static void show_gpio(void);
 static void show_scope(void);
 static void show_weather(void);
+static void weather_start(const char *location);
 static void clear_content(void);
 static void browser_link_clicked(lv_event_t *event);
 static lv_obj_t *button(lv_obj_t *parent, const char *text, lv_event_cb_t callback);
@@ -1387,9 +1395,17 @@ static bool weather_parse_forecast(const char *json, weather_data_t *data)
 static void load_weather_location(void)
 {
     nvs_handle_t handle;
-    if (nvs_open("tab5", NVS_READONLY, &handle) != ESP_OK) return;
+    if (nvs_open("tab5", NVS_READWRITE, &handle) != ESP_OK) return;
     size_t size = sizeof(weather_location);
     nvs_get_str(handle, "weather_loc", weather_location, &size);
+    uint8_t migrated = 0;
+    if (nvs_get_u8(handle, "weather_mke", &migrated) != ESP_OK) {
+        if (strcmp(weather_location, "Chicago") == 0)
+            snprintf(weather_location, sizeof(weather_location), "Milwaukee, Wisconsin");
+        nvs_set_str(handle, "weather_loc", weather_location);
+        nvs_set_u8(handle, "weather_mke", 1);
+        nvs_commit(handle);
+    }
     nvs_close(handle);
 }
 
@@ -1451,6 +1467,7 @@ static void weather_task(void *argument)
         }
         weather_data = next;
         weather_has_data = true;
+        weather_fetched_at = time(NULL);
         weather_ok = true;
         snprintf(weather_location, sizeof(weather_location), "%s", weather_pending_location);
         save_weather_location();
@@ -3596,6 +3613,92 @@ static void weather_clicked(lv_event_t *event)
     show_weather();
 }
 
+static void screensaver_close(void)
+{
+    if (!screensaver) return;
+    lv_obj_delete_async(screensaver);
+    screensaver = screensaver_panel = screensaver_time = screensaver_date = screensaver_weather = NULL;
+}
+
+static void screensaver_touched(lv_event_t *event)
+{
+    (void)event;
+    screensaver_close();
+}
+
+static void screensaver_update(void)
+{
+    if (!screensaver) return;
+    time_t now = time(NULL);
+    struct tm local;
+    localtime_r(&now, &local);
+    char text[48];
+    strftime(text, sizeof(text), "%I:%M %p", &local);
+    if (text[0] == '0') memmove(text, text + 1, strlen(text));
+    lv_label_set_text(screensaver_time, text);
+    strftime(text, sizeof(text), "%A, %B %d, %Y", &local);
+    lv_label_set_text(screensaver_date, text);
+    if (weather_has_data) {
+        lv_label_set_text_fmt(screensaver_weather, "%d F\n%s\n%s\n\nBAT %d%%",
+            weather_round(weather_data.temperature), weather_condition(weather_data.code),
+            weather_data.place, battery_percent);
+    } else {
+        lv_label_set_text(screensaver_weather, wifi_connected ? "Loading Milwaukee weather..." :
+            "Milwaukee weather needs Wi-Fi");
+    }
+    static const int16_t offsets[][2] = {{-45, -70}, {45, -35}, {-30, 15}, {35, 60}};
+    size_t position = local.tm_min % (sizeof(offsets) / sizeof(offsets[0]));
+    lv_obj_align(screensaver_panel, LV_ALIGN_CENTER, offsets[position][0], offsets[position][1]);
+}
+
+static void screensaver_show(void)
+{
+    if (screensaver) return;
+    screensaver = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(screensaver, SCREEN_WIDTH, SCREEN_HEIGHT);
+    lv_obj_align(screensaver, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_clear_flag(screensaver, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(screensaver, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_style_bg_color(screensaver, lv_color_hex(0x080b12), 0);
+    lv_obj_set_style_bg_opa(screensaver, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(screensaver, 0, 0);
+    lv_obj_set_style_radius(screensaver, 0, 0);
+    lv_obj_set_style_text_color(screensaver, lv_color_white(), 0);
+    lv_obj_add_event_cb(screensaver, screensaver_touched, LV_EVENT_PRESSED, NULL);
+
+    screensaver_panel = lv_obj_create(screensaver);
+    lv_obj_remove_style_all(screensaver_panel);
+    lv_obj_set_size(screensaver_panel, 620, 650);
+    lv_obj_set_flex_flow(screensaver_panel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(screensaver_panel, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(screensaver_panel, 28, 0);
+    screensaver_time = lv_label_create(screensaver_panel);
+    lv_obj_set_style_text_font(screensaver_time, &lv_font_montserrat_48, 0);
+    screensaver_date = lv_label_create(screensaver_panel);
+    lv_obj_set_style_text_font(screensaver_date, &lv_font_montserrat_28, 0);
+    screensaver_weather = lv_label_create(screensaver_panel);
+    lv_obj_set_width(screensaver_weather, 600);
+    lv_obj_set_style_text_font(screensaver_weather, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_align(screensaver_weather, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_t *source = lv_label_create(screensaver_panel);
+    lv_label_set_text(source, "Weather data: Open-Meteo  |  Touch to wake");
+    screensaver_update();
+    if (wifi_connected && (!weather_has_data || time(NULL) - weather_fetched_at > 15 * 60))
+        weather_start(weather_location);
+}
+
+static void screensaver_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    uint32_t inactive = lv_display_get_inactive_time(NULL);
+    if (screensaver) {
+        if (inactive < 1000 || alarm_active) screensaver_close();
+        else screensaver_update();
+    } else if (!alarm_active && inactive >= SCREENSAVER_IDLE_MS) {
+        screensaver_show();
+    }
+}
+
 static void show_launcher(void)
 {
     static int32_t columns[] = {
@@ -3684,6 +3787,7 @@ void app_main(void)
     lv_timer_create(battery_tick, 5000, NULL);
     clock_tick(NULL);
     lv_timer_create(clock_tick, 1000, NULL);
+    lv_timer_create(screensaver_tick, 1000, NULL);
 
     content = lv_obj_create(screen);
     lv_obj_set_size(content, 720, 1180);
