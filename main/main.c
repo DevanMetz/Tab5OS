@@ -66,6 +66,7 @@
 #define BATTERY_HISTORY_POINTS 60
 #define SCOPE_RING_POINTS 1200
 #define SCOPE_CHART_POINTS 300
+#define ALARM_COUNT 3
 #define TIME_ZONE "CST6CDT,M3.2.0,M11.1.0"
 
 typedef struct __attribute__((packed)) {
@@ -122,6 +123,12 @@ typedef struct {
     adc_channel_t channel;
 } scope_channel_t;
 
+typedef struct {
+    uint8_t hour;
+    uint8_t minute;
+    uint8_t enabled;
+} alarm_setting_t;
+
 static const ebook_default_t ebook_defaults[] = {
     {"ALICE.TXT", "https://www.gutenberg.org/cache/epub/11/pg11.txt"},
     {"FRANK.TXT", "https://www.gutenberg.org/cache/epub/84/pg84.txt"},
@@ -165,6 +172,17 @@ static lv_obj_t *time_label;
 static lv_obj_t *clock_time;
 static lv_obj_t *clock_date;
 static lv_obj_t *clock_status;
+static alarm_setting_t alarms[ALARM_COUNT];
+static int alarm_last_day[ALARM_COUNT];
+static lv_obj_t *alarm_time_labels[ALARM_COUNT];
+static lv_obj_t *alarm_enabled_labels[ALARM_COUNT];
+static lv_obj_t *alarm_modal;
+static TaskHandle_t alarm_sound_task_handle;
+static esp_codec_dev_handle_t alarm_speaker;
+static volatile bool alarm_active;
+static uint8_t alarm_active_index;
+static time_t alarm_snooze_until;
+static uint8_t alarm_snooze_index;
 static bool rtc_time_loaded;
 static bool sntp_started;
 static volatile bool internet_time_synced;
@@ -319,6 +337,7 @@ static void show_gpio(void);
 static void show_scope(void);
 static void clear_content(void);
 static void browser_link_clicked(lv_event_t *event);
+static lv_obj_t *button(lv_obj_t *parent, const char *text, lv_event_cb_t callback);
 
 static void reset_content_scroll(void *object)
 {
@@ -658,6 +677,146 @@ static void clock_init(i2c_master_bus_handle_t bus)
     assert(unbcd(bcd(59)) == 59);
 }
 
+static uint8_t alarm_wrap(int value, int limit)
+{
+    value %= limit;
+    return value < 0 ? value + limit : value;
+}
+
+static void alarm_self_test(void)
+{
+    assert(alarm_wrap(24, 24) == 0);
+    assert(alarm_wrap(-1, 24) == 23);
+    assert(alarm_wrap(60, 60) == 0);
+}
+
+static void load_alarms(void)
+{
+    for (size_t i = 0; i < ALARM_COUNT; i++) {
+        alarms[i] = (alarm_setting_t){.hour = 7 + i, .minute = 0};
+        alarm_last_day[i] = -1;
+    }
+    nvs_handle_t handle;
+    if (nvs_open("tab5", NVS_READONLY, &handle) != ESP_OK) return;
+    alarm_setting_t saved[ALARM_COUNT];
+    size_t size = sizeof(saved);
+    if (nvs_get_blob(handle, "alarms", saved, &size) == ESP_OK && size == sizeof(saved)) {
+        bool valid = true;
+        for (size_t i = 0; i < ALARM_COUNT; i++)
+            valid &= saved[i].hour < 24 && saved[i].minute < 60 && saved[i].enabled <= 1;
+        if (valid) memcpy(alarms, saved, sizeof(alarms));
+    }
+    nvs_close(handle);
+}
+
+static void save_alarms(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open("tab5", NVS_READWRITE, &handle) != ESP_OK) return;
+    if (nvs_set_blob(handle, "alarms", alarms, sizeof(alarms)) == ESP_OK) nvs_commit(handle);
+    nvs_close(handle);
+}
+
+static void alarm_close(void)
+{
+    alarm_active = false;
+    if (alarm_modal) {
+        lv_obj_delete_async(alarm_modal);
+        alarm_modal = NULL;
+    }
+}
+
+static void alarm_dismiss_clicked(lv_event_t *event)
+{
+    (void)event;
+    alarm_close();
+}
+
+static void alarm_snooze_clicked(lv_event_t *event)
+{
+    (void)event;
+    alarm_snooze_until = time(NULL) + 9 * 60;
+    alarm_snooze_index = alarm_active_index;
+    alarm_close();
+}
+
+static void alarm_sound_task(void *argument)
+{
+    (void)argument;
+    if (!voice_recording) {
+        if (!alarm_speaker) alarm_speaker = bsp_audio_codec_speaker_init();
+        esp_codec_dev_sample_info_t format = {.sample_rate = 16000, .channel = 1, .bits_per_sample = 16};
+        if (alarm_speaker && esp_codec_dev_open(alarm_speaker, &format) == ESP_CODEC_DEV_OK) {
+            esp_codec_dev_set_out_vol(alarm_speaker, 75);
+            int16_t tone[160];
+            for (size_t i = 0; i < sizeof(tone) / sizeof(tone[0]); i++) tone[i] = (i / 9) & 1 ? 9000 : -9000;
+            while (alarm_active) {
+                for (int i = 0; i < 40 && alarm_active; i++) esp_codec_dev_write(alarm_speaker, tone, sizeof(tone));
+                vTaskDelay(pdMS_TO_TICKS(600));
+            }
+            esp_codec_dev_close(alarm_speaker);
+        }
+    }
+    alarm_sound_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+static void alarm_trigger(uint8_t index)
+{
+    if (alarm_active) return;
+    alarm_active = true;
+    alarm_active_index = index;
+
+    alarm_modal = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(alarm_modal, SCREEN_WIDTH, SCREEN_HEIGHT);
+    lv_obj_set_style_bg_color(alarm_modal, lv_color_hex(0x10141f), 0);
+    lv_obj_set_style_bg_opa(alarm_modal, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(alarm_modal, lv_color_white(), 0);
+    lv_obj_set_flex_flow(alarm_modal, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(alarm_modal, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(alarm_modal, 40, 0);
+
+    lv_obj_t *title = lv_label_create(alarm_modal);
+    lv_label_set_text(title, LV_SYMBOL_BELL "  ALARM");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_48, 0);
+    lv_obj_t *time_label = lv_label_create(alarm_modal);
+    uint8_t hour = alarms[index].hour % 12;
+    lv_label_set_text_fmt(time_label, "%u:%02u %s", hour ? hour : 12, alarms[index].minute,
+                          alarms[index].hour < 12 ? "AM" : "PM");
+    lv_obj_set_style_text_font(time_label, &lv_font_montserrat_48, 0);
+    lv_obj_t *message = lv_label_create(alarm_modal);
+    lv_label_set_text(message, "Daily alarm");
+    lv_obj_t *row = lv_obj_create(alarm_modal);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, 600, 120);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_AROUND, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *snooze = button(row, "Snooze 9m", alarm_snooze_clicked);
+    lv_obj_set_size(snooze, 260, 100);
+    lv_obj_t *dismiss = button(row, "Dismiss", alarm_dismiss_clicked);
+    lv_obj_set_size(dismiss, 260, 100);
+
+    if (!alarm_sound_task_handle) xTaskCreate(alarm_sound_task, "alarm-sound", 3072, NULL, 5, &alarm_sound_task_handle);
+}
+
+static void alarm_check(time_t now, const struct tm *local)
+{
+    if (!alarm_active && alarm_snooze_until && now >= alarm_snooze_until) {
+        alarm_snooze_until = 0;
+        alarm_trigger(alarm_snooze_index);
+        return;
+    }
+    int day = (local->tm_year + 1900) * 400 + local->tm_yday;
+    for (size_t i = 0; i < ALARM_COUNT; i++) {
+        if (alarms[i].enabled && alarms[i].hour == local->tm_hour && alarms[i].minute == local->tm_min &&
+            alarm_last_day[i] != day) {
+            alarm_last_day[i] = day;
+            alarm_trigger(i);
+            break;
+        }
+    }
+}
+
 static void clock_tick(lv_timer_t *timer)
 {
     (void)timer;
@@ -669,6 +828,7 @@ static void clock_tick(lv_timer_t *timer)
     struct tm local;
     localtime_r(&now, &local);
     bool valid = local.tm_year >= 124;
+    if (valid) alarm_check(now, &local);
     char text[40];
     if (valid) strftime(text, sizeof(text), "%I:%M %p", &local);
     else snprintf(text, sizeof(text), "--:--");
@@ -1782,6 +1942,10 @@ static void clear_content(void)
     clock_time = NULL;
     clock_date = NULL;
     clock_status = NULL;
+    for (size_t i = 0; i < ALARM_COUNT; i++) {
+        alarm_time_labels[i] = NULL;
+        alarm_enabled_labels[i] = NULL;
+    }
     scope_chart = NULL;
     scope_series = NULL;
     scope_stats = NULL;
@@ -2657,6 +2821,43 @@ static void clock_clicked(lv_event_t *event)
     show_clock();
 }
 
+static void alarm_update_row(size_t index)
+{
+    if (!alarm_time_labels[index]) return;
+    uint8_t hour = alarms[index].hour % 12;
+    lv_label_set_text_fmt(alarm_time_labels[index], "%u:%02u %s", hour ? hour : 12, alarms[index].minute,
+                          alarms[index].hour < 12 ? "AM" : "PM");
+    lv_label_set_text(alarm_enabled_labels[index], alarms[index].enabled ? "ON" : "OFF");
+}
+
+static void alarm_edit_clicked(lv_event_t *event)
+{
+    unsigned action = (unsigned)(uintptr_t)lv_event_get_user_data(event);
+    size_t index = action >> 4;
+    switch (action & 0x0f) {
+        case 0: alarms[index].hour = alarm_wrap(alarms[index].hour - 1, 24); break;
+        case 1: alarms[index].hour = alarm_wrap(alarms[index].hour + 1, 24); break;
+        case 2: alarms[index].minute = alarm_wrap(alarms[index].minute - 1, 60); break;
+        case 3: alarms[index].minute = alarm_wrap(alarms[index].minute + 1, 60); break;
+        default: alarms[index].enabled = !alarms[index].enabled; break;
+    }
+    alarm_last_day[index] = -1;
+    alarm_update_row(index);
+    save_alarms();
+}
+
+static lv_obj_t *alarm_control(lv_obj_t *parent, const char *text, int width, unsigned action, lv_obj_t **label_out)
+{
+    lv_obj_t *control = lv_button_create(parent);
+    lv_obj_set_size(control, width, 64);
+    lv_obj_add_event_cb(control, alarm_edit_clicked, LV_EVENT_CLICKED, (void *)(uintptr_t)action);
+    lv_obj_t *label = lv_label_create(control);
+    lv_label_set_text(label, text);
+    lv_obj_center(label);
+    if (label_out) *label_out = label;
+    return control;
+}
+
 static void show_clock(void)
 {
     clear_content();
@@ -2665,6 +2866,24 @@ static void show_clock(void)
     clock_date = lv_label_create(content);
     lv_obj_set_style_text_font(clock_date, &lv_font_montserrat_28, 0);
     clock_status = lv_label_create(content);
+    lv_obj_t *heading = lv_label_create(content);
+    lv_label_set_text(heading, "Daily alarms");
+    lv_obj_set_style_text_font(heading, &lv_font_montserrat_28, 0);
+    for (size_t i = 0; i < ALARM_COUNT; i++) {
+        lv_obj_t *row = lv_obj_create(content);
+        lv_obj_remove_style_all(row);
+        lv_obj_set_size(row, 650, 76);
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_AROUND, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        alarm_time_labels[i] = lv_label_create(row);
+        lv_obj_set_width(alarm_time_labels[i], 120);
+        alarm_control(row, "H-", 68, i << 4, NULL);
+        alarm_control(row, "H+", 68, (i << 4) | 1, NULL);
+        alarm_control(row, "M-", 68, (i << 4) | 2, NULL);
+        alarm_control(row, "M+", 68, (i << 4) | 3, NULL);
+        alarm_control(row, "OFF", 100, (i << 4) | 4, &alarm_enabled_labels[i]);
+        alarm_update_row(i);
+    }
     clock_tick(NULL);
 }
 
@@ -2845,6 +3064,7 @@ static void confirm_running_ota(void)
 void app_main(void)
 {
     scope_self_test();
+    alarm_self_test();
     ESP_LOGI("tab5-os", "Starting Tab5 OS");
     ESP_ERROR_CHECK(bsp_i2c_init());
     bsp_io_expander_pi4ioe_init(bsp_i2c_get_handle());
@@ -2856,6 +3076,7 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(250));
 
     wifi_ready = start_wifi();
+    load_alarms();
     load_chat_config();
 
     internal_ready = mount_internal();
