@@ -3437,14 +3437,8 @@ static void weather_render(void)
         char time[12];
         weather_short_time(hour->time, time);
         lv_obj_t *label = lv_label_create(card);
-        lv_label_set_text(label, time);
-        label = lv_label_create(card);
-        lv_label_set_text_fmt(label, "%d F", weather_round(hour->temperature));
-        lv_obj_set_style_text_font(label, &lv_font_montserrat_28, 0);
-        label = lv_label_create(card);
-        lv_label_set_text_fmt(label, "%u%% rain", hour->precipitation);
-        label = lv_label_create(card);
-        lv_label_set_text(label, weather_condition(hour->code));
+        lv_label_set_text_fmt(label, "%s\n%d F\n%u%% rain\n%s", time, weather_round(hour->temperature),
+                              (unsigned)hour->precipitation, weather_condition(hour->code));
         lv_obj_set_width(label, 115);
         lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
     }
@@ -3460,19 +3454,11 @@ static void weather_render(void)
         lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
         lv_obj_set_style_pad_all(row, 10, 0);
-        lv_obj_t *date = lv_label_create(row);
-        lv_label_set_text_fmt(date, "%c%c/%c%c", day->date[5], day->date[6], day->date[8], day->date[9]);
-        lv_obj_set_width(date, 65);
-        lv_obj_t *description = lv_label_create(row);
-        lv_label_set_text(description, weather_condition(day->code));
-        lv_obj_set_width(description, 190);
-        lv_obj_t *rain = lv_label_create(row);
-        lv_label_set_text_fmt(rain, "%u%% rain", day->precipitation);
-        lv_obj_set_width(rain, 100);
-        lv_obj_t *range = lv_label_create(row);
-        lv_label_set_text_fmt(range, "%d / %d F", weather_round(day->high), weather_round(day->low));
-        lv_obj_set_width(range, 130);
-        lv_obj_set_style_text_align(range, LV_TEXT_ALIGN_RIGHT, 0);
+        lv_obj_t *label = lv_label_create(row);
+        lv_label_set_text_fmt(label, "%c%c/%c%c  %s  %u%% rain  %d / %d F",
+            day->date[5], day->date[6], day->date[8], day->date[9], weather_condition(day->code),
+            (unsigned)day->precipitation, weather_round(day->high), weather_round(day->low));
+        lv_obj_set_width(label, 570);
     }
     lv_obj_t *source = lv_label_create(weather_body);
     lv_label_set_text(source, "Weather data: Open-Meteo");
