@@ -31,4 +31,4 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" firmware/tab5_os.bin --generate-notes --title "Tab5 OS $GITHUB_REF_NAME"
+        run: gh release create "$GITHUB_REF_NAME" firmware/tab5_os.bin --repo "$GITHUB_REPOSITORY" --generate-notes --title "Tab5 OS $GITHUB_REF_NAME"
