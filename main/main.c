@@ -55,6 +55,7 @@
 #define OTA_URL "https://github.com/DevanMetz/Tab5OS/releases/latest/download/tab5_os.bin"
 #define BATTERY_EMPTY_MV 6000
 #define BATTERY_FULL_MV 8230
+#define BATTERY_HISTORY_POINTS 60
 
 typedef struct __attribute__((packed)) {
     char magic[4];
@@ -104,6 +105,15 @@ static const ebook_default_t ebook_defaults[] = {
 static lv_obj_t *content;
 static lv_obj_t *battery_label;
 static i2c_master_dev_handle_t battery_monitor;
+static lv_obj_t *battery_metrics;
+static lv_obj_t *battery_chart;
+static lv_chart_series_t *battery_series;
+static uint8_t battery_history[BATTERY_HISTORY_POINTS];
+static uint8_t battery_history_count;
+static uint8_t battery_history_head;
+static int battery_millivolts;
+static int battery_milliamps;
+static int battery_percent;
 static lv_obj_t *note_area;
 static lv_obj_t *counter_label;
 static bool internal_ready;
@@ -221,15 +231,24 @@ static void battery_tick(lv_timer_t *timer)
 {
     (void)timer;
     uint8_t reg = 0x02;
-    uint8_t raw[2];
-    if (!battery_monitor || i2c_master_transmit_receive(battery_monitor, &reg, 1, raw, 2, 50) != ESP_OK) {
+    uint8_t raw[6];
+    if (!battery_monitor || i2c_master_transmit_receive(battery_monitor, &reg, 1, raw, sizeof(raw), 50) != ESP_OK) {
         lv_label_set_text(battery_label, "BAT --");
         return;
     }
-    int millivolts = ((raw[0] << 8) | raw[1]) * 5 / 4;
-    int percent = (millivolts - BATTERY_EMPTY_MV) * 100 / (BATTERY_FULL_MV - BATTERY_EMPTY_MV);
-    percent = percent < 0 ? 0 : percent > 100 ? 100 : percent;
-    lv_label_set_text_fmt(battery_label, "BAT %d%%", percent);
+    battery_millivolts = ((raw[0] << 8) | raw[1]) * 5 / 4;
+    battery_milliamps = (int16_t)((raw[4] << 8) | raw[5]) * 3 / 10;
+    battery_percent = (battery_millivolts - BATTERY_EMPTY_MV) * 100 / (BATTERY_FULL_MV - BATTERY_EMPTY_MV);
+    battery_percent = battery_percent < 0 ? 0 : battery_percent > 100 ? 100 : battery_percent;
+    battery_history[battery_history_head] = battery_percent;
+    battery_history_head = (battery_history_head + 1) % BATTERY_HISTORY_POINTS;
+    if (battery_history_count < BATTERY_HISTORY_POINTS) battery_history_count++;
+    lv_label_set_text_fmt(battery_label, "BAT %d%%", battery_percent);
+    if (battery_metrics) {
+        lv_label_set_text_fmt(battery_metrics, "%d.%03d V    %+d mA    %d%%",
+            battery_millivolts / 1000, battery_millivolts % 1000, battery_milliamps, battery_percent);
+    }
+    if (battery_chart) lv_chart_set_next_value(battery_chart, battery_series, battery_percent);
 }
 
 static void battery_init(i2c_master_bus_handle_t bus)
@@ -239,7 +258,14 @@ static void battery_init(i2c_master_bus_handle_t bus)
         .device_address = 0x41,
         .scl_speed_hz = 400000,
     };
-    if (i2c_master_bus_add_device(bus, &config, &battery_monitor) != ESP_OK) battery_monitor = NULL;
+    if (i2c_master_bus_add_device(bus, &config, &battery_monitor) != ESP_OK) {
+        battery_monitor = NULL;
+        return;
+    }
+    uint8_t ina_config[] = {0x00, 0x05, 0x27};
+    uint8_t ina_calibration[] = {0x05, 0x0D, 0x55};
+    i2c_master_transmit(battery_monitor, ina_config, sizeof(ina_config), 50);
+    i2c_master_transmit(battery_monitor, ina_calibration, sizeof(ina_calibration), 50);
 }
 
 typedef struct {
@@ -1279,6 +1305,9 @@ static void clear_content(void)
     ebook_next = NULL;
     ota_status = NULL;
     ota_button = NULL;
+    battery_metrics = NULL;
+    battery_chart = NULL;
+    battery_series = NULL;
     lv_obj_clean(content);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -2109,6 +2138,24 @@ static void system_clicked(lv_event_t *event)
         (unsigned long)(heap_caps_get_free_size(MALLOC_CAP_8BIT) / 1024),
         internal_ready ? "mounted" : "unavailable", sd_ready ? "mounted" : "not inserted");
     lv_obj_set_style_text_line_space(info, 8, 0);
+    battery_metrics = lv_label_create(content);
+    lv_label_set_text_fmt(battery_metrics, "%d.%03d V    %+d mA    %d%%",
+        battery_millivolts / 1000, battery_millivolts % 1000, battery_milliamps, battery_percent);
+    lv_obj_t *history_title = lv_label_create(content);
+    lv_label_set_text(history_title, "Battery percentage - last 5 minutes");
+    battery_chart = lv_chart_create(content);
+    lv_obj_set_size(battery_chart, 620, 260);
+    lv_chart_set_type(battery_chart, LV_CHART_TYPE_LINE);
+    lv_chart_set_point_count(battery_chart, BATTERY_HISTORY_POINTS);
+    lv_chart_set_range(battery_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
+    lv_chart_set_div_line_count(battery_chart, 5, 6);
+    battery_series = lv_chart_add_series(battery_chart, lv_palette_main(LV_PALETTE_GREEN), LV_CHART_AXIS_PRIMARY_Y);
+    lv_chart_set_all_value(battery_chart, battery_series, LV_CHART_POINT_NONE);
+    uint8_t first = (battery_history_head + BATTERY_HISTORY_POINTS - battery_history_count) % BATTERY_HISTORY_POINTS;
+    for (uint8_t i = 0; i < battery_history_count; i++) {
+        lv_chart_set_next_value(battery_chart, battery_series,
+            battery_history[(first + i) % BATTERY_HISTORY_POINTS]);
+    }
     ota_button = button(content, "Install latest", ota_clicked);
     lv_obj_set_size(ota_button, 320, 82);
     if (ota_busy) lv_obj_add_state(ota_button, LV_STATE_DISABLED);
