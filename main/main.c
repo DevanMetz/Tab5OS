@@ -42,6 +42,8 @@
 #define VOICE_CHANNELS 4
 #define VOICE_MIC_CHANNEL 0
 #define VOICE_MAX_SECONDS 30
+#define BROWSER_MAX_HTML 65536
+#define BROWSER_MAX_LINKS 12
 
 typedef struct __attribute__((packed)) {
     char magic[4];
@@ -134,6 +136,26 @@ static char chat_response[8192];
 static char chat_error[96];
 static char chat_response_id[128];
 static char chat_history[12000];
+static lv_obj_t *browser_status;
+static lv_obj_t *browser_url_area;
+static lv_obj_t *browser_page;
+static lv_obj_t *browser_keyboard;
+static lv_obj_t *browser_keys_label;
+static lv_timer_t *browser_timer;
+static TaskHandle_t browser_task;
+static volatile bool browser_busy;
+static volatile bool browser_done;
+static bool browser_ok;
+static bool browser_keyboard_visible = true;
+static char browser_url[256] = "https://example.com";
+static char browser_pending_url[256];
+static char browser_error[96];
+static char *browser_result;
+static char browser_links[BROWSER_MAX_LINKS][256];
+static char browser_link_labels[BROWSER_MAX_LINKS][64];
+static size_t browser_link_count;
+static char browser_history[8][256];
+static size_t browser_history_count;
 static volatile int16_t remote_x;
 static volatile int16_t remote_y;
 static volatile bool remote_pressed;
@@ -143,6 +165,9 @@ static void show_launcher(void);
 static void show_files(const char *path);
 static void show_settings(void);
 static void show_chat(void);
+static void show_browser(void);
+static void clear_content(void);
+static void browser_link_clicked(lv_event_t *event);
 
 typedef struct {
     char *data;
@@ -740,6 +765,365 @@ static void chat_text_clicked(lv_event_t *event)
     chat_apply_preferences();
 }
 
+static bool browser_prefix(const char *text, const char *prefix)
+{
+    while (*prefix) {
+        if (!*text || tolower((unsigned char)*text++) != tolower((unsigned char)*prefix++)) return false;
+    }
+    return true;
+}
+
+static const char *browser_find(const char *text, const char *needle)
+{
+    for (; *text; ++text) if (browser_prefix(text, needle)) return text;
+    return NULL;
+}
+
+static void browser_newline(char *output, size_t *length, size_t capacity)
+{
+    while (*length && output[*length - 1] == ' ') (*length)--;
+    if (*length && output[*length - 1] != '\n' && *length + 1 < capacity) output[(*length)++] = '\n';
+}
+
+static void browser_html_to_text(const char *html, char *output, size_t capacity)
+{
+    size_t length = 0;
+    bool space = false;
+    for (const char *p = html; *p && length + 1 < capacity;) {
+        if (*p == '<') {
+            const char *tag = p + 1;
+            while (isspace((unsigned char)*tag)) tag++;
+            bool closing = *tag == '/';
+            if (closing) tag++;
+            while (isspace((unsigned char)*tag)) tag++;
+            if (!closing && (browser_prefix(tag, "script") || browser_prefix(tag, "style"))) {
+                const char *close = browser_find(tag, browser_prefix(tag, "script") ? "</script" : "</style");
+                p = close ? close : p + strlen(p);
+                continue;
+            }
+            if (browser_prefix(tag, "br") || browser_prefix(tag, "p") || browser_prefix(tag, "div") ||
+                browser_prefix(tag, "li") || browser_prefix(tag, "h1") || browser_prefix(tag, "h2") ||
+                browser_prefix(tag, "h3")) browser_newline(output, &length, capacity);
+            const char *end = strchr(tag, '>');
+            p = end ? end + 1 : p + strlen(p);
+            continue;
+        }
+        if (*p == '&') {
+            const struct { const char *entity; char value; } entities[] = {
+                {"&amp;", '&'}, {"&lt;", '<'}, {"&gt;", '>'}, {"&quot;", '"'}, {"&apos;", '\''}, {"&nbsp;", ' '},
+            };
+            bool decoded = false;
+            for (size_t i = 0; i < sizeof(entities) / sizeof(entities[0]); ++i) {
+                if (browser_prefix(p, entities[i].entity)) {
+                    if (entities[i].value == ' ') space = true;
+                    else output[length++] = entities[i].value;
+                    p += strlen(entities[i].entity);
+                    decoded = true;
+                    break;
+                }
+            }
+            if (decoded) continue;
+            if (p[1] == '#') {
+                char *end;
+                long value = strtol(p + 2 + (p[2] == 'x' || p[2] == 'X'), &end, (p[2] == 'x' || p[2] == 'X') ? 16 : 10);
+                if (*end == ';') {
+                    output[length++] = value >= 32 && value < 127 ? (char)value : '?';
+                    p = end + 1;
+                    continue;
+                }
+            }
+        }
+        unsigned char value = (unsigned char)*p++;
+        if (isspace(value)) {
+            space = true;
+        } else {
+            if (space && length && output[length - 1] != '\n' && length + 1 < capacity) output[length++] = ' ';
+            space = false;
+            if (value < 128) output[length++] = value;
+            else {
+                output[length++] = '?';
+                while ((*p & 0xc0) == 0x80) p++;
+            }
+        }
+    }
+    while (length && isspace((unsigned char)output[length - 1])) length--;
+    output[length] = '\0';
+}
+
+static bool browser_resolve_url(const char *base, const char *link, char *output, size_t capacity)
+{
+    if (!link[0] || link[0] == '#' || browser_prefix(link, "mailto:") || browser_prefix(link, "javascript:")) return false;
+    if (browser_prefix(link, "http://") || browser_prefix(link, "https://")) {
+        size_t length = strlen(link);
+        if (length >= capacity) return false;
+        memcpy(output, link, length + 1);
+        return true;
+    }
+    const char *scheme_end = strstr(base, "://");
+    if (!scheme_end) return false;
+    if (link[0] == '/' && link[1] == '/') {
+        size_t prefix = scheme_end - base;
+        size_t length = strlen(link);
+        if (prefix + 1 + length >= capacity) return false;
+        memcpy(output, base, prefix);
+        output[prefix] = ':';
+        memcpy(output + prefix + 1, link, length + 1);
+        return true;
+    }
+    const char *host_end = strchr(scheme_end + 3, '/');
+    if (!host_end) host_end = base + strlen(base);
+    if (link[0] == '/') {
+        size_t prefix = host_end - base;
+        size_t length = strlen(link);
+        if (prefix + length >= capacity) return false;
+        memcpy(output, base, prefix);
+        memcpy(output + prefix, link, length + 1);
+        return true;
+    }
+    const char *path_end = strrchr(base, '/');
+    if (!path_end || path_end < host_end) path_end = host_end;
+    size_t prefix = path_end - base;
+    size_t length = strlen(link);
+    if (prefix + 1 + length >= capacity) return false;
+    memcpy(output, base, prefix);
+    output[prefix] = '/';
+    memcpy(output + prefix + 1, link, length + 1);
+    return true;
+}
+
+static void browser_extract_links(const char *html, const char *base)
+{
+    browser_link_count = 0;
+    const char *anchor = html;
+    while (browser_link_count < BROWSER_MAX_LINKS && (anchor = browser_find(anchor, "<a"))) {
+        if (!isspace((unsigned char)anchor[2]) && anchor[2] != '>') {
+            anchor += 2;
+            continue;
+        }
+        const char *tag_end = strchr(anchor, '>');
+        const char *href = browser_find(anchor, "href");
+        if (!tag_end || !href || href > tag_end) {
+            anchor += 2;
+            continue;
+        }
+        href += 4;
+        while (href < tag_end && isspace((unsigned char)*href)) href++;
+        if (href == tag_end || *href++ != '=') {
+            anchor = tag_end + 1;
+            continue;
+        }
+        while (href < tag_end && isspace((unsigned char)*href)) href++;
+        char quote = (*href == '"' || *href == '\'') ? *href++ : 0;
+        const char *href_end = href;
+        while (href_end < tag_end && (quote ? *href_end != quote : !isspace((unsigned char)*href_end) && *href_end != '>')) href_end++;
+        char raw[256];
+        size_t raw_length = href_end - href;
+        if (raw_length >= sizeof(raw)) raw_length = sizeof(raw) - 1;
+        memcpy(raw, href, raw_length);
+        raw[raw_length] = '\0';
+        char *amp;
+        while ((amp = strstr(raw, "&amp;"))) memmove(amp + 1, amp + 5, strlen(amp + 5) + 1), *amp = '&';
+        if (!browser_resolve_url(base, raw, browser_links[browser_link_count], sizeof(browser_links[0]))) {
+            anchor = tag_end + 1;
+            continue;
+        }
+        const char *close = browser_find(tag_end + 1, "</a");
+        char label_html[192] = "Link";
+        if (close) {
+            size_t label_length = close - tag_end - 1;
+            if (label_length >= sizeof(label_html)) label_length = sizeof(label_html) - 1;
+            memcpy(label_html, tag_end + 1, label_length);
+            label_html[label_length] = '\0';
+        }
+        browser_html_to_text(label_html, browser_link_labels[browser_link_count], sizeof(browser_link_labels[0]));
+        if (!browser_link_labels[browser_link_count][0]) snprintf(browser_link_labels[browser_link_count], sizeof(browser_link_labels[0]), "Link");
+        browser_link_count++;
+        anchor = close ? close + 3 : tag_end + 1;
+    }
+}
+
+static void browser_request_task(void *argument)
+{
+    (void)argument;
+    // ponytail: persistent PSRAM task avoids repeated TLS stack allocation on scarce internal RAM.
+    for (;;) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        browser_ok = false;
+        browser_error[0] = '\0';
+        char *html = heap_caps_calloc(1, BROWSER_MAX_HTML, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        char *text = heap_caps_malloc(BROWSER_MAX_HTML, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!html || !text) {
+            snprintf(browser_error, sizeof(browser_error), "Out of memory");
+            free(html);
+            free(text);
+            goto done;
+        }
+        http_buffer_t buffer = {.data = html, .capacity = BROWSER_MAX_HTML};
+        esp_http_client_config_t config = {
+            .url = browser_pending_url,
+            .event_handler = chat_http_event,
+            .user_data = &buffer,
+            .crt_bundle_attach = esp_crt_bundle_attach,
+            .timeout_ms = 20000,
+            .buffer_size = 2048,
+        };
+        esp_http_client_handle_t client = esp_http_client_init(&config);
+        if (!client) {
+            snprintf(browser_error, sizeof(browser_error), "Could not start HTTPS");
+            free(html);
+            free(text);
+            goto done;
+        }
+        esp_http_client_set_header(client, "User-Agent", "Tab5OS/1.0");
+        esp_http_client_set_header(client, "Accept", "text/html,text/plain");
+        ESP_LOGI("tab5-os", "Browser loading %.120s", browser_pending_url);
+        esp_err_t error = esp_http_client_perform(client);
+        int status = esp_http_client_get_status_code(client);
+        esp_http_client_cleanup(client);
+        if (error != ESP_OK || status < 200 || status >= 300 || !buffer.length) {
+            snprintf(browser_error, sizeof(browser_error), "Page failed (%d)", status);
+            free(html);
+            free(text);
+            goto done;
+        }
+        browser_extract_links(html, browser_pending_url);
+        browser_html_to_text(html, text, BROWSER_MAX_HTML);
+        ESP_LOGI("tab5-os", "Browser loaded %u bytes, %u links", (unsigned)buffer.length, (unsigned)browser_link_count);
+        free(html);
+        free(browser_result);
+        browser_result = text;
+        snprintf(browser_url, sizeof(browser_url), "%s", browser_pending_url);
+        browser_ok = true;
+done:
+        browser_busy = false;
+        browser_done = true;
+    }
+}
+
+static void browser_apply_layout(void)
+{
+    if (!browser_keyboard || !browser_page) return;
+    lv_label_set_text(browser_keys_label, browser_keyboard_visible ? "Hide keys" : "Show keys");
+    if (browser_keyboard_visible) {
+        lv_obj_remove_flag(browser_keyboard, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_height(browser_page, 450);
+    } else {
+        lv_obj_add_flag(browser_keyboard, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_height(browser_page, 780);
+    }
+}
+
+static void browser_render(void)
+{
+    lv_obj_clean(browser_page);
+    lv_obj_t *body = lv_label_create(browser_page);
+    lv_obj_set_width(body, 580);
+    lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(body, browser_ok ? (browser_result && browser_result[0] ? browser_result : "No readable text") : browser_error);
+    if (!browser_ok || !browser_link_count) return;
+
+    lv_obj_t *heading = lv_label_create(browser_page);
+    lv_label_set_text(heading, "Links");
+    lv_obj_set_style_text_font(heading, &lv_font_montserrat_28, 0);
+    for (size_t i = 0; i < browser_link_count; ++i) {
+        lv_obj_t *link = button(browser_page, browser_link_labels[i], NULL);
+        lv_obj_set_size(link, 580, 58);
+        lv_obj_add_event_cb(link, browser_link_clicked, LV_EVENT_CLICKED, browser_links[i]);
+        lv_obj_t *label = lv_obj_get_child(link, 0);
+        lv_obj_set_width(label, 520);
+        lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+    }
+}
+
+static bool browser_start_url(const char *requested, bool add_history)
+{
+    if (browser_busy) return false;
+    while (isspace((unsigned char)*requested)) requested++;
+    char normalized[256];
+    if (!strstr(requested, "://")) snprintf(normalized, sizeof(normalized), "https://%s", requested);
+    else snprintf(normalized, sizeof(normalized), "%s", requested);
+    size_t length = strlen(normalized);
+    while (length && isspace((unsigned char)normalized[length - 1])) normalized[--length] = '\0';
+    if ((!browser_prefix(normalized, "http://") && !browser_prefix(normalized, "https://")) || length < 10) {
+        lv_label_set_text(browser_status, "Enter an http:// or https:// address");
+        return false;
+    }
+    if (add_history && browser_url[0] && strcmp(browser_url, normalized)) {
+        if (browser_history_count == 8) {
+            memmove(browser_history, browser_history + 1, sizeof(browser_history) - sizeof(browser_history[0]));
+            browser_history_count--;
+        }
+        snprintf(browser_history[browser_history_count++], sizeof(browser_history[0]), "%s", browser_url);
+    }
+    snprintf(browser_pending_url, sizeof(browser_pending_url), "%s", normalized);
+    browser_busy = true;
+    browser_done = false;
+    browser_keyboard_visible = false;
+    browser_apply_layout();
+    lv_label_set_text(browser_status, "Loading...");
+    if (browser_page) {
+        lv_obj_clean(browser_page);
+        lv_obj_t *loading = lv_label_create(browser_page);
+        lv_label_set_text(loading, "Loading...");
+    }
+    if (!browser_task && xTaskCreateWithCaps(browser_request_task, "browser", 12288, NULL, 4, &browser_task,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+        browser_busy = false;
+        lv_label_set_text(browser_status, "Could not start browser");
+        return false;
+    }
+    xTaskNotifyGive(browser_task);
+    return true;
+}
+
+static void browser_link_clicked(lv_event_t *event)
+{
+    browser_start_url(lv_event_get_user_data(event), true);
+}
+
+static void browser_go_clicked(lv_event_t *event)
+{
+    (void)event;
+    if (!wifi_connected) {
+        lv_label_set_text(browser_status, "Connect to Wi-Fi first");
+        return;
+    }
+    browser_start_url(lv_textarea_get_text(browser_url_area), true);
+}
+
+static void browser_back_clicked(lv_event_t *event)
+{
+    (void)event;
+    if (!browser_history_count || browser_busy) return;
+    char previous[256];
+    snprintf(previous, sizeof(previous), "%s", browser_history[--browser_history_count]);
+    browser_start_url(previous, false);
+}
+
+static void browser_reload_clicked(lv_event_t *event)
+{
+    (void)event;
+    browser_start_url(browser_url, false);
+}
+
+static void browser_keys_clicked(lv_event_t *event)
+{
+    (void)event;
+    browser_keyboard_visible = !browser_keyboard_visible;
+    browser_apply_layout();
+}
+
+static void browser_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    if (!browser_done) return;
+    browser_done = false;
+    lv_label_set_text(browser_status, browser_ok ? "Loaded" : browser_error);
+    if (browser_ok) lv_textarea_set_text(browser_url_area, browser_url);
+    browser_render();
+}
+
 static void clear_content(void)
 {
     if (wifi_timer) {
@@ -749,6 +1133,10 @@ static void clear_content(void)
     if (chat_timer) {
         lv_timer_delete(chat_timer);
         chat_timer = NULL;
+    }
+    if (browser_timer) {
+        lv_timer_delete(browser_timer);
+        browser_timer = NULL;
     }
     wifi_status = NULL;
     wifi_list = NULL;
@@ -763,6 +1151,11 @@ static void clear_content(void)
     chat_keyboard = NULL;
     chat_keyboard_label = NULL;
     chat_text_label = NULL;
+    browser_status = NULL;
+    browser_url_area = NULL;
+    browser_page = NULL;
+    browser_keyboard = NULL;
+    browser_keys_label = NULL;
     lv_obj_clean(content);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -1183,6 +1576,74 @@ static void chat_clicked(lv_event_t *event)
     show_chat();
 }
 
+static void show_browser(void)
+{
+    clear_content();
+    lv_obj_set_style_pad_row(content, 12, 0);
+
+    lv_obj_t *title = lv_label_create(content);
+    lv_label_set_text(title, "Browser");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+
+    browser_status = lv_label_create(content);
+    lv_label_set_text(browser_status, browser_busy ? "Loading..." : browser_result ? "Loaded" : "Ready");
+    lv_obj_set_width(browser_status, 640);
+
+    lv_obj_t *address = lv_obj_create(content);
+    lv_obj_set_size(address, 640, 82);
+    lv_obj_remove_flag(address, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(address, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(address, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    browser_url_area = lv_textarea_create(address);
+    lv_obj_set_size(browser_url_area, 470, 68);
+    lv_textarea_set_one_line(browser_url_area, true);
+    lv_textarea_set_max_length(browser_url_area, sizeof(browser_url) - 1);
+    lv_textarea_set_text(browser_url_area, browser_url);
+    lv_obj_add_event_cb(browser_url_area, browser_go_clicked, LV_EVENT_READY, NULL);
+    lv_obj_t *go = button(address, "Go", browser_go_clicked);
+    lv_obj_set_size(go, 130, 68);
+
+    lv_obj_t *tools = lv_obj_create(content);
+    lv_obj_set_size(tools, 640, 64);
+    lv_obj_remove_flag(tools, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(tools, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(tools, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *back = button(tools, "Back", browser_back_clicked);
+    lv_obj_set_size(back, 190, 54);
+    lv_obj_t *keys = button(tools, browser_keyboard_visible ? "Hide keys" : "Show keys", browser_keys_clicked);
+    browser_keys_label = lv_obj_get_child(keys, 0);
+    lv_obj_set_size(keys, 190, 54);
+    lv_obj_t *reload = button(tools, "Reload", browser_reload_clicked);
+    lv_obj_set_size(reload, 190, 54);
+
+    browser_page = lv_obj_create(content);
+    lv_obj_set_size(browser_page, 640, 450);
+    lv_obj_set_flex_flow(browser_page, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(browser_page, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_bg_color(browser_page, lv_color_white(), 0);
+    lv_obj_set_style_text_color(browser_page, lv_color_black(), 0);
+    lv_obj_set_style_pad_row(browser_page, 12, 0);
+    if (browser_result) browser_render();
+    else {
+        lv_obj_t *message = lv_label_create(browser_page);
+        lv_obj_set_width(message, 580);
+        lv_label_set_text(message, "Enter a web address, or tap Go to open example.com.");
+    }
+
+    browser_keyboard = lv_keyboard_create(content);
+    lv_obj_set_size(browser_keyboard, 640, 330);
+    lv_keyboard_set_textarea(browser_keyboard, browser_url_area);
+    browser_apply_layout();
+    browser_timer = lv_timer_create(browser_tick, 200, NULL);
+    if (!browser_result && !browser_busy && wifi_connected) browser_start_url(browser_url, false);
+}
+
+static void browser_clicked(lv_event_t *event)
+{
+    (void)event;
+    show_browser();
+}
+
 static void system_clicked(lv_event_t *event)
 {
     (void)event;
@@ -1215,6 +1676,7 @@ static void show_launcher(void)
     app_icon(content, LV_SYMBOL_SETTINGS, "System", 0x7C4DFF, system_clicked, 0, 1);
     app_icon(content, LV_SYMBOL_WIFI, "Settings", 0x0288D1, settings_clicked, 1, 1);
     app_icon(content, LV_SYMBOL_ENVELOPE, "AI Chat", 0xE91E63, chat_clicked, 2, 1);
+    app_icon(content, LV_SYMBOL_EYE_OPEN, "Browser", 0x3F51B5, browser_clicked, 0, 2);
 }
 
 void app_main(void)
