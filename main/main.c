@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/time.h>
+#include <time.h>
 
 #include "bsp/esp-bsp.h"
 #include "esp_app_desc.h"
@@ -17,6 +19,7 @@
 #include "esp_netif.h"
 #include "esp_ota_ops.h"
 #include "esp_spiffs.h"
+#include "esp_sntp.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "esp_crt_bundle.h"
@@ -56,6 +59,7 @@
 #define BATTERY_EMPTY_MV 6000
 #define BATTERY_FULL_MV 8230
 #define BATTERY_HISTORY_POINTS 60
+#define TIME_ZONE "CST6CDT,M3.2.0,M11.1.0"
 
 typedef struct __attribute__((packed)) {
     char magic[4];
@@ -105,6 +109,15 @@ static const ebook_default_t ebook_defaults[] = {
 static lv_obj_t *content;
 static lv_obj_t *battery_label;
 static i2c_master_dev_handle_t battery_monitor;
+static i2c_master_dev_handle_t rtc;
+static lv_obj_t *time_label;
+static lv_obj_t *clock_time;
+static lv_obj_t *clock_date;
+static lv_obj_t *clock_status;
+static bool rtc_time_loaded;
+static bool sntp_started;
+static volatile bool internet_time_synced;
+static volatile bool rtc_sync_pending;
 static lv_obj_t *battery_metrics;
 static lv_obj_t *battery_chart;
 static lv_chart_series_t *battery_series;
@@ -224,8 +237,112 @@ static void show_settings(void);
 static void show_chat(void);
 static void show_browser(void);
 static void show_ebooks(void);
+static void show_clock(void);
 static void clear_content(void);
 static void browser_link_clicked(lv_event_t *event);
+
+static uint8_t bcd(int value)
+{
+    return (value / 10 << 4) | value % 10;
+}
+
+static int unbcd(uint8_t value)
+{
+    return (value >> 4) * 10 + (value & 0x0f);
+}
+
+static void rtc_write_system_time(void)
+{
+    if (!rtc) return;
+    time_t now = time(NULL);
+    struct tm utc;
+    gmtime_r(&now, &utc);
+    uint8_t values[] = {0x10, bcd(utc.tm_sec), bcd(utc.tm_min), bcd(utc.tm_hour),
+                        bcd(utc.tm_wday), bcd(utc.tm_mday), bcd(utc.tm_mon + 1), bcd(utc.tm_year % 100)};
+    if (i2c_master_transmit(rtc, values, sizeof(values), 50) == ESP_OK) {
+        uint8_t flag_reg = 0x1d;
+        uint8_t flag;
+        if (i2c_master_transmit_receive(rtc, &flag_reg, 1, &flag, 1, 50) == ESP_OK) {
+            uint8_t clear_vlf[] = {0x1d, flag & ~0x02};
+            i2c_master_transmit(rtc, clear_vlf, sizeof(clear_vlf), 50);
+        }
+        rtc_time_loaded = true;
+    }
+}
+
+static void time_synced(struct timeval *tv)
+{
+    (void)tv;
+    internet_time_synced = true;
+    rtc_sync_pending = true;
+}
+
+static void start_sntp(void)
+{
+    if (sntp_started) return;
+    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    esp_sntp_set_time_sync_notification_cb(time_synced);
+    esp_sntp_init();
+    sntp_started = true;
+}
+
+static void clock_init(i2c_master_bus_handle_t bus)
+{
+    i2c_device_config_t config = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = 0x32,
+        .scl_speed_hz = 400000,
+    };
+    if (i2c_master_bus_add_device(bus, &config, &rtc) != ESP_OK) rtc = NULL;
+
+    uint8_t reg = 0x10;
+    uint8_t raw[14];
+    if (rtc && i2c_master_transmit_receive(rtc, &reg, 1, raw, sizeof(raw), 50) == ESP_OK) {
+        struct tm value = {
+            .tm_sec = unbcd(raw[0] & 0x7f), .tm_min = unbcd(raw[1] & 0x7f),
+            .tm_hour = unbcd(raw[2] & 0x3f), .tm_wday = unbcd(raw[3] & 0x7f),
+            .tm_mday = unbcd(raw[4] & 0x3f), .tm_mon = unbcd(raw[5] & 0x1f) - 1,
+            .tm_year = unbcd(raw[6]) + 100, .tm_isdst = 0,
+        };
+        if (!(raw[13] & 0x02) && value.tm_year >= 124 && value.tm_mon >= 0 && value.tm_mon < 12 &&
+            value.tm_mday > 0 && value.tm_mday <= 31 && value.tm_hour < 24 && value.tm_min < 60 && value.tm_sec < 60) {
+            setenv("TZ", "UTC0", 1);
+            tzset();
+            struct timeval tv = {.tv_sec = mktime(&value)};
+            settimeofday(&tv, NULL);
+            rtc_time_loaded = true;
+        }
+    }
+    setenv("TZ", TIME_ZONE, 1);
+    tzset();
+    assert(unbcd(bcd(59)) == 59);
+}
+
+static void clock_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    if (rtc_sync_pending) {
+        rtc_sync_pending = false;
+        rtc_write_system_time();
+    }
+    time_t now = time(NULL);
+    struct tm local;
+    localtime_r(&now, &local);
+    bool valid = local.tm_year >= 124;
+    char text[40];
+    if (valid) strftime(text, sizeof(text), "%I:%M %p", &local);
+    else snprintf(text, sizeof(text), "--:--");
+    if (time_label) lv_label_set_text(time_label, text);
+    if (clock_time) lv_label_set_text(clock_time, text);
+    if (clock_date) {
+        if (valid) strftime(text, sizeof(text), "%A, %B %d, %Y", &local);
+        else snprintf(text, sizeof(text), "Time not set");
+        lv_label_set_text(clock_date, text);
+    }
+    if (clock_status) lv_label_set_text(clock_status, internet_time_synced ? "Synced from internet" :
+        rtc_time_loaded ? "Running from hardware RTC" : "Connect to Wi-Fi to set the clock");
+}
 
 static void battery_tick(lv_timer_t *timer)
 {
@@ -321,6 +438,7 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         wifi_retries = 0;
         wifi_connecting = false;
         wifi_connected = true;
+        start_sntp();
     }
 }
 
@@ -1308,6 +1426,9 @@ static void clear_content(void)
     battery_metrics = NULL;
     battery_chart = NULL;
     battery_series = NULL;
+    clock_time = NULL;
+    clock_date = NULL;
+    clock_status = NULL;
     lv_obj_clean(content);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -2165,6 +2286,23 @@ static void system_clicked(lv_event_t *event)
     ota_timer = lv_timer_create(ota_tick, 250, NULL);
 }
 
+static void clock_clicked(lv_event_t *event)
+{
+    (void)event;
+    show_clock();
+}
+
+static void show_clock(void)
+{
+    clear_content();
+    clock_time = lv_label_create(content);
+    lv_obj_set_style_text_font(clock_time, &lv_font_montserrat_48, 0);
+    clock_date = lv_label_create(content);
+    lv_obj_set_style_text_font(clock_date, &lv_font_montserrat_28, 0);
+    clock_status = lv_label_create(content);
+    clock_tick(NULL);
+}
+
 static void show_launcher(void)
 {
     static int32_t columns[] = {
@@ -2183,6 +2321,7 @@ static void show_launcher(void)
     app_icon(content, LV_SYMBOL_ENVELOPE, "AI Chat", 0xE91E63, chat_clicked, 2, 1);
     app_icon(content, LV_SYMBOL_EYE_OPEN, "Browser", 0x3F51B5, browser_clicked, 0, 2);
     app_icon(content, LV_SYMBOL_FILE, "Ebooks", 0x8D6E63, ebooks_clicked, 1, 2);
+    app_icon(content, LV_SYMBOL_LOOP, "Clock", 0x009688, clock_clicked, 2, 2);
 }
 
 static void confirm_running_ota(void)
@@ -2204,6 +2343,7 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(50));
     bsp_set_charge_en(true);
     battery_init(bsp_i2c_get_handle());
+    clock_init(bsp_i2c_get_handle());
     vTaskDelay(pdMS_TO_TICKS(250));
 
     wifi_ready = start_wifi();
@@ -2236,9 +2376,13 @@ void app_main(void)
     lv_obj_set_style_text_font(brand, &lv_font_montserrat_28, 0);
     lv_obj_align(brand, LV_ALIGN_CENTER, 0, 0);
     battery_label = lv_label_create(header);
-    lv_obj_align(battery_label, LV_ALIGN_RIGHT_MID, -20, 0);
+    lv_obj_align(battery_label, LV_ALIGN_RIGHT_MID, -20, -18);
+    time_label = lv_label_create(header);
+    lv_obj_align(time_label, LV_ALIGN_RIGHT_MID, -20, 18);
     battery_tick(NULL);
     lv_timer_create(battery_tick, 5000, NULL);
+    clock_tick(NULL);
+    lv_timer_create(clock_tick, 1000, NULL);
 
     content = lv_obj_create(screen);
     lv_obj_set_size(content, 720, 1180);
