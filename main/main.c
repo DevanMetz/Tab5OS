@@ -104,6 +104,7 @@ typedef struct {
 typedef struct {
     gpio_num_t pin;
     const char *port;
+    bool input_only;
     uint8_t mode;
     lv_obj_t *mode_label;
     lv_obj_t *level_label;
@@ -116,17 +117,19 @@ static const ebook_default_t ebook_defaults[] = {
 };
 
 #define GPIO_CONTROL(p, name) {.pin = (p), .port = (name)}
+#define GPIO_INPUT(p, name) {.pin = (p), .port = (name), .input_only = true}
 static gpio_control_t gpio_controls[] = {
     GPIO_CONTROL(GPIO_NUM_49, "EXT"), GPIO_CONTROL(GPIO_NUM_50, "EXT"), GPIO_CONTROL(GPIO_NUM_0, "EXT"),
     GPIO_CONTROL(GPIO_NUM_1, "EXT"), GPIO_CONTROL(GPIO_NUM_54, "EXT"), GPIO_CONTROL(GPIO_NUM_53, "EXT"),
     GPIO_CONTROL(GPIO_NUM_18, "M-BUS"), GPIO_CONTROL(GPIO_NUM_19, "M-BUS"), GPIO_CONTROL(GPIO_NUM_5, "M-BUS"),
     GPIO_CONTROL(GPIO_NUM_38, "M-BUS"), GPIO_CONTROL(GPIO_NUM_7, "M-BUS"), GPIO_CONTROL(GPIO_NUM_3, "M-BUS"),
     GPIO_CONTROL(GPIO_NUM_2, "M-BUS"), GPIO_CONTROL(GPIO_NUM_47, "M-BUS"), GPIO_CONTROL(GPIO_NUM_16, "M-BUS"),
-    GPIO_CONTROL(GPIO_NUM_17, "M-BUS"), GPIO_CONTROL(GPIO_NUM_45, "M-BUS"), GPIO_CONTROL(GPIO_NUM_52, "M-BUS"),
+    GPIO_INPUT(GPIO_NUM_17, "M-BUS PB_IN"), GPIO_CONTROL(GPIO_NUM_45, "M-BUS"), GPIO_INPUT(GPIO_NUM_52, "M-BUS PB_OUT"),
     GPIO_CONTROL(GPIO_NUM_37, "M-BUS"), GPIO_CONTROL(GPIO_NUM_6, "M-BUS"), GPIO_CONTROL(GPIO_NUM_4, "M-BUS"),
     GPIO_CONTROL(GPIO_NUM_48, "M-BUS"), GPIO_CONTROL(GPIO_NUM_35, "M-BUS"), GPIO_CONTROL(GPIO_NUM_51, "M-BUS"),
 };
 #undef GPIO_CONTROL
+#undef GPIO_INPUT
 #define GPIO_CONTROL_COUNT (sizeof(gpio_controls) / sizeof(gpio_controls[0]))
 _Static_assert(GPIO_CONTROL_COUNT == 24, "Tab5 exposes 24 user GPIO pins");
 
@@ -284,7 +287,7 @@ static esp_err_t gpio_apply(gpio_control_t *control)
 static void gpio_mode_clicked(lv_event_t *event)
 {
     gpio_control_t *control = lv_event_get_user_data(event);
-    control->mode = control->mode == 3 ? 1 : control->mode + 1;
+    control->mode = control->input_only ? 1 : control->mode == 3 ? 1 : control->mode + 1;
     if (gpio_apply(control) != ESP_OK) {
         lv_label_set_text(control->mode_label, "ERROR");
         return;
@@ -2412,7 +2415,7 @@ static void show_gpio(void)
         lv_obj_set_size(mode, 180, 50);
         lv_obj_add_event_cb(mode, gpio_mode_clicked, LV_EVENT_CLICKED, control);
         control->mode_label = lv_label_create(mode);
-        lv_label_set_text(control->mode_label, "SET");
+        lv_label_set_text(control->mode_label, control->input_only ? "READ" : "SET");
         lv_obj_center(control->mode_label);
     }
     gpio_timer = lv_timer_create(gpio_tick, 200, NULL);
