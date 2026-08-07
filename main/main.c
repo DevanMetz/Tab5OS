@@ -6,17 +6,22 @@
 #include <sys/stat.h>
 
 #include "bsp/esp-bsp.h"
+#include "esp_app_desc.h"
 #include "esp_cache.h"
 #include "esp_chip_info.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
+#include "esp_https_ota.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "esp_ota_ops.h"
 #include "esp_spiffs.h"
+#include "esp_system.h"
 #include "esp_wifi.h"
 #include "esp_crt_bundle.h"
 #include "esp_codec_dev.h"
+#include "nvs.h"
 #include "nvs_flash.h"
 #include "esp_lcd_mipi_dsi.h"
 #include "driver/usb_serial_jtag.h"
@@ -46,6 +51,7 @@
 #define BROWSER_MAX_TEXT 12288
 #define BROWSER_MAX_LINKS 12
 #define EBOOK_PAGE_BYTES 8192
+#define OTA_URL "https://github.com/DevanMetz/Tab5OS/releases/latest/download/tab5_os.bin"
 
 typedef struct __attribute__((packed)) {
     char magic[4];
@@ -149,6 +155,8 @@ static char chat_response[8192];
 static char chat_error[96];
 static char chat_response_id[128];
 static char chat_history[12000];
+static char chat_relay_url[256];
+static char chat_device_token[65];
 static lv_obj_t *browser_status;
 static lv_obj_t *browser_url_area;
 static lv_obj_t *browser_page;
@@ -182,6 +190,14 @@ static lv_timer_t *ebook_timer;
 static TaskHandle_t ebook_download_task_handle;
 static volatile bool ebook_download_busy;
 static volatile bool ebook_download_done;
+static lv_obj_t *ota_status;
+static lv_obj_t *ota_button;
+static lv_timer_t *ota_timer;
+static TaskHandle_t ota_task_handle;
+static volatile bool ota_busy;
+static volatile bool ota_done;
+static bool ota_ok;
+static char ota_error[96];
 static volatile int16_t remote_x;
 static volatile int16_t remote_y;
 static volatile bool remote_pressed;
@@ -277,6 +293,25 @@ static bool start_wifi(void)
     error = esp_wifi_start();
     if (error != ESP_OK) ESP_LOGE("tab5-os", "Wi-Fi start failed: %s", esp_err_to_name(error));
     return error == ESP_OK;
+}
+
+static void load_chat_config(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open("tab5", NVS_READWRITE, &handle) != ESP_OK) return;
+    size_t url_size = sizeof(chat_relay_url);
+    size_t token_size = sizeof(chat_device_token);
+    bool changed = false;
+    if (nvs_get_str(handle, "relay_url", chat_relay_url, &url_size) != ESP_OK && CHAT_RELAY_URL[0]) {
+        snprintf(chat_relay_url, sizeof(chat_relay_url), "%s", CHAT_RELAY_URL);
+        changed |= nvs_set_str(handle, "relay_url", chat_relay_url) == ESP_OK;
+    }
+    if (nvs_get_str(handle, "device_token", chat_device_token, &token_size) != ESP_OK && CHAT_DEVICE_TOKEN[0]) {
+        snprintf(chat_device_token, sizeof(chat_device_token), "%s", CHAT_DEVICE_TOKEN);
+        changed |= nvs_set_str(handle, "device_token", chat_device_token) == ESP_OK;
+    }
+    if (changed) nvs_commit(handle);
+    nvs_close(handle);
 }
 
 static void remote_pointer_read(lv_indev_t *indev, lv_indev_data_t *data)
@@ -565,8 +600,8 @@ static void chat_request_task(void *argument)
         char *request_body = NULL;
         size_t request_size = 0;
         esp_http_client_handle_t client = NULL;
-        char url[192];
-        snprintf(url, sizeof(url), "%s", CHAT_RELAY_URL);
+        char url[sizeof(chat_relay_url)];
+        snprintf(url, sizeof(url), "%s", chat_relay_url);
         if (!response_data) {
             snprintf(chat_error, sizeof(chat_error), "Out of memory");
             goto done;
@@ -612,7 +647,7 @@ static void chat_request_task(void *argument)
         }
 
         char authorization[160];
-        snprintf(authorization, sizeof(authorization), "Bearer %s", CHAT_DEVICE_TOKEN);
+        snprintf(authorization, sizeof(authorization), "Bearer %s", chat_device_token);
         esp_http_client_set_method(client, HTTP_METHOD_POST);
         esp_http_client_set_header(client, "Content-Type", job == CHAT_JOB_VOICE ? "audio/wav" : "application/json");
         esp_http_client_set_header(client, "Authorization", authorization);
@@ -714,7 +749,7 @@ static void chat_send_clicked(lv_event_t *event)
         lv_label_set_text(chat_status, "Connect to Wi-Fi first");
         return;
     }
-    if (!CHAT_RELAY_URL[0] || !CHAT_DEVICE_TOKEN[0]) {
+    if (!chat_relay_url[0] || !chat_device_token[0]) {
         lv_label_set_text(chat_status, "Relay is not configured");
         return;
     }
@@ -750,7 +785,7 @@ static void chat_voice_clicked(lv_event_t *event)
         lv_label_set_text(chat_status, "Connect to Wi-Fi first");
         return;
     }
-    if (!CHAT_RELAY_URL[0] || !CHAT_DEVICE_TOKEN[0]) {
+    if (!chat_relay_url[0] || !chat_device_token[0]) {
         lv_label_set_text(chat_status, "Relay is not configured");
         return;
     }
@@ -1186,6 +1221,10 @@ static void clear_content(void)
         lv_timer_delete(ebook_timer);
         ebook_timer = NULL;
     }
+    if (ota_timer) {
+        lv_timer_delete(ota_timer);
+        ota_timer = NULL;
+    }
     wifi_status = NULL;
     wifi_list = NULL;
     chat_output = NULL;
@@ -1208,6 +1247,8 @@ static void clear_content(void)
     ebook_status = NULL;
     ebook_prev = NULL;
     ebook_next = NULL;
+    ota_status = NULL;
+    ota_button = NULL;
     lv_obj_clean(content);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -1824,7 +1865,7 @@ static void show_chat(void)
     chat_status = lv_label_create(content);
     lv_label_set_text(chat_status, voice_recording ? "Recording - press Stop when done" :
         chat_busy ? (chat_job == CHAT_JOB_VOICE ? "Transcribing..." : "Thinking...") :
-        (!CHAT_RELAY_URL[0] || !CHAT_DEVICE_TOKEN[0]) ? "Relay is not configured" : "Ready");
+        (!chat_relay_url[0] || !chat_device_token[0]) ? "Relay is not configured" : "Ready");
     lv_obj_set_width(chat_status, 640);
 
     chat_wave = lv_chart_create(content);
@@ -1956,20 +1997,91 @@ static void browser_clicked(lv_event_t *event)
     show_browser();
 }
 
+static void ota_update_task(void *argument)
+{
+    (void)argument;
+    esp_http_client_config_t http = {
+        .url = OTA_URL,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .timeout_ms = 30000,
+        .buffer_size = 2048,
+        .keep_alive_enable = true,
+        .max_redirection_count = 5,
+    };
+    esp_https_ota_config_t config = {.http_config = &http};
+    ESP_LOGI("tab5-os", "OTA update starting");
+    esp_err_t error = esp_https_ota(&config);
+    ota_ok = error == ESP_OK;
+    if (!ota_ok) snprintf(ota_error, sizeof(ota_error), "Update failed: %s", esp_err_to_name(error));
+    ota_busy = false;
+    ota_done = true;
+    if (ota_ok) {
+        ESP_LOGI("tab5-os", "OTA update installed; restarting");
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        esp_restart();
+    }
+    ota_task_handle = NULL;
+    vTaskDelete(NULL);
+}
+
+static void ota_clicked(lv_event_t *event)
+{
+    (void)event;
+    if (ota_busy) return;
+    if (!wifi_connected) {
+        lv_label_set_text(ota_status, "Connect to Wi-Fi first");
+        return;
+    }
+    if (ebook_download_busy) {
+        lv_label_set_text(ota_status, "Wait for book downloads to finish");
+        return;
+    }
+    ota_busy = true;
+    ota_done = false;
+    ota_ok = false;
+    lv_label_set_text(ota_status, "Downloading update...");
+    lv_obj_add_state(ota_button, LV_STATE_DISABLED);
+    if (xTaskCreateWithCaps(ota_update_task, "ota", 12288, NULL, 4, &ota_task_handle,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+        ota_busy = false;
+        lv_obj_remove_state(ota_button, LV_STATE_DISABLED);
+        lv_label_set_text(ota_status, "Could not start updater");
+    }
+}
+
+static void ota_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    if (!ota_done || !ota_status) return;
+    ota_done = false;
+    lv_label_set_text(ota_status, ota_ok ? "Installed. Restarting..." : ota_error);
+    if (!ota_ok && ota_button) lv_obj_remove_state(ota_button, LV_STATE_DISABLED);
+}
+
 static void system_clicked(lv_event_t *event)
 {
     (void)event;
     clear_content();
+    lv_obj_t *title = lv_label_create(content);
+    lv_label_set_text(title, "System");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
     esp_chip_info_t chip;
     esp_chip_info(&chip);
     lv_obj_t *info = lv_label_create(content);
     lv_label_set_text_fmt(info,
-        "System\n\nESP32-P4 rev %d.%d\n%d CPU cores\n%lu KB free RAM\n32 MB PSRAM\n720 x 1280 ST7121\n\nInternal: %s\nSD card: %s",
+        "Tab5 OS %s\n\nESP32-P4 rev %d.%d\n%d CPU cores\n%lu KB free RAM\n32 MB PSRAM\n720 x 1280 ST7121\n\nInternal: %s\nSD card: %s",
+        esp_app_get_description()->version,
         chip.revision / 100, chip.revision % 100, chip.cores,
         (unsigned long)(heap_caps_get_free_size(MALLOC_CAP_8BIT) / 1024),
         internal_ready ? "mounted" : "unavailable", sd_ready ? "mounted" : "not inserted");
-    lv_obj_set_style_text_font(info, &lv_font_montserrat_28, 0);
-    lv_obj_set_style_text_line_space(info, 16, 0);
+    lv_obj_set_style_text_line_space(info, 8, 0);
+    ota_button = button(content, "Install latest", ota_clicked);
+    lv_obj_set_size(ota_button, 320, 82);
+    if (ota_busy) lv_obj_add_state(ota_button, LV_STATE_DISABLED);
+    ota_status = lv_label_create(content);
+    lv_label_set_text(ota_status, ota_busy ? "Downloading update..." : "Updates use published GitHub release builds");
+    lv_obj_set_width(ota_status, 620);
+    ota_timer = lv_timer_create(ota_tick, 250, NULL);
 }
 
 static void show_launcher(void)
@@ -1992,6 +2104,16 @@ static void show_launcher(void)
     app_icon(content, LV_SYMBOL_FILE, "Ebooks", 0x8D6E63, ebooks_clicked, 1, 2);
 }
 
+static void confirm_running_ota(void)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state;
+    if (esp_ota_get_state_partition(running, &state) == ESP_OK && state == ESP_OTA_IMG_PENDING_VERIFY) {
+        ESP_ERROR_CHECK(esp_ota_mark_app_valid_cancel_rollback());
+        ESP_LOGI("tab5-os", "OTA image validated");
+    }
+}
+
 void app_main(void)
 {
     ESP_LOGI("tab5-os", "Starting Tab5 OS");
@@ -2000,6 +2122,7 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(300));
 
     wifi_ready = start_wifi();
+    load_chat_config();
 
     internal_ready = mount_internal();
     sd_ready = bsp_sdcard_init(SD_PATH, 5) == ESP_OK;
@@ -2041,6 +2164,7 @@ void app_main(void)
 
     bsp_display_unlock();
     bsp_display_backlight_on();
+    confirm_running_ota();
     mkdir(SD_PATH "/BOOKS", 0775);
     ebook_start_default_downloads();
 }

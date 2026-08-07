@@ -40,6 +40,10 @@ Hold the Tab5 reset button until its green LED flashes rapidly before flashing. 
 
 The checked-in defaults include M5Stack's required QIO, 200 MHz PSRAM, and L2-cache settings. Removing them causes MIPI display underruns on the 720p panel.
 
+## OTA releases
+
+The System app can install the latest tagged GitHub release over Wi-Fi. Push a `v*` tag to build and publish `tab5_os.bin` automatically. The first locally provisioned build migrates the revocable chat relay token into NVS, so public release binaries contain no device credential and OTA updates preserve chat configuration.
+
 ## Upstream
 
 The small board-support components in `components/` come from M5Stack's Apache-2.0-licensed [M5Tab5-UserDemo](https://github.com/m5stack/M5Tab5-UserDemo). Managed dependencies are pinned in `dependencies.lock`.
@@ -58,6 +62,7 @@ The small board-support components in `components/` come from M5Stack's Apache-2
 - [x] SD-card ebook reader with three first-run Project Gutenberg classics
 - [x] Application launcher
 - [x] USB remote desktop
+- [x] HTTPS OTA updates with automatic rollback
 
 ## License
 

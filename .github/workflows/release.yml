@@ -1,0 +1,33 @@
+name: Release firmware
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: espressif/idf:v5.4.2
+    steps:
+      - uses: actions/checkout@v4
+      - run: idf.py build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: build/tab5_os.bin
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: firmware
+          path: firmware
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" firmware/tab5_os.bin --generate-notes --title "Tab5 OS $GITHUB_REF_NAME"
