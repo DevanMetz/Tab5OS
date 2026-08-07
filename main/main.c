@@ -1,4 +1,5 @@
 #include <dirent.h>
+#include <assert.h>
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,6 +32,9 @@
 #include "driver/usb_serial_jtag_vfs.h"
 #include "driver/i2c_master.h"
 #include "driver/gpio.h"
+#include "esp_adc/adc_continuous.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
@@ -60,6 +64,8 @@
 #define BATTERY_EMPTY_MV 6000
 #define BATTERY_FULL_MV 8230
 #define BATTERY_HISTORY_POINTS 60
+#define SCOPE_RING_POINTS 1200
+#define SCOPE_CHART_POINTS 300
 #define TIME_ZONE "CST6CDT,M3.2.0,M11.1.0"
 
 typedef struct __attribute__((packed)) {
@@ -110,6 +116,12 @@ typedef struct {
     lv_obj_t *level_label;
 } gpio_control_t;
 
+typedef struct {
+    gpio_num_t pin;
+    adc_unit_t unit;
+    adc_channel_t channel;
+} scope_channel_t;
+
 static const ebook_default_t ebook_defaults[] = {
     {"ALICE.TXT", "https://www.gutenberg.org/cache/epub/11/pg11.txt"},
     {"FRANK.TXT", "https://www.gutenberg.org/cache/epub/84/pg84.txt"},
@@ -133,7 +145,19 @@ static gpio_control_t gpio_controls[] = {
 #define GPIO_CONTROL_COUNT (sizeof(gpio_controls) / sizeof(gpio_controls[0]))
 _Static_assert(GPIO_CONTROL_COUNT == 24, "Tab5 exposes 24 user GPIO pins");
 
+static const scope_channel_t scope_channels[] = {
+    {GPIO_NUM_16, ADC_UNIT_1, ADC_CHANNEL_0}, {GPIO_NUM_18, ADC_UNIT_1, ADC_CHANNEL_2},
+    {GPIO_NUM_19, ADC_UNIT_1, ADC_CHANNEL_3}, {GPIO_NUM_49, ADC_UNIT_2, ADC_CHANNEL_0},
+    {GPIO_NUM_50, ADC_UNIT_2, ADC_CHANNEL_1}, {GPIO_NUM_51, ADC_UNIT_2, ADC_CHANNEL_2},
+    {GPIO_NUM_53, ADC_UNIT_2, ADC_CHANNEL_4}, {GPIO_NUM_54, ADC_UNIT_2, ADC_CHANNEL_5},
+};
+#define SCOPE_CHANNEL_COUNT (sizeof(scope_channels) / sizeof(scope_channels[0]))
+_Static_assert(SCOPE_CHANNEL_COUNT == 8, "Tab5 exposes eight safe ADC inputs");
+static const uint32_t scope_sample_rates[] = {1000, 5000, 20000, 80000};
+static const uint16_t scope_ranges_mv[] = {3300, 2000, 1000, 500};
+
 static lv_obj_t *content;
+static lv_obj_t *header;
 static lv_obj_t *battery_label;
 static i2c_master_dev_handle_t battery_monitor;
 static i2c_master_dev_handle_t rtc;
@@ -249,6 +273,31 @@ static lv_obj_t *ota_status;
 static lv_obj_t *ota_button;
 static lv_timer_t *ota_timer;
 static lv_timer_t *gpio_timer;
+static lv_timer_t *scope_timer;
+static lv_obj_t *scope_chart;
+static lv_chart_series_t *scope_series;
+static lv_obj_t *scope_stats;
+static lv_obj_t *scope_channel_label;
+static lv_obj_t *scope_run_label;
+static lv_obj_t *scope_rate_label;
+static lv_obj_t *scope_scale_label;
+static lv_obj_t *scope_trigger_label;
+static lv_obj_t *scope_level_label;
+static int32_t *scope_chart_points;
+static uint16_t *scope_ring;
+static uint16_t *scope_snapshot;
+static size_t scope_ring_head;
+static size_t scope_ring_count;
+static portMUX_TYPE scope_lock = portMUX_INITIALIZER_UNLOCKED;
+static TaskHandle_t scope_task_handle;
+static volatile bool scope_active;
+static volatile bool scope_running = true;
+static volatile bool scope_error;
+static volatile uint8_t scope_channel_index;
+static volatile uint8_t scope_rate_index = 1;
+static uint8_t scope_range_index;
+static uint8_t scope_trigger_mode;
+static uint16_t scope_trigger_mv = 1650;
 static TaskHandle_t ota_task_handle;
 static volatile bool ota_busy;
 static volatile bool ota_done;
@@ -267,6 +316,7 @@ static void show_browser(void);
 static void show_ebooks(void);
 static void show_clock(void);
 static void show_gpio(void);
+static void show_scope(void);
 static void clear_content(void);
 static void browser_link_clicked(lv_event_t *event);
 
@@ -307,6 +357,227 @@ static void gpio_tick(lv_timer_t *timer)
         if (gpio_controls[i].level_label)
             lv_label_set_text_fmt(gpio_controls[i].level_label, "%d", gpio_get_level(gpio_controls[i].pin));
     }
+}
+
+static bool scope_window_start(const uint16_t *samples, size_t count, uint8_t mode,
+                               uint16_t level, size_t *start)
+{
+    if (count < SCOPE_CHART_POINTS) return false;
+    *start = count - SCOPE_CHART_POINTS;
+    bool found = false;
+    for (size_t i = SCOPE_CHART_POINTS / 4; i + SCOPE_CHART_POINTS * 3 / 4 < count; i++) {
+        bool crossing = mode == 2 ? samples[i - 1] > level && samples[i] <= level
+                                  : samples[i - 1] < level && samples[i] >= level;
+        if (crossing) {
+            *start = i - SCOPE_CHART_POINTS / 4;
+            found = true;
+        }
+    }
+    return mode == 0 || found;
+}
+
+static void scope_self_test(void)
+{
+    uint16_t samples[600] = {0};
+    for (size_t i = 200; i < 600; i++) samples[i] = 2000;
+    size_t start = 0;
+    assert(scope_window_start(samples, 600, 1, 1000, &start) && start == 125);
+}
+
+static adc_cali_handle_t scope_calibration(adc_unit_t unit, adc_channel_t channel)
+{
+#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
+    adc_cali_handle_t calibration = NULL;
+    adc_cali_curve_fitting_config_t config = {
+        .unit_id = unit, .chan = channel, .atten = ADC_ATTEN_DB_12, .bitwidth = ADC_BITWIDTH_12,
+    };
+    if (adc_cali_create_scheme_curve_fitting(&config, &calibration) == ESP_OK) return calibration;
+#endif
+    return NULL;
+}
+
+static void scope_task(void *argument)
+{
+    (void)argument;
+    uint8_t bytes[512];
+    uint16_t millivolts[512 / SOC_ADC_DIGI_RESULT_BYTES];
+    for (;;) {
+        if (!scope_active || !scope_running) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+        uint8_t channel_index = scope_channel_index;
+        uint8_t rate_index = scope_rate_index;
+        const scope_channel_t *input = &scope_channels[channel_index];
+        adc_continuous_handle_t adc = NULL;
+        adc_continuous_handle_cfg_t handle_config = {.max_store_buf_size = 2048, .conv_frame_size = sizeof(bytes)};
+        adc_digi_pattern_config_t pattern = {
+            .atten = ADC_ATTEN_DB_12, .channel = input->channel, .unit = input->unit, .bit_width = ADC_BITWIDTH_12,
+        };
+        adc_continuous_config_t config = {
+            .pattern_num = 1,
+            .adc_pattern = &pattern,
+            .sample_freq_hz = scope_sample_rates[rate_index],
+            .conv_mode = input->unit == ADC_UNIT_1 ? ADC_CONV_SINGLE_UNIT_1 : ADC_CONV_SINGLE_UNIT_2,
+            .format = ADC_DIGI_OUTPUT_FORMAT_TYPE2,
+        };
+        esp_err_t error = adc_continuous_new_handle(&handle_config, &adc);
+        if (error == ESP_OK) error = adc_continuous_config(adc, &config);
+        if (error == ESP_OK) error = adc_continuous_start(adc);
+        if (error != ESP_OK) {
+            scope_error = true;
+            if (adc) adc_continuous_deinit(adc);
+            vTaskDelay(pdMS_TO_TICKS(250));
+            continue;
+        }
+        adc_cali_handle_t calibration = scope_calibration(input->unit, input->channel);
+        scope_error = false;
+        portENTER_CRITICAL(&scope_lock);
+        scope_ring_head = scope_ring_count = 0;
+        portEXIT_CRITICAL(&scope_lock);
+
+        while (scope_active && scope_running && channel_index == scope_channel_index && rate_index == scope_rate_index) {
+            uint32_t bytes_read = 0;
+            error = adc_continuous_read(adc, bytes, sizeof(bytes), &bytes_read, 100);
+            if (error == ESP_ERR_TIMEOUT) continue;
+            if (error != ESP_OK) {
+                scope_error = true;
+                break;
+            }
+            size_t count = 0;
+            for (size_t i = 0; i < bytes_read; i += SOC_ADC_DIGI_RESULT_BYTES) {
+                adc_digi_output_data_t *sample = (adc_digi_output_data_t *)&bytes[i];
+                if (sample->type2.unit != input->unit || sample->type2.channel != input->channel) continue;
+                int mv = sample->type2.data * 3300 / 4095;
+                if (calibration) adc_cali_raw_to_voltage(calibration, sample->type2.data, &mv);
+                millivolts[count++] = mv < 0 ? 0 : mv > 3300 ? 3300 : mv;
+            }
+            portENTER_CRITICAL(&scope_lock);
+            for (size_t i = 0; i < count; i++) {
+                scope_ring[scope_ring_head] = millivolts[i];
+                scope_ring_head = (scope_ring_head + 1) % SCOPE_RING_POINTS;
+                if (scope_ring_count < SCOPE_RING_POINTS) scope_ring_count++;
+            }
+            portEXIT_CRITICAL(&scope_lock);
+        }
+        adc_continuous_stop(adc);
+        adc_continuous_deinit(adc);
+#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
+        if (calibration) adc_cali_delete_scheme_curve_fitting(calibration);
+#endif
+    }
+}
+
+static void scope_update_controls(void)
+{
+    const scope_channel_t *input = &scope_channels[scope_channel_index];
+    lv_label_set_text_fmt(scope_channel_label, "G%d", input->pin);
+    lv_label_set_text(scope_run_label, scope_running ? "HOLD" : "RUN");
+    uint32_t us_per_div = 30000000 / scope_sample_rates[scope_rate_index];
+    if (us_per_div >= 1000 && us_per_div % 1000)
+        lv_label_set_text_fmt(scope_rate_label, "%lu.%lu ms/div", (unsigned long)(us_per_div / 1000),
+                              (unsigned long)((us_per_div % 1000) / 100));
+    else if (us_per_div >= 1000)
+        lv_label_set_text_fmt(scope_rate_label, "%lu ms/div", (unsigned long)(us_per_div / 1000));
+    else
+        lv_label_set_text_fmt(scope_rate_label, "%lu us/div", (unsigned long)us_per_div);
+    lv_label_set_text_fmt(scope_scale_label, "%u mV/div", scope_ranges_mv[scope_range_index] / 10);
+    lv_label_set_text(scope_trigger_label, scope_trigger_mode == 0 ? "AUTO" : scope_trigger_mode == 1 ? "RISE" : "FALL");
+    lv_label_set_text_fmt(scope_level_label, "Trigger %u mV", scope_trigger_mv);
+}
+
+static void scope_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    lv_obj_invalidate(header);
+    size_t count;
+    portENTER_CRITICAL(&scope_lock);
+    count = scope_ring_count;
+    size_t oldest = (scope_ring_head + SCOPE_RING_POINTS - count) % SCOPE_RING_POINTS;
+    for (size_t i = 0; i < count; i++) scope_snapshot[i] = scope_ring[(oldest + i) % SCOPE_RING_POINTS];
+    portEXIT_CRITICAL(&scope_lock);
+
+    size_t start;
+    if (!scope_window_start(scope_snapshot, count, scope_trigger_mode, scope_trigger_mv, &start)) {
+        lv_label_set_text(scope_stats, scope_error ? "ADC error" : "Waiting for trigger...");
+        return;
+    }
+    uint32_t sum = 0;
+    uint16_t minimum = UINT16_MAX, maximum = 0;
+    for (size_t i = 0; i < SCOPE_CHART_POINTS; i++) {
+        uint16_t mv = scope_snapshot[start + i];
+        scope_chart_points[i] = mv;
+        sum += mv;
+        if (mv < minimum) minimum = mv;
+        if (mv > maximum) maximum = mv;
+    }
+    size_t first_crossing = 0, last_crossing = 0, crossings = 0;
+    for (size_t i = 1; i < count; i++) {
+        bool crossing = scope_trigger_mode == 2 ? scope_snapshot[i - 1] > scope_trigger_mv && scope_snapshot[i] <= scope_trigger_mv
+                                                : scope_snapshot[i - 1] < scope_trigger_mv && scope_snapshot[i] >= scope_trigger_mv;
+        if (crossing) {
+            if (!crossings) first_crossing = i;
+            last_crossing = i;
+            crossings++;
+        }
+    }
+    uint32_t hz = crossings > 1 ? (crossings - 1) * scope_sample_rates[scope_rate_index] /
+                                  (last_crossing - first_crossing) : 0;
+    uint16_t now = scope_chart_points[SCOPE_CHART_POINTS - 1];
+    uint16_t average = sum / SCOPE_CHART_POINTS;
+    uint16_t peak_to_peak = maximum - minimum;
+    lv_label_set_text_fmt(scope_stats,
+                          "Now %u.%03u V   Min %u.%03u   Max %u.%03u   Vpp %u.%03u\n"
+                          "Avg %u.%03u V   Freq %lu Hz   %lu kS/s",
+                          now / 1000, now % 1000, minimum / 1000, minimum % 1000,
+                          maximum / 1000, maximum % 1000, peak_to_peak / 1000, peak_to_peak % 1000,
+                          average / 1000, average % 1000, (unsigned long)hz,
+                          (unsigned long)(scope_sample_rates[scope_rate_index] / 1000));
+    lv_chart_refresh(scope_chart);
+}
+
+static void scope_channel_clicked(lv_event_t *event)
+{
+    (void)event;
+    scope_channel_index = (scope_channel_index + 1) % SCOPE_CHANNEL_COUNT;
+    scope_update_controls();
+}
+
+static void scope_run_clicked(lv_event_t *event)
+{
+    (void)event;
+    scope_running = !scope_running;
+    scope_update_controls();
+}
+
+static void scope_rate_clicked(lv_event_t *event)
+{
+    (void)event;
+    scope_rate_index = (scope_rate_index + 1) % (sizeof(scope_sample_rates) / sizeof(scope_sample_rates[0]));
+    scope_update_controls();
+}
+
+static void scope_scale_clicked(lv_event_t *event)
+{
+    (void)event;
+    scope_range_index = (scope_range_index + 1) % (sizeof(scope_ranges_mv) / sizeof(scope_ranges_mv[0]));
+    if (scope_trigger_mv > scope_ranges_mv[scope_range_index]) scope_trigger_mv = scope_ranges_mv[scope_range_index] / 2;
+    lv_chart_set_range(scope_chart, LV_CHART_AXIS_PRIMARY_Y, 0, scope_ranges_mv[scope_range_index]);
+    scope_update_controls();
+}
+
+static void scope_trigger_clicked(lv_event_t *event)
+{
+    (void)event;
+    scope_trigger_mode = (scope_trigger_mode + 1) % 3;
+    scope_update_controls();
+}
+
+static void scope_level_clicked(lv_event_t *event)
+{
+    int level = scope_trigger_mv + (int)(intptr_t)lv_event_get_user_data(event);
+    scope_trigger_mv = level < 0 ? 0 : level > scope_ranges_mv[scope_range_index] ? scope_ranges_mv[scope_range_index] : level;
+    scope_update_controls();
 }
 
 static uint8_t bcd(int value)
@@ -1476,6 +1747,11 @@ static void clear_content(void)
             gpio_controls[i].level_label = NULL;
         }
     }
+    if (scope_timer) {
+        lv_timer_delete(scope_timer);
+        scope_timer = NULL;
+    }
+    scope_active = false;
     wifi_status = NULL;
     wifi_list = NULL;
     chat_output = NULL;
@@ -1506,9 +1782,19 @@ static void clear_content(void)
     clock_time = NULL;
     clock_date = NULL;
     clock_status = NULL;
+    scope_chart = NULL;
+    scope_series = NULL;
+    scope_stats = NULL;
+    scope_channel_label = NULL;
+    scope_run_label = NULL;
+    scope_rate_label = NULL;
+    scope_scale_label = NULL;
+    scope_trigger_label = NULL;
+    scope_level_label = NULL;
     lv_obj_clean(content);
     lv_obj_scroll_to(content, 0, 0, LV_ANIM_OFF);
     lv_async_call(reset_content_scroll, content);
+    lv_obj_add_flag(content, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 }
@@ -2428,6 +2714,101 @@ static void show_gpio(void)
     gpio_tick(NULL);
 }
 
+static lv_obj_t *scope_control(lv_obj_t *parent, const char *text, int width,
+                               lv_event_cb_t callback, void *user_data, lv_obj_t **label_out)
+{
+    lv_obj_t *control = lv_button_create(parent);
+    lv_obj_set_size(control, width, 60);
+    lv_obj_add_event_cb(control, callback, LV_EVENT_CLICKED, user_data);
+    lv_obj_t *label = lv_label_create(control);
+    lv_label_set_text(label, text);
+    lv_obj_center(label);
+    if (label_out) *label_out = label;
+    return control;
+}
+
+static lv_obj_t *scope_row(void)
+{
+    lv_obj_t *row = lv_obj_create(content);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, 650, 64);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_AROUND, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    return row;
+}
+
+static void scope_clicked(lv_event_t *event)
+{
+    (void)event;
+    show_scope();
+}
+
+static void show_scope(void)
+{
+    clear_content();
+    lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
+    if (!scope_ring) {
+        scope_ring = heap_caps_calloc(SCOPE_RING_POINTS, sizeof(*scope_ring), MALLOC_CAP_SPIRAM);
+        scope_snapshot = heap_caps_calloc(SCOPE_RING_POINTS, sizeof(*scope_snapshot), MALLOC_CAP_SPIRAM);
+        scope_chart_points = heap_caps_calloc(SCOPE_CHART_POINTS, sizeof(*scope_chart_points), MALLOC_CAP_SPIRAM);
+        if (!scope_ring || !scope_snapshot || !scope_chart_points) {
+            heap_caps_free(scope_ring);
+            heap_caps_free(scope_snapshot);
+            heap_caps_free(scope_chart_points);
+            scope_ring = scope_snapshot = NULL;
+            scope_chart_points = NULL;
+            lv_obj_t *error = lv_label_create(content);
+            lv_label_set_text(error, "Not enough memory for oscilloscope buffers.");
+            return;
+        }
+    }
+    lv_obj_t *title = lv_label_create(content);
+    lv_label_set_text(title, "ADC Oscilloscope");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+
+    scope_stats = lv_label_create(content);
+    lv_obj_set_width(scope_stats, 650);
+    lv_obj_set_style_text_align(scope_stats, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(scope_stats, "Starting ADC...");
+
+    scope_chart = lv_chart_create(content);
+    lv_obj_set_size(scope_chart, 650, 500);
+    lv_chart_set_type(scope_chart, LV_CHART_TYPE_LINE);
+    lv_chart_set_point_count(scope_chart, SCOPE_CHART_POINTS);
+    lv_chart_set_range(scope_chart, LV_CHART_AXIS_PRIMARY_Y, 0, scope_ranges_mv[scope_range_index]);
+    lv_chart_set_div_line_count(scope_chart, 9, 11);
+    scope_series = lv_chart_add_series(scope_chart, lv_color_hex(0x00E676), LV_CHART_AXIS_PRIMARY_Y);
+    lv_chart_set_series_ext_y_array(scope_chart, scope_series, scope_chart_points);
+
+    lv_obj_t *row = scope_row();
+    scope_control(row, "G16", 130, scope_channel_clicked, NULL, &scope_channel_label);
+    scope_control(row, "HOLD", 130, scope_run_clicked, NULL, &scope_run_label);
+    scope_control(row, "6 ms/div", 250, scope_rate_clicked, NULL, &scope_rate_label);
+
+    row = scope_row();
+    scope_control(row, "330 mV/div", 250, scope_scale_clicked, NULL, &scope_scale_label);
+    scope_control(row, "AUTO", 250, scope_trigger_clicked, NULL, &scope_trigger_label);
+
+    row = scope_row();
+    scope_control(row, LV_SYMBOL_MINUS, 100, scope_level_clicked, (void *)(intptr_t)-100, NULL);
+    scope_level_label = lv_label_create(row);
+    lv_obj_set_width(scope_level_label, 260);
+    lv_obj_set_style_text_align(scope_level_label, LV_TEXT_ALIGN_CENTER, 0);
+    scope_control(row, LV_SYMBOL_PLUS, 100, scope_level_clicked, (void *)(intptr_t)100, NULL);
+
+    lv_obj_t *warning = lv_label_create(content);
+    lv_label_set_text(warning, "Inputs: G16 G18 G19 G49 G50 G51 G53 G54   |   0-3.3V only");
+    lv_obj_set_width(warning, 650);
+    lv_obj_set_style_text_align(warning, LV_TEXT_ALIGN_CENTER, 0);
+
+    scope_running = true;
+    scope_error = false;
+    scope_update_controls();
+    scope_active = true;
+    if (!scope_task_handle) xTaskCreate(scope_task, "adc-scope", 4096, NULL, 5, &scope_task_handle);
+    scope_timer = lv_timer_create(scope_tick, 150, NULL);
+}
+
 static void show_launcher(void)
 {
     static int32_t columns[] = {
@@ -2448,6 +2829,7 @@ static void show_launcher(void)
     app_icon(content, LV_SYMBOL_FILE, "Ebooks", 0x8D6E63, ebooks_clicked, 1, 2);
     app_icon(content, LV_SYMBOL_LOOP, "Clock", 0x009688, clock_clicked, 2, 2);
     app_icon(content, LV_SYMBOL_SETTINGS, "System", 0x7C4DFF, system_clicked, 0, 3);
+    app_icon(content, LV_SYMBOL_BARS, "Scope", 0x00897B, scope_clicked, 1, 3);
 }
 
 static void confirm_running_ota(void)
@@ -2462,6 +2844,7 @@ static void confirm_running_ota(void)
 
 void app_main(void)
 {
+    scope_self_test();
     ESP_LOGI("tab5-os", "Starting Tab5 OS");
     ESP_ERROR_CHECK(bsp_i2c_init());
     bsp_io_expander_pi4ioe_init(bsp_i2c_get_handle());
@@ -2485,7 +2868,7 @@ void app_main(void)
     lv_obj_set_style_bg_color(screen, lv_color_hex(0x10141f), 0);
     lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, 0);
 
-    lv_obj_t *header = lv_obj_create(screen);
+    header = lv_obj_create(screen);
     lv_obj_set_size(header, 720, 100);
     lv_obj_align(header, LV_ALIGN_TOP_MID, 0, 0);
     lv_obj_set_style_bg_color(header, lv_color_hex(0x20283a), 0);

@@ -55,6 +55,7 @@ The small board-support components in `components/` come from M5Stack's Apache-2
 - [x] Touch input
 - [x] SPIFFS/microSD file browser
 - [x] Notes, counter, and system apps
+- [x] GPIO control and eight-channel ADC oscilloscope
 - [x] Wi-Fi settings
 - [x] AI chat client through an authenticated HTTPS relay
 - [x] Start/stop microphone transcription with a live waveform
