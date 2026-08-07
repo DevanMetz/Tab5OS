@@ -45,6 +45,7 @@
 #define BROWSER_MAX_HTML 65536
 #define BROWSER_MAX_TEXT 12288
 #define BROWSER_MAX_LINKS 12
+#define EBOOK_PAGE_BYTES 8192
 
 typedef struct __attribute__((packed)) {
     char magic[4];
@@ -157,6 +158,15 @@ static char browser_link_labels[BROWSER_MAX_LINKS][64];
 static size_t browser_link_count;
 static char browser_history[8][256];
 static size_t browser_history_count;
+static lv_obj_t *ebook_text;
+static lv_obj_t *ebook_status;
+static lv_obj_t *ebook_prev;
+static lv_obj_t *ebook_next;
+static char *ebook_buffer;
+static char ebook_path[256];
+static long ebook_offset;
+static long ebook_next_offset;
+static bool ebook_large_text;
 static volatile int16_t remote_x;
 static volatile int16_t remote_y;
 static volatile bool remote_pressed;
@@ -167,6 +177,7 @@ static void show_files(const char *path);
 static void show_settings(void);
 static void show_chat(void);
 static void show_browser(void);
+static void show_ebooks(void);
 static void clear_content(void);
 static void browser_link_clicked(lv_event_t *event);
 
@@ -1167,6 +1178,10 @@ static void clear_content(void)
     browser_page = NULL;
     browser_keyboard = NULL;
     browser_keys_label = NULL;
+    ebook_text = NULL;
+    ebook_status = NULL;
+    ebook_prev = NULL;
+    ebook_next = NULL;
     lv_obj_clean(content);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -1281,6 +1296,175 @@ static void files_clicked(lv_event_t *event)
 {
     (void)event;
     show_files(NULL);
+}
+
+static bool ebook_supported(const char *name)
+{
+    const char *extension = strrchr(name, '.');
+    return extension && browser_prefix(extension, ".txt") && !extension[4];
+}
+
+static void ebook_load_page(void)
+{
+    if (!ebook_buffer) ebook_buffer = heap_caps_malloc(EBOOK_PAGE_BYTES + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!ebook_buffer) {
+        lv_label_set_text(ebook_status, "Out of memory");
+        return;
+    }
+    FILE *file = fopen(ebook_path, "rb");
+    if (!file || fseek(file, ebook_offset, SEEK_SET)) {
+        if (file) fclose(file);
+        lv_label_set_text(ebook_status, "Could not open book");
+        return;
+    }
+    size_t raw_read = fread(ebook_buffer, 1, EBOOK_PAGE_BYTES, file);
+    fclose(file);
+    size_t read = 0;
+    for (size_t i = 0; i < raw_read;) {
+        unsigned char value = ebook_buffer[i++];
+        if (value < 128) ebook_buffer[read++] = value ? value : ' ';
+        else {
+            ebook_buffer[read++] = '?';
+            while (i < raw_read && ((unsigned char)ebook_buffer[i] & 0xc0) == 0x80) i++;
+        }
+    }
+    ebook_buffer[read] = '\0';
+    ebook_next_offset = ebook_offset + raw_read;
+    ESP_LOGI("tab5-os", "Ebook loaded %u bytes at %ld from %.120s", (unsigned)raw_read, ebook_offset, ebook_path);
+    lv_textarea_set_text(ebook_text, raw_read ? ebook_buffer : "End of book");
+    lv_obj_scroll_to_y(ebook_text, 0, LV_ANIM_OFF);
+    lv_label_set_text_fmt(ebook_status, "Page %lu  -  %ld KB", (unsigned long)(ebook_offset / EBOOK_PAGE_BYTES + 1), ebook_offset / 1024);
+    if (ebook_offset) lv_obj_remove_state(ebook_prev, LV_STATE_DISABLED);
+    else lv_obj_add_state(ebook_prev, LV_STATE_DISABLED);
+    if (raw_read == EBOOK_PAGE_BYTES) lv_obj_remove_state(ebook_next, LV_STATE_DISABLED);
+    else lv_obj_add_state(ebook_next, LV_STATE_DISABLED);
+}
+
+static void ebook_library_clicked(lv_event_t *event)
+{
+    (void)event;
+    show_ebooks();
+}
+
+static void ebook_prev_clicked(lv_event_t *event)
+{
+    (void)event;
+    ebook_offset = ebook_offset > EBOOK_PAGE_BYTES ? ebook_offset - EBOOK_PAGE_BYTES : 0;
+    ebook_load_page();
+}
+
+static void ebook_next_clicked(lv_event_t *event)
+{
+    (void)event;
+    ebook_offset = ebook_next_offset;
+    ebook_load_page();
+}
+
+static void ebook_text_clicked(lv_event_t *event)
+{
+    lv_obj_t *label = lv_obj_get_child(lv_event_get_target(event), 0);
+    ebook_large_text = !ebook_large_text;
+    lv_obj_set_style_text_font(ebook_text, ebook_large_text ? &lv_font_montserrat_28 : &lv_font_montserrat_14, 0);
+    lv_label_set_text(label, ebook_large_text ? "Text: Large" : "Text: Small");
+}
+
+static void show_ebook_reader(const char *path)
+{
+    snprintf(ebook_path, sizeof(ebook_path), "%s", path);
+    ebook_offset = 0;
+    clear_content();
+    lv_obj_set_style_pad_row(content, 12, 0);
+
+    const char *name = strrchr(ebook_path, '/');
+    lv_obj_t *title = lv_label_create(content);
+    lv_label_set_text(title, name ? name + 1 : ebook_path);
+    lv_obj_set_width(title, 620);
+    lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+    ebook_status = lv_label_create(content);
+
+    lv_obj_t *actions = lv_obj_create(content);
+    lv_obj_set_size(actions, 640, 80);
+    lv_obj_remove_flag(actions, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(actions, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(actions, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *library = button(actions, "Library", ebook_library_clicked);
+    ebook_prev = button(actions, "Prev", ebook_prev_clicked);
+    ebook_next = button(actions, "Next", ebook_next_clicked);
+    lv_obj_t *text_size = button(actions, ebook_large_text ? "Text: Large" : "Text: Small", ebook_text_clicked);
+    lv_obj_set_size(library, 135, 64);
+    lv_obj_set_size(ebook_prev, 135, 64);
+    lv_obj_set_size(ebook_next, 135, 64);
+    lv_obj_set_size(text_size, 170, 64);
+    for (size_t i = 0; i < 4; ++i) lv_obj_set_style_text_font(lv_obj_get_child(lv_obj_get_child(actions, i), 0), &lv_font_montserrat_14, 0);
+
+    ebook_text = lv_textarea_create(content);
+    lv_obj_set_size(ebook_text, 640, 860);
+    lv_textarea_set_one_line(ebook_text, false);
+    lv_textarea_set_cursor_click_pos(ebook_text, false);
+    lv_obj_remove_flag(ebook_text, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+    lv_obj_set_style_text_font(ebook_text, ebook_large_text ? &lv_font_montserrat_28 : &lv_font_montserrat_14, 0);
+    ebook_load_page();
+}
+
+static void ebook_open_clicked(lv_event_t *event)
+{
+    show_ebook_reader(lv_event_get_user_data(event));
+}
+
+static void show_ebooks(void)
+{
+    clear_content();
+    file_path_count = 0;
+    lv_obj_t *title = lv_label_create(content);
+    lv_label_set_text(title, "Ebooks");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+    lv_obj_t *list = lv_list_create(content);
+    lv_obj_set_size(list, 640, 940);
+    lv_obj_t *back = lv_list_add_button(list, LV_SYMBOL_LEFT, "Back to apps");
+    lv_obj_add_event_cb(back, home_clicked, LV_EVENT_CLICKED, NULL);
+    if (!sd_ready) {
+        lv_list_add_text(list, "Insert an SD card to read books");
+        return;
+    }
+
+    bool created = mkdir(SD_PATH "/BOOKS", 0775) == 0;
+    if (created) {
+        FILE *welcome = fopen(SD_PATH "/BOOKS/WELCOME.TXT", "wb");
+        if (welcome) {
+            fputs("Welcome to Tab5 Books!\n\nCopy .txt ebooks into the BOOKS folder on the SD card. Use Next and Prev to move through the book, and Text to change the reading size.\n", welcome);
+            fclose(welcome);
+        }
+    }
+    DIR *dir = opendir(SD_PATH "/BOOKS");
+    if (!dir) {
+        lv_list_add_text(list, "Could not open /sdcard/BOOKS");
+        return;
+    }
+    struct dirent *entry;
+    while (file_path_count < 64 && (entry = readdir(dir))) {
+        if (!ebook_supported(entry->d_name)) continue;
+        char *full = file_paths[file_path_count++];
+        const char *books = SD_PATH "/BOOKS/";
+        size_t books_length = strlen(books);
+        size_t name_length = strlen(entry->d_name);
+        if (books_length + name_length >= sizeof(file_paths[0])) {
+            file_path_count--;
+            continue;
+        }
+        memcpy(full, books, books_length);
+        memcpy(full + books_length, entry->d_name, name_length + 1);
+        lv_obj_t *item = lv_list_add_button(list, LV_SYMBOL_FILE, entry->d_name);
+        lv_obj_add_event_cb(item, ebook_open_clicked, LV_EVENT_CLICKED, full);
+    }
+    closedir(dir);
+    if (!file_path_count) lv_list_add_text(list, "Copy .txt books into /sdcard/BOOKS");
+}
+
+static void ebooks_clicked(lv_event_t *event)
+{
+    (void)event;
+    show_ebooks();
 }
 
 static void save_note(lv_event_t *event)
@@ -1688,6 +1872,7 @@ static void show_launcher(void)
     app_icon(content, LV_SYMBOL_WIFI, "Settings", 0x0288D1, settings_clicked, 1, 1);
     app_icon(content, LV_SYMBOL_ENVELOPE, "AI Chat", 0xE91E63, chat_clicked, 2, 1);
     app_icon(content, LV_SYMBOL_EYE_OPEN, "Browser", 0x3F51B5, browser_clicked, 0, 2);
+    app_icon(content, LV_SYMBOL_FILE, "Ebooks", 0x8D6E63, ebooks_clicked, 1, 2);
 }
 
 void app_main(void)
