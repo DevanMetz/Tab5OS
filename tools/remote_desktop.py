@@ -6,12 +6,6 @@ import queue
 import struct
 import threading
 import time
-import tkinter as tk
-
-try:
-    import serial
-except ImportError as error:
-    raise SystemExit("pyserial is required: python -m pip install pyserial") from error
 
 COMMAND = struct.Struct("<2sBBHHH")
 HEADER = struct.Struct("<4sBBBBHHII")
@@ -39,7 +33,16 @@ def ppm_from_rle(payload, width, height):
 
 class Client:
     def __init__(self, port):
-        self.serial = serial.Serial(port, timeout=0.1, write_timeout=1)
+        try:
+            import serial
+        except ImportError as error:
+            raise SystemExit("pyserial is required: python -m pip install pyserial") from error
+        self.serial_module = serial
+        self.serial = serial.Serial(timeout=0.1, write_timeout=1)
+        self.serial.port = port
+        self.serial.dtr = False
+        self.serial.rts = False
+        self.serial.open()
         self.write_lock = threading.Lock()
         self.frames = queue.Queue(maxsize=1)
         self.running = True
@@ -54,7 +57,7 @@ class Client:
                 if self.running:
                     self.serial.write(data)
             return self.running
-        except serial.SerialException:
+        except self.serial_module.SerialException:
             self.running = False
             return False
 
@@ -90,7 +93,10 @@ class Client:
         while self.running:
             if not self._write(command(1)):
                 break
-            frame = self._read_frame()
+            try:
+                frame = self._read_frame()
+            except ValueError:
+                continue
             if frame:
                 if self.frames.full():
                     self.frames.get_nowait()
@@ -103,6 +109,8 @@ class Client:
 
 
 def run(port, scale):
+    import tkinter as tk
+
     client = Client(port)
     root = tk.Tk()
     root.title(f"Tab5 OS - {port}")

@@ -7,3 +7,7 @@ sdkconfig.old
 main/chat_secrets.h
 relay/.dev.vars
 __pycache__/
+
+# Local wearable firmware and reverse-engineering material is not a Tab5 OS release input.
+artifacts/
+reverse-engineering/

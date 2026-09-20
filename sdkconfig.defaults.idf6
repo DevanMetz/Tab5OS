@@ -1,0 +1,11 @@
+# ESP-IDF 6 uses ESP-Hosted 2.x, which has explicit co-processor and board
+# selections. The board preset supplies Tab5's SDIO slot, pins, and active-low
+# ESP32-C6 reset polarity; keep the values explicit so clean builds are
+# deterministic and the compile-time pin guard remains meaningful.
+CONFIG_ESP_HOSTED_CP_TARGET_ESP32C6=y
+CONFIG_ESP32P4_TAB5_C6_BOARD=y
+CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE=y
+CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_LOW=y
+CONFIG_ESP_HOSTED_SDIO_SLOT_1=y
+CONFIG_ESP_HOSTED_SDIO_4_BIT_BUS=y
+CONFIG_ESP_HOSTED_SDIO_CLOCK_FREQ_KHZ=40000

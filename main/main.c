@@ -1,27 +1,42 @@
 #include <dirent.h>
 #include <assert.h>
 #include <ctype.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "bsp/esp-bsp.h"
+#include "storage_io.h"
+#include "ble_tool.h"
+#include "http_tool.h"
+#include "mqtt_tool.h"
+#include "network_tool.h"
+#include "ota_manifest.h"
+#include "signal_tool.h"
+#include "spi_tool.h"
+#include "uart_tool.h"
+#include "ender3_tool.h"
 #include "esp_app_desc.h"
 #include "esp_cache.h"
 #include "esp_chip_info.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
-#include "esp_https_ota.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_ota_ops.h"
+#include "esp_partition.h"
 #include "esp_spiffs.h"
 #include "esp_sntp.h"
 #include "esp_system.h"
+#include "esp_timer.h"
+#include "esp_vfs_fat.h"
 #include "esp_wifi.h"
 #include "esp_crt_bundle.h"
 #include "esp_codec_dev.h"
@@ -32,13 +47,41 @@
 #include "driver/usb_serial_jtag_vfs.h"
 #include "driver/i2c_master.h"
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "esp_adc/adc_continuous.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
 #include "freertos/task.h"
+#include "host/ble_gap.h"
+#include "host/ble_gatt.h"
+#include "host/ble_hs.h"
+#include "host/ble_hs_adv.h"
+#include "host/util/util.h"
+#include "nimble/nimble_port.h"
+#include "nimble/nimble_port_freertos.h"
 #include "lvgl.h"
 #include "cJSON.h"
+#include "sdkconfig.h"
+
+#if !defined(CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE) || \
+    !defined(CONFIG_ESP_HOSTED_RESET_GPIO_ACTIVE_LOW) || \
+    CONFIG_ESP_HOSTED_SDIO_BUS_WIDTH != 4 || \
+    CONFIG_ESP_HOSTED_SDIO_PIN_CLK != 12 || \
+    CONFIG_ESP_HOSTED_SDIO_PIN_CMD != 13 || \
+    CONFIG_ESP_HOSTED_SDIO_PIN_D0 != 11 || \
+    CONFIG_ESP_HOSTED_SDIO_PIN_D1 != 10 || \
+    CONFIG_ESP_HOSTED_SDIO_PIN_D2 != 9 || \
+    CONFIG_ESP_HOSTED_SDIO_PIN_D3 != 8 || \
+    CONFIG_ESP_HOSTED_GPIO_SLAVE_RESET_SLAVE != 15
+#error "Tab5 OS requires ESP-Hosted SDIO CLK12 CMD13 D0-D3=11,10,9,8 RESET15 active-low; delete sdkconfig and rebuild"
+#endif
+
+#if !defined(CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG) || \
+    !defined(CONFIG_ESP_CONSOLE_SECONDARY_NONE)
+#error "Tab5 OS reserves hardware UARTs for tools; use USB Serial/JTAG as the sole console"
+#endif
 
 #ifdef CHAT_HAS_SECRETS
 #include "chat_secrets.h"
@@ -49,6 +92,9 @@
 
 #define INTERNAL_PATH BSP_SPIFFS_MOUNT_POINT
 #define SD_PATH "/sdcard"
+#define HEALTH_PATH SD_PATH "/HEALTH"
+#define HEART_RATE_LOG HEALTH_PATH "/HR.CSV"
+#define SCOPE_PATH SD_PATH "/SCOPE"
 #define SCREEN_WIDTH 720
 #define SCREEN_HEIGHT 1280
 #define VOICE_INPUT_RATE 48000
@@ -60,7 +106,7 @@
 #define BROWSER_MAX_TEXT 12288
 #define BROWSER_MAX_LINKS 12
 #define EBOOK_PAGE_BYTES 8192
-#define OTA_URL "https://github.com/DevanMetz/Tab5OS/releases/latest/download/tab5_os.bin"
+#define OTA_MANIFEST_URL "https://github.com/DevanMetz/Tab5OS/releases/latest/download/tab5_os.json"
 #define BATTERY_EMPTY_MV 6000
 #define BATTERY_FULL_MV 8230
 #define BATTERY_HISTORY_POINTS 60
@@ -71,7 +117,25 @@
 #define WEATHER_DAYS 7
 #define SCREENSAVER_IDLE_MS (2 * 60 * 1000)
 #define SCREENSAVER_FORECAST_ITEMS 5
+#define OTA_HEALTH_WINDOW_MS (30 * 1000)
+#define I2C_STANDARD_SPEED_HZ 100000U
+#define I2C_FAST_SPEED_HZ 400000U
+#define I2C_WRITE_CONFIRM_MS 5000U
+#define I2C_CAPTURE_FLUSH_MS (10 * 1000)
 #define TIME_ZONE "CST6CDT,M3.2.0,M11.1.0"
+#define GOVEE_TEMP_OFFSET_C 0.0f
+#define GOVEE_HUMIDITY_OFFSET 0.0f
+#define SERVO_PIN GPIO_NUM_53
+#define TOY_LED_PIN GPIO_NUM_54
+#define SERVO_LEDC_TIMER LEDC_TIMER_1
+#define SERVO_LEDC_CHANNEL LEDC_CHANNEL_2
+#define SERVO_TIMEOUT_MS (5 * 60 * 1000)
+#define RING_HR_TIMEOUT_MS (60 * 1000)
+#define RING_SYNC_TIMEOUT_MS (15 * 1000)
+#define RING_HR_HISTORY_POINTS 60
+#define RING_HR_SYNC_DAYS 7
+#define RIDE_CHART_POINTS 120
+#define RIDE_FLUSH_MS (10 * 1000)
 
 typedef struct __attribute__((packed)) {
     char magic[4];
@@ -107,6 +171,12 @@ typedef enum {
     CHAT_JOB_VOICE,
 } chat_job_t;
 
+typedef enum {
+    DISPLAY_AWAKE,
+    DISPLAY_DIMMED,
+    DISPLAY_OFF,
+} display_power_state_t;
+
 typedef struct {
     const char *filename;
     const char *url;
@@ -126,6 +196,21 @@ typedef struct {
     adc_unit_t unit;
     adc_channel_t channel;
 } scope_channel_t;
+
+typedef struct {
+    uint32_t frequency_hz;
+    uint16_t duty_permille;
+} scope_measurement_t;
+
+typedef struct {
+    const char *symbol;
+    const char *name;
+    uint32_t color;
+    lv_event_cb_t enter;
+    void (*leave)(void);
+    uint8_t column;
+    uint8_t row;
+} app_definition_t;
 
 typedef struct {
     uint8_t hour;
@@ -171,6 +256,12 @@ typedef struct {
     uint8_t day_count;
 } weather_data_t;
 
+typedef struct {
+    float temperature_c;
+    float humidity;
+    uint8_t battery;
+} govee_reading_t;
+
 static const ebook_default_t ebook_defaults[] = {
     {"ALICE.TXT", "https://www.gutenberg.org/cache/epub/11/pg11.txt"},
     {"FRANK.TXT", "https://www.gutenberg.org/cache/epub/84/pg84.txt"},
@@ -204,6 +295,8 @@ static const scope_channel_t scope_channels[] = {
 _Static_assert(SCOPE_CHANNEL_COUNT == 8, "Tab5 exposes eight safe ADC inputs");
 static const uint32_t scope_sample_rates[] = {1000, 5000, 20000, 80000};
 static const uint16_t scope_ranges_mv[] = {3300, 2000, 1000, 500};
+static const int16_t scope_offset_choices_mv[] = {-200, -100, -50, -20, -10, 0, 10, 20, 50, 100, 200};
+static const uint16_t scope_gain_choices_permille[] = {900, 950, 975, 1000, 1025, 1050, 1100};
 
 static lv_obj_t *content;
 static lv_obj_t *header;
@@ -232,6 +325,9 @@ static volatile bool rtc_sync_pending;
 static lv_obj_t *battery_metrics;
 static lv_obj_t *battery_chart;
 static lv_chart_series_t *battery_series;
+static lv_obj_t *storage_status;
+static lv_obj_t *storage_format_label;
+static bool storage_format_armed;
 static uint8_t battery_history[BATTERY_HISTORY_POINTS];
 static uint8_t battery_history_count;
 static uint8_t battery_history_head;
@@ -241,12 +337,16 @@ static int battery_percent;
 static lv_obj_t *note_area;
 static lv_obj_t *counter_label;
 static bool internal_ready;
-static bool sd_ready;
+static esp_err_t storage_init_error = ESP_OK;
+static volatile bool sd_ready;
+static portMUX_TYPE sd_error_lock = portMUX_INITIALIZER_UNLOCKED;
+static int sd_last_errno;
 static int counter;
 static char current_directory[256];
 static char file_paths[64][256];
 static size_t file_path_count;
 static bool wifi_ready;
+static esp_err_t nvs_init_error = ESP_OK;
 static volatile bool wifi_connecting;
 static volatile bool wifi_connected;
 static volatile bool wifi_scan_busy;
@@ -254,6 +354,8 @@ static volatile bool wifi_scan_done;
 static esp_err_t wifi_scan_error;
 static unsigned wifi_retries;
 static bool wifi_should_connect;
+static bool wifi_forget_armed;
+static uint32_t wifi_forget_armed_at;
 static char wifi_ssid[33];
 static char wifi_ip[16];
 static char selected_ssid[33];
@@ -278,7 +380,7 @@ static lv_obj_t *chat_text_label;
 static lv_timer_t *chat_timer;
 static TaskHandle_t chat_task;
 static esp_codec_dev_handle_t voice_mic;
-static bool voice_mic_open;
+static volatile bool voice_mic_open;
 static volatile bool chat_busy;
 static volatile bool chat_done;
 static volatile chat_job_t chat_job;
@@ -333,6 +435,30 @@ static lv_obj_t *ota_status;
 static lv_obj_t *ota_button;
 static lv_timer_t *ota_timer;
 static lv_timer_t *gpio_timer;
+static lv_obj_t *i2c_status;
+static lv_obj_t *i2c_devices;
+static lv_obj_t *i2c_address_label;
+static lv_obj_t *i2c_register_label;
+static lv_obj_t *i2c_read_result;
+static lv_obj_t *i2c_speed_label;
+static lv_obj_t *i2c_watch_label;
+static lv_obj_t *i2c_value_label;
+static lv_obj_t *i2c_write_label;
+static lv_obj_t *i2c_capture_label;
+static lv_obj_t *i2c_capture_status;
+static lv_timer_t *i2c_timer;
+static FILE *i2c_capture_file;
+static char i2c_capture_temporary_path[96];
+static char i2c_capture_final_path[96];
+static char i2c_capture_notice[128];
+static TickType_t i2c_capture_last_flush_tick;
+static uint8_t i2c_selected_address = 0x08;
+static uint8_t i2c_selected_register;
+static uint8_t i2c_write_value;
+static uint32_t i2c_bus_speed_hz = I2C_STANDARD_SPEED_HZ;
+static uint32_t i2c_write_armed_at_ms;
+static bool i2c_watch_enabled;
+static bool i2c_write_armed;
 static lv_timer_t *scope_timer;
 static lv_obj_t *scope_chart;
 static lv_chart_series_t *scope_series;
@@ -343,6 +469,9 @@ static lv_obj_t *scope_rate_label;
 static lv_obj_t *scope_scale_label;
 static lv_obj_t *scope_trigger_label;
 static lv_obj_t *scope_level_label;
+static lv_obj_t *scope_offset_label;
+static lv_obj_t *scope_gain_label;
+static lv_obj_t *scope_capture_status;
 static int32_t *scope_chart_points;
 static uint16_t *scope_ring;
 static uint16_t *scope_snapshot;
@@ -351,6 +480,7 @@ static size_t scope_ring_count;
 static portMUX_TYPE scope_lock = portMUX_INITIALIZER_UNLOCKED;
 static TaskHandle_t scope_task_handle;
 static volatile bool scope_active;
+static volatile bool scope_sampling;
 static volatile bool scope_running = true;
 static volatile bool scope_error;
 static volatile uint8_t scope_channel_index;
@@ -358,11 +488,18 @@ static volatile uint8_t scope_rate_index = 1;
 static uint8_t scope_range_index;
 static uint8_t scope_trigger_mode;
 static uint16_t scope_trigger_mv = 1650;
+static int16_t scope_offsets_mv[SCOPE_CHANNEL_COUNT];
+static uint16_t scope_gains_permille[SCOPE_CHANNEL_COUNT];
+static bool scope_chart_ready;
+static char scope_capture_notice[128];
+static void (*active_app_leave)(void);
 static TaskHandle_t ota_task_handle;
 static volatile bool ota_busy;
 static volatile bool ota_done;
 static bool ota_ok;
+static bool ota_health_window_elapsed;
 static char ota_error[96];
+static char ota_last_result[64] = "none recorded";
 static volatile int16_t remote_x;
 static volatile int16_t remote_y;
 static volatile bool remote_pressed;
@@ -384,6 +521,107 @@ static char weather_pending_location[64];
 static char weather_error[96];
 static weather_data_t weather_data;
 static time_t weather_fetched_at;
+static portMUX_TYPE govee_lock = portMUX_INITIALIZER_UNLOCKED;
+static govee_reading_t govee_reading;
+static char govee_name[24] = "Govee H5075";
+static char govee_address[18];
+static int8_t govee_rssi;
+static time_t govee_updated_at;
+static bool govee_ready;
+static bool govee_enabled;
+static bool govee_scanning;
+static lv_obj_t *govee_status;
+static lv_obj_t *govee_toggle_label;
+static lv_obj_t *govee_temperature;
+static lv_obj_t *govee_humidity;
+static lv_obj_t *govee_details;
+static lv_timer_t *govee_timer;
+static portMUX_TYPE ring_lock = portMUX_INITIALIZER_UNLOCKED;
+static char ring_name[24] = "COLMI R12";
+static char ring_address[18];
+static int8_t ring_rssi;
+static int ring_battery = -1;
+static time_t ring_updated_at;
+static bool ring_found;
+static bool ring_enabled;
+static bool ring_connecting;
+static bool ring_connected;
+static bool ring_stopping;
+static bool ring_charging;
+static uint16_t ring_conn_handle;
+static int ring_heart_rate = -1;
+static int ring_hr_error;
+static time_t ring_hr_updated_at;
+static bool ring_hr_active;
+static TickType_t ring_hr_deadline;
+static uint8_t ring_hr_history[RING_HR_HISTORY_POINTS];
+static uint8_t ring_hr_history_count;
+static uint8_t ring_hr_history_head;
+typedef struct { time_t timestamp; uint8_t bpm; } ring_hr_sample_t;
+static QueueHandle_t ring_hr_samples;
+static StaticQueue_t ring_hr_queue_control;
+static uint8_t *ring_hr_queue_storage;
+static time_t ring_hr_last_saved;
+static bool ring_hr_last_saved_loaded;
+static char ring_storage_error[96];
+static int ring_sync_days_ago = RING_HR_SYNC_DAYS;
+static int ring_sync_packets_total;
+static time_t ring_sync_day_start;
+static bool ring_sync_active;
+static bool ring_sync_pending;
+static TickType_t ring_sync_deadline;
+static lv_obj_t *ring_status;
+static lv_obj_t *ring_toggle_label;
+static lv_obj_t *ring_battery_label;
+static lv_obj_t *ring_hr_label;
+static lv_obj_t *ring_hr_status;
+static lv_obj_t *ring_hr_button_label;
+static lv_obj_t *ring_hr_chart;
+static lv_chart_series_t *ring_hr_series;
+static lv_obj_t *ring_details;
+static lv_timer_t *ring_timer;
+typedef struct {
+    float speed_kmh;
+    float cadence_rpm;
+    int power_w;
+    int resistance;
+    bool has_speed, has_cadence, has_power, has_resistance;
+} kickr_data_t;
+static portMUX_TYPE kickr_lock = portMUX_INITIALIZER_UNLOCKED;
+static char kickr_name[32] = "Wahoo KICKR";
+static char kickr_address[18];
+static bool kickr_enabled, kickr_found, kickr_connecting, kickr_connected, kickr_subscribed, kickr_stopping;
+static uint16_t kickr_conn_handle, kickr_service_start, kickr_service_end;
+static uint16_t kickr_data_handle, kickr_cccd_handle;
+static kickr_data_t kickr_data;
+static time_t kickr_updated_at;
+static bool ride_recording;
+static time_t ride_started_at;
+static TickType_t ride_started_tick, ride_last_log_tick, ride_last_flush_tick;
+static FILE *ride_file;
+static char ride_temporary_path[128], ride_final_path[128], ride_notice[96];
+static float ride_distance_km, ride_work_kj;
+static int64_t ride_power_sum, ride_hr_sum;
+static uint32_t ride_power_samples, ride_hr_samples_count;
+static int ride_max_power, ride_max_hr;
+static TickType_t ride_next_hr_measure;
+static lv_obj_t *ride_status, *ride_power_label, *ride_cadence_label, *ride_hr_label;
+static lv_obj_t *ride_toggle_label, *ride_stats, *ride_button_label, *ride_history;
+static lv_obj_t *ride_chart;
+static lv_chart_series_t *ride_power_series, *ride_hr_series;
+static lv_obj_t *servo_status;
+static lv_obj_t *servo_position;
+static lv_obj_t *servo_range_label;
+static lv_obj_t *servo_speed_label;
+static lv_timer_t *servo_timer;
+static bool servo_running;
+static bool servo_pwm_ready;
+static uint8_t servo_range_index = 1;
+static uint8_t servo_speed_index = 1;
+static uint16_t servo_pulse_us = 1500;
+static uint16_t servo_target_us = 1500;
+static TickType_t servo_next_target;
+static TickType_t servo_deadline;
 static lv_obj_t *screensaver;
 static lv_obj_t *screensaver_panel;
 static lv_obj_t *screensaver_time;
@@ -391,6 +629,11 @@ static lv_obj_t *screensaver_date;
 static lv_obj_t *screensaver_weather;
 static lv_obj_t *screensaver_hour_labels[SCREENSAVER_FORECAST_ITEMS];
 static lv_obj_t *screensaver_day_labels[SCREENSAVER_FORECAST_ITEMS];
+static uint8_t display_brightness = 100;
+static uint16_t screen_timeout_seconds = 300;
+static display_power_state_t display_power_state = DISPLAY_OFF;
+static const uint8_t display_brightness_choices[] = {100, 75, 50, 25};
+static const uint16_t screen_timeout_choices[] = {300, 600, 1800, 0};
 
 static void show_launcher(void);
 static void show_files(const char *path);
@@ -400,16 +643,986 @@ static void show_browser(void);
 static void show_ebooks(void);
 static void show_clock(void);
 static void show_gpio(void);
+static void show_i2c(void);
+static bool i2c_capture_stop(void);
 static void show_scope(void);
 static void show_weather(void);
+static void show_govee(void);
+static void show_ring(void);
+static void show_cycling(void);
+static void show_servo(void);
+static void servo_stop(void);
 static void weather_start(const char *location);
+static int weather_round(float value);
 static void clear_content(void);
 static void browser_link_clicked(lv_event_t *event);
 static lv_obj_t *button(lv_obj_t *parent, const char *text, lv_event_cb_t callback);
+static void settings_leave(void);
+static void validate_running_ota(void);
+static void screensaver_close(void);
 
-static void reset_content_scroll(void *object)
+static bool govee_decode(const uint8_t *manufacturer, size_t length, govee_reading_t *reading)
 {
-    lv_obj_scroll_to(object, 0, 0, LV_ANIM_OFF);
+    if (length < 7 || manufacturer[0] != 0x88 || manufacturer[1] != 0xec || manufacturer[2] != 0x00) return false;
+    uint32_t packed = ((uint32_t)manufacturer[3] << 16) |
+                      ((uint32_t)manufacturer[4] << 8) | manufacturer[5];
+    uint32_t magnitude = packed & 0x7fffff;
+    reading->temperature_c = (float)(magnitude / 1000) / 10.0f;
+    if (packed & 0x800000) reading->temperature_c = -reading->temperature_c;
+    reading->temperature_c += GOVEE_TEMP_OFFSET_C;
+    reading->humidity = (float)(magnitude % 1000) / 10.0f + GOVEE_HUMIDITY_OFFSET;
+    reading->battery = manufacturer[6] & 0x7f;
+    return !(manufacturer[6] & 0x80) && reading->temperature_c >= -40.0f &&
+           reading->temperature_c <= 70.0f && reading->humidity >= 0.0f && reading->humidity <= 100.0f;
+}
+
+static void govee_self_test(void)
+{
+    const uint8_t sample[] = {0x88, 0xec, 0x00, 0x03, 0x4d, 0xb2, 0x64, 0x00};
+    govee_reading_t reading;
+    assert(govee_decode(sample, sizeof(sample), &reading));
+    assert(reading.temperature_c > 21.5f && reading.temperature_c < 21.7f);
+    assert(reading.humidity > 49.7f && reading.humidity < 49.9f && reading.battery == 100);
+}
+
+#define RING_WRITE_HANDLE 16
+#define RING_NOTIFY_HANDLE 18
+#define RING_NOTIFY_CCCD_HANDLE 19
+
+static void ring_battery_packet(uint8_t packet[16])
+{
+    memset(packet, 0, 16);
+    packet[0] = 0x03;
+    packet[15] = 0x03;
+}
+
+static void ring_manual_hr_packet(uint8_t packet[16])
+{
+    memset(packet, 0, 16);
+    packet[0] = 0x69;
+    packet[1] = 0x01;
+    packet[15] = 0x6a;
+}
+
+static void ring_auto_hr_packet(uint8_t packet[16])
+{
+    memset(packet, 0, 16);
+    packet[0] = 0x16;
+    packet[1] = 0x02;
+    packet[2] = 0x01;
+    packet[3] = 5;
+    packet[15] = 0x1e;
+}
+
+static void ring_history_packet(uint8_t packet[16], time_t day)
+{
+    memset(packet, 0, 16);
+    packet[0] = 0x15;
+    struct tm utc;
+    gmtime_r(&day, &utc);
+    uint32_t ring_time = (uint32_t)(day + day - mktime(&utc));
+    memcpy(packet + 1, &ring_time, sizeof(ring_time));
+    for (int i = 0; i < 15; i++) packet[15] += packet[i];
+}
+
+static bool ring_packet_valid(const uint8_t *packet, size_t length)
+{
+    if (length != 16) return false;
+    uint8_t checksum = 0;
+    for (size_t i = 0; i < 15; i++) checksum += packet[i];
+    return checksum == packet[15];
+}
+
+static bool ring_decode_battery(const uint8_t *packet, size_t length, int *battery, bool *charging)
+{
+    if (!ring_packet_valid(packet, length) || packet[0] != 0x03 || packet[1] > 100) return false;
+    *battery = packet[1];
+    *charging = packet[2] == 1;
+    return true;
+}
+
+static bool ring_decode_manual_heart_rate(const uint8_t *packet, size_t length, int *error, int *heart_rate)
+{
+    if (!ring_packet_valid(packet, length) || packet[0] != 0x69 || packet[2] > 2 || packet[3] > 250) return false;
+    *error = packet[2];
+    *heart_rate = packet[3];
+    return true;
+}
+
+static bool ring_should_connect(bool enabled, bool is_ring, bool connecting, bool connected)
+{
+    return enabled && is_ring && !connecting && !connected;
+}
+
+static bool ring_connection_active(uint16_t connection)
+{
+    portENTER_CRITICAL(&ring_lock);
+    bool active = ring_enabled && ring_connected && ring_conn_handle == connection;
+    portEXIT_CRITICAL(&ring_lock);
+    return active;
+}
+
+static bool kickr_connection_active(uint16_t connection)
+{
+    portENTER_CRITICAL(&kickr_lock);
+    bool active = kickr_enabled && kickr_connected && kickr_conn_handle == connection;
+    portEXIT_CRITICAL(&kickr_lock);
+    return active;
+}
+
+static bool ble_should_scan(bool govee, bool ring, bool kickr)
+{
+    return govee || ring || kickr;
+}
+
+static bool ble_products_idle(void)
+{
+    portENTER_CRITICAL(&govee_lock);
+    bool govee = govee_enabled;
+    portEXIT_CRITICAL(&govee_lock);
+    portENTER_CRITICAL(&ring_lock);
+    bool ring = ring_enabled || ring_connecting || ring_connected || ring_stopping;
+    portEXIT_CRITICAL(&ring_lock);
+    portENTER_CRITICAL(&kickr_lock);
+    bool kickr = kickr_enabled || kickr_connecting || kickr_connected || kickr_stopping;
+    portEXIT_CRITICAL(&kickr_lock);
+    return !govee && !ring && !kickr;
+}
+
+static bool sd_media_lost(int error)
+{
+    return error == EIO || error == ENODEV || error == ENXIO || error == EBADF;
+}
+
+static bool sd_storage_error(int error)
+{
+    return sd_media_lost(error) || error == ENOSPC || error == EROFS;
+}
+
+static void sd_record_error(int error)
+{
+    if (!sd_storage_error(error)) return;
+    portENTER_CRITICAL(&sd_error_lock);
+    if (sd_last_errno == 0 || (sd_media_lost(error) && !sd_media_lost(sd_last_errno)))
+        sd_last_errno = error;
+    if (sd_media_lost(error)) sd_ready = false;
+    portEXIT_CRITICAL(&sd_error_lock);
+    ESP_LOGE("storage", "SD card error: %s", strerror(error));
+}
+
+static int sd_error_snapshot(void)
+{
+    portENTER_CRITICAL(&sd_error_lock);
+    int error = sd_last_errno;
+    portEXIT_CRITICAL(&sd_error_lock);
+    return error;
+}
+
+static void sd_self_test(void)
+{
+    assert(sd_media_lost(EIO) && sd_media_lost(ENODEV));
+    assert(!sd_media_lost(ENOSPC));
+    assert(sd_storage_error(ENOSPC) && sd_storage_error(EROFS));
+    assert(!sd_storage_error(EEXIST));
+}
+
+static void ring_self_test(void)
+{
+    uint8_t packet[16];
+    ring_battery_packet(packet);
+    assert(packet[0] == 3 && packet[15] == 3);
+    const uint8_t response[16] = {3, 99, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 103};
+    int battery;
+    bool charging;
+    assert(ring_decode_battery(response, sizeof(response), &battery, &charging));
+    assert(battery == 99 && charging);
+    ring_manual_hr_packet(packet);
+    assert(packet[0] == 0x69 && packet[1] == 1 && packet[15] == 0x6a);
+    const uint8_t manual_response[16] = {0x69, 1, 0, 72, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 178};
+    int error;
+    assert(ring_decode_manual_heart_rate(manual_response, sizeof(manual_response), &error, &battery));
+    assert(error == 0 && battery == 72);
+    ring_auto_hr_packet(packet);
+    assert(packet[0] == 0x16 && packet[3] == 5 && ring_packet_valid(packet, sizeof(packet)));
+    assert(!ring_should_connect(false, true, false, false));
+    assert(ring_should_connect(true, true, false, false));
+}
+
+static bool kickr_read_field(const uint8_t *packet, size_t length, size_t *offset,
+                             size_t bytes, uint32_t *value)
+{
+    if (*offset + bytes > length) return false;
+    *value = 0;
+    for (size_t i = 0; i < bytes; i++) *value |= (uint32_t)packet[*offset + i] << (i * 8);
+    *offset += bytes;
+    return true;
+}
+
+static bool kickr_decode(const uint8_t *packet, size_t length, kickr_data_t *data)
+{
+    if (length < 2) return false;
+    uint16_t flags = packet[0] | ((uint16_t)packet[1] << 8);
+    size_t offset = 2;
+    uint32_t value;
+    memset(data, 0, sizeof(*data));
+#define KICKR_FIELD(bit, bytes, body) do { if (flags & (1U << (bit))) { \
+    if (!kickr_read_field(packet, length, &offset, bytes, &value)) { return false; } body; } } while (0)
+    if (!(flags & 1)) {
+        if (!kickr_read_field(packet, length, &offset, 2, &value)) return false;
+        data->speed_kmh = value / 100.0f;
+        data->has_speed = true;
+    }
+    KICKR_FIELD(1, 2, (void)0);
+    KICKR_FIELD(2, 2, data->cadence_rpm = value / 2.0f; data->has_cadence = true);
+    KICKR_FIELD(3, 2, (void)0);
+    KICKR_FIELD(4, 3, (void)0);
+    KICKR_FIELD(5, 2, data->resistance = (int16_t)value; data->has_resistance = true);
+    KICKR_FIELD(6, 2, data->power_w = (int16_t)value; data->has_power = true);
+    KICKR_FIELD(7, 2, (void)0);
+    KICKR_FIELD(8, 5, (void)0);
+    KICKR_FIELD(9, 1, (void)0);
+    KICKR_FIELD(10, 1, (void)0);
+    KICKR_FIELD(11, 2, (void)0);
+    KICKR_FIELD(12, 2, (void)0);
+#undef KICKR_FIELD
+    return offset == length;
+}
+
+static void kickr_self_test(void)
+{
+    const uint8_t packet[] = {0x74, 0x00, 0xb2, 0x0c, 0xb4, 0x00, 0x39, 0x30, 0x00,
+                              0xc8, 0x00, 0xfa, 0x00};
+    kickr_data_t data;
+    assert(kickr_decode(packet, sizeof(packet), &data));
+    assert(data.has_speed && data.speed_kmh == 32.5f);
+    assert(data.has_cadence && data.cadence_rpm == 90.0f);
+    assert(data.has_power && data.power_w == 250 && data.resistance == 200);
+    assert(!ble_should_scan(false, false, false));
+    assert(ble_should_scan(true, false, false));
+    assert(ble_should_scan(false, true, false));
+    assert(ble_should_scan(false, false, true));
+}
+
+static void ble_scan(void);
+static int govee_gap_event(struct ble_gap_event *event, void *argument);
+static int kickr_gap_event(struct ble_gap_event *event, void *argument);
+
+static int ring_write_done(uint16_t conn_handle, const struct ble_gatt_error *error,
+                           struct ble_gatt_attr *attribute, void *argument)
+{
+    (void)conn_handle;
+    (void)attribute;
+    (void)argument;
+    if (error->status) ESP_LOGW("ring", "GATT write failed: %d", error->status);
+    return 0;
+}
+
+static int ring_history_requested(uint16_t conn_handle, const struct ble_gatt_error *error,
+                                  struct ble_gatt_attr *attribute, void *argument)
+{
+    ring_write_done(conn_handle, error, attribute, argument);
+    if (!ring_connection_active(conn_handle)) return 0;
+    if (error->status) {
+        portENTER_CRITICAL(&ring_lock);
+        ring_sync_active = false;
+        ring_sync_pending = ring_enabled;
+        portEXIT_CRITICAL(&ring_lock);
+    }
+    return 0;
+}
+
+static void ring_schedule_history_sync(void)
+{
+    portENTER_CRITICAL(&ring_lock);
+    if (ring_enabled) {
+        ring_sync_days_ago = RING_HR_SYNC_DAYS;
+        ring_sync_active = false;
+        ring_sync_pending = true;
+    }
+    portEXIT_CRITICAL(&ring_lock);
+}
+
+static int ring_battery_requested(uint16_t conn_handle, const struct ble_gatt_error *error,
+                                  struct ble_gatt_attr *attribute, void *argument)
+{
+    ring_write_done(conn_handle, error, attribute, argument);
+    if (!error->status && ring_connection_active(conn_handle)) ring_schedule_history_sync();
+    return 0;
+}
+
+static int ring_auto_hr_set(uint16_t conn_handle, const struct ble_gatt_error *error,
+                            struct ble_gatt_attr *attribute, void *argument)
+{
+    ring_write_done(conn_handle, error, attribute, argument);
+    if (error->status || !ring_connection_active(conn_handle)) return 0;
+    uint8_t packet[16];
+    ring_battery_packet(packet);
+    int rc = ble_gattc_write_flat(conn_handle, RING_WRITE_HANDLE, packet, sizeof(packet),
+                                  ring_battery_requested, NULL);
+    if (rc) ESP_LOGW("ring", "Battery request failed: %d", rc);
+    return 0;
+}
+
+static int ring_send_manual_hr(void)
+{
+    uint16_t connection;
+    portENTER_CRITICAL(&ring_lock);
+    bool enabled = ring_enabled;
+    bool connected = ring_connected;
+    connection = ring_conn_handle;
+    portEXIT_CRITICAL(&ring_lock);
+    if (!enabled || !connected) return -1;
+    uint8_t packet[16];
+    ring_manual_hr_packet(packet);
+    return ble_gattc_write_flat(connection, RING_WRITE_HANDLE, packet, sizeof(packet), ring_write_done, NULL);
+}
+
+static bool ring_hr_append_log(time_t sample_time, int heart_rate)
+{
+    if (!sd_ready) {
+        int error = sd_error_snapshot();
+        errno = error ? error : ENODEV;
+        return false;
+    }
+    mkdir(HEALTH_PATH, 0775);
+    if (storage_repair_csv_tail(HEART_RATE_LOG) != 0) {
+        int error = errno ? errno : EIO;
+        sd_record_error(error);
+        errno = error;
+        return false;
+    }
+    FILE *file = fopen(HEART_RATE_LOG, "ab+");
+    if (!file) {
+        int error = errno ? errno : EIO;
+        sd_record_error(error);
+        errno = error;
+        return false;
+    }
+    bool ok = fseek(file, 0, SEEK_END) == 0;
+    long size = ok ? ftell(file) : -1;
+    if (size < 0) ok = false;
+    if (ok && size == 0) ok = fputs("unix_time,local_time,bpm\n", file) >= 0;
+    struct tm local;
+    char timestamp[24];
+    localtime_r(&sample_time, &local);
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &local);
+    if (ok) ok = fprintf(file, "%lld,%s,%d\n", (long long)sample_time, timestamp, heart_rate) >= 0;
+    int write_error = 0;
+    if (ok && storage_sync_file(file) != 0) {
+        write_error = errno ? errno : EIO;
+        ok = false;
+    }
+    if (fclose(file) != 0) {
+        if (!write_error) write_error = errno ? errno : EIO;
+        ok = false;
+    }
+    if (!ok) {
+        if (!write_error) write_error = errno ? errno : EIO;
+        storage_repair_csv_tail(HEART_RATE_LOG);
+        sd_record_error(write_error);
+        errno = write_error;
+    }
+    return ok;
+}
+
+static void ring_hr_load_last_saved(void)
+{
+    if (ring_hr_last_saved_loaded) return;
+    if (storage_repair_csv_tail(HEART_RATE_LOG) != 0) {
+        sd_record_error(errno ? errno : EIO);
+        return;
+    }
+    ring_hr_last_saved_loaded = true;
+    FILE *file = fopen(HEART_RATE_LOG, "rb");
+    if (!file) return;
+    char tail[513];
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return;
+    }
+    long end = ftell(file);
+    long offset = end > (long)sizeof(tail) - 1 ? end - ((long)sizeof(tail) - 1) : 0;
+    if (end < 0 || fseek(file, offset, SEEK_SET) != 0) {
+        fclose(file);
+        return;
+    }
+    size_t length = fread(tail, 1, sizeof(tail) - 1, file);
+    tail[length] = '\0';
+    fclose(file);
+    char *line = tail;
+    if (offset) {
+        line = strchr(line, '\n');
+        if (!line) return;
+        line++;
+    }
+    long long timestamp;
+    while (*line) {
+        if (sscanf(line, "%lld,", &timestamp) == 1 && timestamp > ring_hr_last_saved)
+            ring_hr_last_saved = (time_t)timestamp;
+        line = strchr(line, '\n');
+        if (!line) break;
+        line++;
+    }
+}
+
+static int ring_request_history(void)
+{
+    uint16_t connection;
+    int days_ago;
+    portENTER_CRITICAL(&ring_lock);
+    if (!ring_enabled || !ring_connected || ring_hr_active || ring_sync_active || !ring_sync_pending) {
+        portEXIT_CRITICAL(&ring_lock);
+        return -1;
+    }
+    connection = ring_conn_handle;
+    days_ago = ring_sync_days_ago;
+    portEXIT_CRITICAL(&ring_lock);
+
+    time_t now = time(NULL);
+    struct tm local;
+    localtime_r(&now, &local);
+    local.tm_hour = local.tm_min = local.tm_sec = 0;
+    local.tm_mday -= days_ago;
+    time_t day = mktime(&local);
+    uint8_t packet[16];
+    ring_history_packet(packet, day);
+    int rc = ble_gattc_write_flat(connection, RING_WRITE_HANDLE, packet, sizeof(packet),
+                                  ring_history_requested, NULL);
+    if (rc) return rc;
+    portENTER_CRITICAL(&ring_lock);
+    ring_sync_day_start = day;
+    ring_sync_packets_total = 0;
+    ring_sync_pending = false;
+    ring_sync_active = true;
+    ring_sync_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(RING_SYNC_TIMEOUT_MS);
+    portEXIT_CRITICAL(&ring_lock);
+    ESP_LOGI("ring", "Syncing heart-rate history from %d day(s) ago", days_ago);
+    return 0;
+}
+
+static bool ring_hr_begin(void)
+{
+    portENTER_CRITICAL(&ring_lock);
+    bool ready = ring_enabled && ring_connected && !ring_hr_active && !ring_sync_active;
+    portEXIT_CRITICAL(&ring_lock);
+    if (!ready || ring_send_manual_hr() != 0) return false;
+    portENTER_CRITICAL(&ring_lock);
+    ring_hr_active = true;
+    ring_hr_error = 0;
+    ring_hr_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(RING_HR_TIMEOUT_MS);
+    portEXIT_CRITICAL(&ring_lock);
+    return true;
+}
+
+static void ring_health_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    TickType_t now = xTaskGetTickCount();
+    portENTER_CRITICAL(&ring_lock);
+    if (ring_hr_active && (int32_t)(now - ring_hr_deadline) >= 0) ring_hr_active = false;
+    if (ring_sync_active && (int32_t)(now - ring_sync_deadline) >= 0) {
+        ring_sync_active = false;
+        ring_sync_pending = true;
+    }
+    portEXIT_CRITICAL(&ring_lock);
+
+    ring_hr_load_last_saved();
+    ring_hr_sample_t sample;
+    while (ring_hr_samples && xQueuePeek(ring_hr_samples, &sample, 0) == pdTRUE) {
+        if (sample.timestamp > ring_hr_last_saved) {
+            if (ring_hr_append_log(sample.timestamp, sample.bpm)) {
+                ring_hr_last_saved = sample.timestamp;
+                ring_storage_error[0] = '\0';
+            } else {
+                snprintf(ring_storage_error, sizeof(ring_storage_error),
+                         "Heart-rate log not saved: %s", strerror(errno));
+                break;
+            }
+        }
+        if (xQueueReceive(ring_hr_samples, &sample, 0) != pdTRUE) break;
+        portENTER_CRITICAL(&ring_lock);
+        ring_heart_rate = sample.bpm;
+        ring_hr_updated_at = sample.timestamp;
+        ring_hr_history[ring_hr_history_head] = sample.bpm;
+        ring_hr_history_head = (ring_hr_history_head + 1) % RING_HR_HISTORY_POINTS;
+        if (ring_hr_history_count < RING_HR_HISTORY_POINTS) ring_hr_history_count++;
+        portEXIT_CRITICAL(&ring_lock);
+    }
+    if (!ring_hr_samples || uxQueueMessagesWaiting(ring_hr_samples) == 0) ring_request_history();
+}
+
+static int ring_subscribed(uint16_t conn_handle, const struct ble_gatt_error *error,
+                           struct ble_gatt_attr *attribute, void *argument)
+{
+    (void)attribute;
+    (void)argument;
+    if (error->status) {
+        ESP_LOGW("ring", "Notification setup failed: %d", error->status);
+        return 0;
+    }
+    if (!ring_connection_active(conn_handle)) return 0;
+    uint8_t packet[16];
+    ring_auto_hr_packet(packet);
+    int rc = ble_gattc_write_flat(conn_handle, RING_WRITE_HANDLE, packet, sizeof(packet), ring_auto_hr_set, NULL);
+    if (rc) ESP_LOGW("ring", "Automatic HR setup failed: %d", rc);
+    return 0;
+}
+
+static void ring_history_finished(void)
+{
+    portENTER_CRITICAL(&ring_lock);
+    ring_sync_active = false;
+    if (!ring_enabled) {
+        ring_sync_pending = false;
+    } else if (ring_sync_days_ago > 0) {
+        ring_sync_days_ago--;
+        ring_sync_pending = true;
+    }
+    portEXIT_CRITICAL(&ring_lock);
+}
+
+static bool ring_handle_history(const uint8_t packet[16])
+{
+    if (!ring_packet_valid(packet, 16) || packet[0] != 0x15) return false;
+    portENTER_CRITICAL(&ring_lock);
+    bool enabled = ring_enabled;
+    if (enabled) ring_sync_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(RING_SYNC_TIMEOUT_MS);
+    portEXIT_CRITICAL(&ring_lock);
+    if (!enabled) return true;
+    int packet_number = packet[1];
+    if (packet_number == 0xff) {
+        ring_history_finished();
+        return true;
+    }
+    if (packet_number == 0) {
+        portENTER_CRITICAL(&ring_lock);
+        ring_sync_packets_total = packet[2];
+        portEXIT_CRITICAL(&ring_lock);
+        if (packet[2] <= 1) ring_history_finished();
+        return true;
+    }
+
+    portENTER_CRITICAL(&ring_lock);
+    int packets_total = ring_sync_packets_total;
+    time_t day_start = ring_sync_day_start;
+    portEXIT_CRITICAL(&ring_lock);
+    int start = packet_number == 1 ? 6 : 2;
+    int previous_minutes = packet_number == 1 ? 0 : 45 + (packet_number - 2) * 65;
+    for (int i = start; i < 15; i++) {
+        if (!packet[i]) continue;
+        struct tm local;
+        localtime_r(&day_start, &local);
+        int minute = previous_minutes + (i - start) * 5;
+        local.tm_hour = minute / 60;
+        local.tm_min = minute % 60;
+        local.tm_sec = 0;
+        ring_hr_sample_t sample = {.timestamp = mktime(&local), .bpm = packet[i]};
+        if (!ring_hr_samples || xQueueSend(ring_hr_samples, &sample, 0) != pdTRUE)
+            ESP_LOGW("ring", "Heart-rate history queue full");
+    }
+    if (packets_total > 0 && packet_number == packets_total - 1) ring_history_finished();
+    return true;
+}
+
+static int kickr_subscribed_cb(uint16_t conn_handle, const struct ble_gatt_error *error,
+                               struct ble_gatt_attr *attribute, void *argument)
+{
+    (void)attribute; (void)argument;
+    portENTER_CRITICAL(&kickr_lock);
+    bool active = kickr_enabled && kickr_connected && kickr_conn_handle == conn_handle;
+    kickr_subscribed = active && error->status == 0;
+    portEXIT_CRITICAL(&kickr_lock);
+    if (!active) return 0;
+    if (error->status) ESP_LOGW("kickr", "Indoor Bike subscription failed: %d", error->status);
+    else ESP_LOGI("kickr", "Receiving Indoor Bike Data");
+    return 0;
+}
+
+static int kickr_descriptor_found(uint16_t conn_handle, const struct ble_gatt_error *error,
+                                  uint16_t chr_val_handle, const struct ble_gatt_dsc *descriptor,
+                                  void *argument)
+{
+    (void)argument;
+    if (!kickr_connection_active(conn_handle)) return 0;
+    if (!error->status && chr_val_handle == kickr_data_handle &&
+        ble_uuid_cmp(&descriptor->uuid.u, BLE_UUID16_DECLARE(0x2902)) == 0)
+        kickr_cccd_handle = descriptor->handle;
+    if (error->status == BLE_HS_EDONE) {
+        if (!kickr_cccd_handle) {
+            ESP_LOGW("kickr", "Indoor Bike CCCD not found");
+            return 0;
+        }
+        const uint8_t notify[] = {1, 0};
+        int rc = ble_gattc_write_flat(conn_handle, kickr_cccd_handle, notify, sizeof(notify),
+                                      kickr_subscribed_cb, NULL);
+        if (rc) ESP_LOGW("kickr", "Indoor Bike subscription failed: %d", rc);
+    }
+    return 0;
+}
+
+static int kickr_characteristic_found(uint16_t conn_handle, const struct ble_gatt_error *error,
+                                      const struct ble_gatt_chr *characteristic, void *argument)
+{
+    (void)argument;
+    if (!kickr_connection_active(conn_handle)) return 0;
+    if (!error->status && characteristic) kickr_data_handle = characteristic->val_handle;
+    if (error->status == BLE_HS_EDONE) {
+        if (!kickr_data_handle) {
+            ESP_LOGW("kickr", "Indoor Bike Data characteristic not found");
+            return 0;
+        }
+        int rc = ble_gattc_disc_all_dscs(conn_handle, kickr_data_handle, kickr_service_end,
+                                         kickr_descriptor_found, NULL);
+        if (rc) ESP_LOGW("kickr", "Descriptor discovery failed: %d", rc);
+    }
+    return 0;
+}
+
+static int kickr_service_found(uint16_t conn_handle, const struct ble_gatt_error *error,
+                               const struct ble_gatt_svc *service, void *argument)
+{
+    (void)argument;
+    if (!kickr_connection_active(conn_handle)) return 0;
+    if (!error->status && service) {
+        kickr_service_start = service->start_handle;
+        kickr_service_end = service->end_handle;
+    }
+    if (error->status == BLE_HS_EDONE) {
+        if (!kickr_service_start) {
+            ESP_LOGW("kickr", "Fitness Machine service not found");
+            return 0;
+        }
+        int rc = ble_gattc_disc_chrs_by_uuid(conn_handle, kickr_service_start, kickr_service_end,
+                                             BLE_UUID16_DECLARE(0x2ad2), kickr_characteristic_found, NULL);
+        if (rc) ESP_LOGW("kickr", "Indoor Bike discovery failed: %d", rc);
+    }
+    return 0;
+}
+
+static int kickr_gap_event(struct ble_gap_event *event, void *argument)
+{
+    (void)argument;
+    if (event->type == BLE_GAP_EVENT_CONNECT) {
+        portENTER_CRITICAL(&kickr_lock);
+        bool enabled = kickr_enabled;
+        kickr_connecting = false;
+        kickr_connected = enabled && event->connect.status == 0;
+        kickr_stopping = !enabled && event->connect.status == 0;
+        kickr_conn_handle = event->connect.conn_handle;
+        kickr_service_start = kickr_service_end = kickr_data_handle = kickr_cccd_handle = 0;
+        portEXIT_CRITICAL(&kickr_lock);
+        if (!event->connect.status && !enabled) {
+            int rc = ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+            if (rc) ESP_LOGW("kickr", "Disconnect request failed: %d", rc);
+        } else if (!event->connect.status) {
+            ESP_LOGI("kickr", "Connected to %s", kickr_name);
+            int rc = ble_gattc_disc_svc_by_uuid(kickr_conn_handle, BLE_UUID16_DECLARE(0x1826),
+                                                kickr_service_found, NULL);
+            if (rc) ESP_LOGW("kickr", "Fitness Machine discovery failed: %d", rc);
+        } else ESP_LOGW("kickr", "Connection failed: %d", event->connect.status);
+        ble_scan();
+        return 0;
+    }
+    if (event->type == BLE_GAP_EVENT_DISCONNECT) {
+        portENTER_CRITICAL(&kickr_lock);
+        kickr_connected = kickr_connecting = kickr_subscribed = false;
+        kickr_stopping = false;
+        portEXIT_CRITICAL(&kickr_lock);
+        ble_scan();
+        return 0;
+    }
+    if (event->type == BLE_GAP_EVENT_NOTIFY_RX && event->notify_rx.attr_handle == kickr_data_handle &&
+        kickr_connection_active(event->notify_rx.conn_handle)) {
+        size_t length = OS_MBUF_PKTLEN(event->notify_rx.om);
+        uint8_t packet[32];
+        kickr_data_t data;
+        if (length <= sizeof(packet) && os_mbuf_copydata(event->notify_rx.om, 0, length, packet) == 0 &&
+            kickr_decode(packet, length, &data)) {
+            portENTER_CRITICAL(&kickr_lock);
+            kickr_data = data;
+            kickr_updated_at = time(NULL);
+            portEXIT_CRITICAL(&kickr_lock);
+        }
+    }
+    return 0;
+}
+
+static int govee_gap_event(struct ble_gap_event *event, void *argument)
+{
+    (void)argument;
+    if (event->type == BLE_GAP_EVENT_CONNECT) {
+        portENTER_CRITICAL(&ring_lock);
+        bool enabled = ring_enabled;
+        ring_connecting = false;
+        ring_connected = enabled && event->connect.status == 0;
+        ring_stopping = !enabled && event->connect.status == 0;
+        ring_conn_handle = event->connect.conn_handle;
+        portEXIT_CRITICAL(&ring_lock);
+        if (event->connect.status == 0 && !enabled) {
+            int rc = ble_gap_terminate(event->connect.conn_handle, BLE_ERR_REM_USER_CONN_TERM);
+            if (rc) ESP_LOGW("ring", "Disconnect request failed: %d", rc);
+        } else if (event->connect.status == 0) {
+            const uint8_t notify[] = {1, 0};
+            ESP_LOGI("ring", "Connected to %s", ring_name);
+            int rc = ble_gattc_write_flat(ring_conn_handle, RING_NOTIFY_CCCD_HANDLE,
+                                          notify, sizeof(notify), ring_subscribed, NULL);
+            if (rc) ESP_LOGW("ring", "Notification setup failed: %d", rc);
+        } else {
+            ESP_LOGW("ring", "Connection failed: %d", event->connect.status);
+        }
+        ble_scan();
+        return 0;
+    }
+    if (event->type == BLE_GAP_EVENT_DISCONNECT) {
+        portENTER_CRITICAL(&ring_lock);
+        ring_connected = false;
+        ring_connecting = false;
+        ring_stopping = false;
+        ring_hr_active = false;
+        ring_sync_active = false;
+        ring_sync_pending = false;
+        portEXIT_CRITICAL(&ring_lock);
+        ble_scan();
+        return 0;
+    }
+    if (event->type == BLE_GAP_EVENT_NOTIFY_RX && event->notify_rx.attr_handle == RING_NOTIFY_HANDLE) {
+        if (!ring_connection_active(event->notify_rx.conn_handle)) return 0;
+        uint8_t packet[16];
+        int battery, heart_rate, manual_error;
+        bool charging;
+        if (OS_MBUF_PKTLEN(event->notify_rx.om) != sizeof(packet) ||
+            os_mbuf_copydata(event->notify_rx.om, 0, sizeof(packet), packet) != 0) return 0;
+        if (ring_handle_history(packet)) {
+            return 0;
+        } else if (ring_decode_battery(packet, sizeof(packet), &battery, &charging)) {
+            portENTER_CRITICAL(&ring_lock);
+            ring_battery = battery;
+            ring_charging = charging;
+            ring_updated_at = time(NULL);
+            portEXIT_CRITICAL(&ring_lock);
+            ESP_LOGI("ring", "Battery %d%%, charging=%d", battery, charging);
+        } else if (ring_decode_manual_heart_rate(packet, sizeof(packet), &manual_error, &heart_rate)) {
+            portENTER_CRITICAL(&ring_lock);
+            ring_hr_error = manual_error ? manual_error : heart_rate > 0 ? 0 : 2;
+            ring_hr_active = false;
+            portEXIT_CRITICAL(&ring_lock);
+            if (!manual_error && heart_rate > 0) {
+                ring_hr_sample_t sample = {.timestamp = time(NULL), .bpm = heart_rate};
+                if (ring_hr_samples) xQueueSend(ring_hr_samples, &sample, 0);
+            }
+            if (manual_error) ESP_LOGW("ring", "Heart-rate measurement error %d", manual_error);
+            else if (heart_rate > 0) ESP_LOGI("ring", "Heart rate %d bpm", heart_rate);
+        }
+        return 0;
+    }
+    if (event->type != BLE_GAP_EVENT_DISC) return 0;
+    struct ble_hs_adv_fields fields;
+    if (ble_hs_adv_parse_fields(&fields, event->disc.data, event->disc.length_data) != 0) return 0;
+    ble_tool_observe_advertisement(&event->disc.addr, event->disc.rssi,
+                                   fields.name, fields.name_len);
+    bool is_kickr = fields.name && fields.name_len >= 5 && !memcmp(fields.name, "KICKR", 5);
+    for (uint8_t i = 0; !is_kickr && i < fields.num_uuids16; i++) is_kickr = fields.uuids16[i].value == 0x1826;
+    portENTER_CRITICAL(&kickr_lock);
+    bool connect_kickr = kickr_enabled && is_kickr && !kickr_connecting && !kickr_connected;
+    if (connect_kickr) {
+        kickr_found = true;
+        kickr_connecting = true;
+        if (fields.name && fields.name_len) snprintf(kickr_name, sizeof(kickr_name), "%.*s", fields.name_len, fields.name);
+        snprintf(kickr_address, sizeof(kickr_address), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 event->disc.addr.val[5], event->disc.addr.val[4], event->disc.addr.val[3],
+                 event->disc.addr.val[2], event->disc.addr.val[1], event->disc.addr.val[0]);
+    }
+    portEXIT_CRITICAL(&kickr_lock);
+    if (connect_kickr) {
+        uint8_t address_type;
+        ble_gap_disc_cancel();
+        if (ble_hs_id_infer_auto(0, &address_type) != 0 ||
+            ble_gap_connect(address_type, &event->disc.addr, 30000, NULL, kickr_gap_event, NULL) != 0) {
+            portENTER_CRITICAL(&kickr_lock);
+            kickr_connecting = false;
+            portEXIT_CRITICAL(&kickr_lock);
+            ble_scan();
+        }
+        return 0;
+    }
+    bool is_ring = fields.name && fields.name_len >= 10 && !memcmp(fields.name, "COLMI R12_", 10);
+    for (uint8_t i = 0; !is_ring && i < fields.num_uuids16; i++) is_ring = fields.uuids16[i].value == 0xfee7;
+    if (!is_ring && fields.svc_data_uuid16_len >= 2)
+        is_ring = fields.svc_data_uuid16[0] == 0xe7 && fields.svc_data_uuid16[1] == 0xfe;
+    portENTER_CRITICAL(&ring_lock);
+    bool connect_ring = ring_should_connect(ring_enabled, is_ring, ring_connecting, ring_connected);
+    if (connect_ring) {
+        ring_found = true;
+        ring_connecting = true;
+        ring_rssi = event->disc.rssi;
+        if (fields.name && fields.name_len) snprintf(ring_name, sizeof(ring_name), "%.*s", fields.name_len, fields.name);
+        snprintf(ring_address, sizeof(ring_address), "%02X:%02X:%02X:%02X:%02X:%02X",
+                 event->disc.addr.val[5], event->disc.addr.val[4], event->disc.addr.val[3],
+                 event->disc.addr.val[2], event->disc.addr.val[1], event->disc.addr.val[0]);
+    }
+    portEXIT_CRITICAL(&ring_lock);
+    if (connect_ring) {
+        uint8_t address_type;
+        ble_gap_disc_cancel();
+        if (ble_hs_id_infer_auto(0, &address_type) != 0 ||
+            ble_gap_connect(address_type, &event->disc.addr, 30000, NULL, govee_gap_event, NULL) != 0) {
+            portENTER_CRITICAL(&ring_lock);
+            ring_connecting = false;
+            portEXIT_CRITICAL(&ring_lock);
+            ble_scan();
+        }
+        return 0;
+    }
+    portENTER_CRITICAL(&govee_lock);
+    bool monitor_govee = govee_enabled;
+    portEXIT_CRITICAL(&govee_lock);
+    if (!monitor_govee || !fields.mfg_data) return 0;
+    govee_reading_t reading;
+    if (!govee_decode(fields.mfg_data, fields.mfg_data_len, &reading)) return 0;
+    char name[sizeof(govee_name)] = "Govee H5075";
+    if (fields.name && fields.name_len) snprintf(name, sizeof(name), "%.*s", fields.name_len, fields.name);
+    portENTER_CRITICAL(&govee_lock);
+    bool first = !govee_ready;
+    govee_reading = reading;
+    snprintf(govee_name, sizeof(govee_name), "%s", name);
+    snprintf(govee_address, sizeof(govee_address), "%02X:%02X:%02X:%02X:%02X:%02X",
+             event->disc.addr.val[5], event->disc.addr.val[4], event->disc.addr.val[3],
+             event->disc.addr.val[2], event->disc.addr.val[1], event->disc.addr.val[0]);
+    govee_rssi = event->disc.rssi;
+    govee_updated_at = time(NULL);
+    govee_ready = true;
+    portEXIT_CRITICAL(&govee_lock);
+    if (first) ESP_LOGI("govee", "Found H5075: %.1f C, %.1f%% RH, battery %u%%",
+                        reading.temperature_c, reading.humidity, reading.battery);
+    return 0;
+}
+
+static void ble_scan(void)
+{
+    portENTER_CRITICAL(&govee_lock);
+    bool govee = govee_enabled;
+    portEXIT_CRITICAL(&govee_lock);
+    portENTER_CRITICAL(&ring_lock);
+    bool ring = ring_enabled;
+    portEXIT_CRITICAL(&ring_lock);
+    portENTER_CRITICAL(&kickr_lock);
+    bool kickr = kickr_enabled;
+    portEXIT_CRITICAL(&kickr_lock);
+    bool generic = ble_tool_scan_requested();
+    if (!ble_should_scan(govee, ring, kickr) && !generic) {
+        if (ble_gap_disc_active()) ble_gap_disc_cancel();
+        portENTER_CRITICAL(&govee_lock);
+        govee_scanning = false;
+        portEXIT_CRITICAL(&govee_lock);
+        return;
+    }
+    if (ble_gap_disc_active()) return;
+    uint8_t address_type;
+    struct ble_gap_disc_params scan = {.passive = 0, .filter_duplicates = 0};
+    if (ble_hs_util_ensure_addr(0) == 0 && ble_hs_id_infer_auto(0, &address_type) == 0 &&
+        ble_gap_disc(address_type, BLE_HS_FOREVER, &scan, govee_gap_event, NULL) == 0) {
+        portENTER_CRITICAL(&govee_lock);
+        govee_scanning = true;
+        portEXIT_CRITICAL(&govee_lock);
+        ESP_LOGI("ble", "Scanning for enabled Bluetooth tools");
+    }
+}
+
+static void govee_sync(void)
+{
+    ble_scan();
+}
+
+static void govee_host_task(void *argument)
+{
+    (void)argument;
+    nimble_port_run();
+    nimble_port_freertos_deinit();
+}
+
+static void govee_start(void)
+{
+    esp_err_t error = nimble_port_init();
+    if (error != ESP_OK) {
+        ESP_LOGE("govee", "BLE init failed: %s", esp_err_to_name(error));
+        return;
+    }
+    ble_hs_cfg.sync_cb = govee_sync;
+    nimble_port_freertos_init(govee_host_task);
+}
+
+static uint32_t servo_duty(uint16_t pulse_us)
+{
+    return (uint32_t)pulse_us * ((1U << 14) - 1) / 20000;
+}
+
+static void servo_self_test(void)
+{
+    assert(SERVO_LEDC_TIMER != LEDC_TIMER_0);
+    assert(SERVO_LEDC_CHANNEL != LEDC_CHANNEL_0 && SERVO_LEDC_CHANNEL != LEDC_CHANNEL_1);
+    assert(servo_duty(1000) == 819);
+    assert(servo_duty(1500) == 1228);
+    assert(servo_duty(2000) == 1638);
+}
+
+static esp_err_t servo_start_pwm(void)
+{
+    const ledc_timer_config_t timer = {
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .duty_resolution = LEDC_TIMER_14_BIT,
+        .timer_num = SERVO_LEDC_TIMER,
+        .freq_hz = 50,
+        .clk_cfg = LEDC_AUTO_CLK,
+    };
+    const ledc_channel_config_t channel = {
+        .gpio_num = SERVO_PIN,
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .channel = SERVO_LEDC_CHANNEL,
+        .intr_type = LEDC_INTR_DISABLE,
+        .timer_sel = SERVO_LEDC_TIMER,
+        .duty = servo_duty(servo_pulse_us),
+        .hpoint = 0,
+    };
+    gpio_config_t led = {
+        .pin_bit_mask = 1ULL << TOY_LED_PIN,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    esp_err_t error = gpio_config(&led);
+    if (error == ESP_OK) error = gpio_set_level(TOY_LED_PIN, 0);
+    if (error == ESP_OK) error = ledc_timer_config(&timer);
+    if (error == ESP_OK) error = ledc_channel_config(&channel);
+    servo_pwm_ready = error == ESP_OK;
+    if (error != ESP_OK) servo_stop();
+    return error;
+}
+
+static void servo_set_pulse(uint16_t pulse_us)
+{
+    servo_pulse_us = pulse_us;
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, SERVO_LEDC_CHANNEL, servo_duty(pulse_us));
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, SERVO_LEDC_CHANNEL);
+}
+
+static void servo_stop(void)
+{
+    servo_running = false;
+    gpio_set_level(TOY_LED_PIN, 0);
+    if (servo_pwm_ready) {
+        ledc_stop(LEDC_LOW_SPEED_MODE, SERVO_LEDC_CHANNEL, 0);
+        servo_pwm_ready = false;
+    }
+    const gpio_config_t released = {
+        .pin_bit_mask = (1ULL << SERVO_PIN) | (1ULL << TOY_LED_PIN),
+        .mode = GPIO_MODE_DISABLE,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK_WITHOUT_ABORT(gpio_config(&released));
+    if (servo_status) lv_label_set_text(servo_status, "Stopped - outputs off");
 }
 
 static esp_err_t gpio_apply(gpio_control_t *control)
@@ -463,12 +1676,129 @@ static bool scope_window_start(const uint16_t *samples, size_t count, uint8_t mo
     return mode == 0 || found;
 }
 
+static bool scope_measure(const uint16_t *samples, size_t count, uint16_t level,
+                          uint32_t sample_rate_hz, scope_measurement_t *measurement)
+{
+    size_t first = 0, last = 0, rising_edges = 0;
+    for (size_t i = 1; i < count; i++) {
+        if (samples[i - 1] < level && samples[i] >= level) {
+            if (!rising_edges) first = i;
+            last = i;
+            rising_edges++;
+        }
+    }
+    if (rising_edges < 2 || last == first) return false;
+
+    size_t high_samples = 0;
+    for (size_t i = first; i < last; i++) high_samples += samples[i] >= level;
+    size_t span = last - first;
+    measurement->frequency_hz = (uint32_t)(((uint64_t)(rising_edges - 1) * sample_rate_hz + span / 2) / span);
+    measurement->duty_permille = (uint16_t)((high_samples * 1000U + span / 2) / span);
+    return true;
+}
+
+static bool scope_offset_valid(int16_t offset_mv)
+{
+    for (size_t i = 0; i < sizeof(scope_offset_choices_mv) / sizeof(scope_offset_choices_mv[0]); i++)
+        if (scope_offset_choices_mv[i] == offset_mv) return true;
+    return false;
+}
+
+static bool scope_gain_valid(uint16_t gain_permille)
+{
+    for (size_t i = 0; i < sizeof(scope_gain_choices_permille) / sizeof(scope_gain_choices_permille[0]); i++)
+        if (scope_gain_choices_permille[i] == gain_permille) return true;
+    return false;
+}
+
+static int16_t scope_next_offset(int16_t offset_mv)
+{
+    for (size_t i = 0; i < sizeof(scope_offset_choices_mv) / sizeof(scope_offset_choices_mv[0]); i++)
+        if (scope_offset_choices_mv[i] == offset_mv)
+            return scope_offset_choices_mv[(i + 1) % (sizeof(scope_offset_choices_mv) / sizeof(scope_offset_choices_mv[0]))];
+    return 0;
+}
+
+static uint16_t scope_next_gain(uint16_t gain_permille)
+{
+    for (size_t i = 0; i < sizeof(scope_gain_choices_permille) / sizeof(scope_gain_choices_permille[0]); i++)
+        if (scope_gain_choices_permille[i] == gain_permille)
+            return scope_gain_choices_permille[(i + 1) % (sizeof(scope_gain_choices_permille) / sizeof(scope_gain_choices_permille[0]))];
+    return 1000;
+}
+
+static uint16_t scope_apply_calibration(int millivolts, uint16_t gain_permille, int16_t offset_mv)
+{
+    int calibrated = (millivolts * gain_permille + 500) / 1000 + offset_mv;
+    return calibrated < 0 ? 0 : calibrated > 3300 ? 3300 : (uint16_t)calibrated;
+}
+
+static void scope_calibration_defaults(void)
+{
+    memset(scope_offsets_mv, 0, sizeof(scope_offsets_mv));
+    for (size_t i = 0; i < SCOPE_CHANNEL_COUNT; i++) scope_gains_permille[i] = 1000;
+}
+
+static void load_scope_calibration(void)
+{
+    scope_calibration_defaults();
+    if (nvs_init_error != ESP_OK) return;
+
+    nvs_handle_t handle;
+    if (nvs_open("tab5", NVS_READONLY, &handle) != ESP_OK) return;
+    int16_t offsets[SCOPE_CHANNEL_COUNT];
+    uint16_t gains[SCOPE_CHANNEL_COUNT];
+    size_t offset_size = sizeof(offsets), gain_size = sizeof(gains);
+    bool valid = nvs_get_blob(handle, "scope_offset", offsets, &offset_size) == ESP_OK &&
+                 offset_size == sizeof(offsets) &&
+                 nvs_get_blob(handle, "scope_gain", gains, &gain_size) == ESP_OK &&
+                 gain_size == sizeof(gains);
+    for (size_t i = 0; valid && i < SCOPE_CHANNEL_COUNT; i++)
+        valid = scope_offset_valid(offsets[i]) && scope_gain_valid(gains[i]);
+    if (valid) {
+        memcpy(scope_offsets_mv, offsets, sizeof(offsets));
+        memcpy(scope_gains_permille, gains, sizeof(gains));
+    }
+    nvs_close(handle);
+}
+
+static esp_err_t save_scope_calibration(void)
+{
+    if (nvs_init_error != ESP_OK) return nvs_init_error;
+    int16_t offsets[SCOPE_CHANNEL_COUNT];
+    uint16_t gains[SCOPE_CHANNEL_COUNT];
+    portENTER_CRITICAL(&scope_lock);
+    memcpy(offsets, scope_offsets_mv, sizeof(offsets));
+    memcpy(gains, scope_gains_permille, sizeof(gains));
+    portEXIT_CRITICAL(&scope_lock);
+
+    nvs_handle_t handle;
+    esp_err_t error = nvs_open("tab5", NVS_READWRITE, &handle);
+    if (error == ESP_OK) {
+        error = nvs_set_blob(handle, "scope_offset", offsets, sizeof(offsets));
+        if (error == ESP_OK) error = nvs_set_blob(handle, "scope_gain", gains, sizeof(gains));
+        if (error == ESP_OK) error = nvs_commit(handle);
+        nvs_close(handle);
+    }
+    return error;
+}
+
 static void scope_self_test(void)
 {
     uint16_t samples[600] = {0};
     for (size_t i = 200; i < 600; i++) samples[i] = 2000;
     size_t start = 0;
     assert(scope_window_start(samples, 600, 1, 1000, &start) && start == 125);
+    uint16_t square[100];
+    for (size_t i = 0; i < sizeof(square) / sizeof(square[0]); i++) square[i] = i % 10 < 3 ? 2000 : 0;
+    scope_measurement_t measurement;
+    assert(scope_measure(square, sizeof(square) / sizeof(square[0]), 1000, 1000, &measurement));
+    assert(measurement.frequency_hz == 100 && measurement.duty_permille == 300);
+    assert(!scope_measure(samples, 100, 1000, 1000, &measurement));
+    assert(scope_apply_calibration(1000, 1050, -50) == 1000);
+    assert(scope_apply_calibration(50, 900, -200) == 0);
+    assert(scope_apply_calibration(3200, 1100, 200) == 3300);
+    assert(scope_next_offset(200) == -200 && scope_next_gain(1100) == 900);
 }
 
 static adc_cali_handle_t scope_calibration(adc_unit_t unit, adc_channel_t channel)
@@ -489,7 +1819,11 @@ static void scope_task(void *argument)
     uint8_t bytes[512];
     uint16_t millivolts[512 / SOC_ADC_DIGI_RESULT_BYTES];
     for (;;) {
-        if (!scope_active || !scope_running) {
+        portENTER_CRITICAL(&scope_lock);
+        bool should_sample = scope_active && scope_running;
+        if (should_sample) scope_sampling = true;
+        portEXIT_CRITICAL(&scope_lock);
+        if (!should_sample) {
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
@@ -514,6 +1848,9 @@ static void scope_task(void *argument)
         if (error != ESP_OK) {
             scope_error = true;
             if (adc) adc_continuous_deinit(adc);
+            portENTER_CRITICAL(&scope_lock);
+            scope_sampling = false;
+            portEXIT_CRITICAL(&scope_lock);
             vTaskDelay(pdMS_TO_TICKS(250));
             continue;
         }
@@ -531,13 +1868,19 @@ static void scope_task(void *argument)
                 scope_error = true;
                 break;
             }
+            int16_t offset_mv;
+            uint16_t gain_permille;
+            portENTER_CRITICAL(&scope_lock);
+            offset_mv = scope_offsets_mv[channel_index];
+            gain_permille = scope_gains_permille[channel_index];
+            portEXIT_CRITICAL(&scope_lock);
             size_t count = 0;
             for (size_t i = 0; i < bytes_read; i += SOC_ADC_DIGI_RESULT_BYTES) {
                 adc_digi_output_data_t *sample = (adc_digi_output_data_t *)&bytes[i];
                 if (sample->type2.unit != input->unit || sample->type2.channel != input->channel) continue;
                 int mv = sample->type2.data * 3300 / 4095;
                 if (calibration) adc_cali_raw_to_voltage(calibration, sample->type2.data, &mv);
-                millivolts[count++] = mv < 0 ? 0 : mv > 3300 ? 3300 : mv;
+                millivolts[count++] = scope_apply_calibration(mv, gain_permille, offset_mv);
             }
             portENTER_CRITICAL(&scope_lock);
             for (size_t i = 0; i < count; i++) {
@@ -552,12 +1895,37 @@ static void scope_task(void *argument)
 #if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
         if (calibration) adc_cali_delete_scheme_curve_fitting(calibration);
 #endif
+        portENTER_CRITICAL(&scope_lock);
+        scope_sampling = false;
+        portEXIT_CRITICAL(&scope_lock);
+    }
+}
+
+static void scope_release(void)
+{
+    portENTER_CRITICAL(&scope_lock);
+    scope_active = false;
+    portEXIT_CRITICAL(&scope_lock);
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(250);
+    bool warned = false;
+    while (scope_sampling) {
+        if (!warned && (int32_t)(xTaskGetTickCount() - deadline) >= 0) {
+            ESP_LOGW("scope", "Waiting for ADC teardown before app switch");
+            warned = true;
+        }
+        vTaskDelay(1);
     }
 }
 
 static void scope_update_controls(void)
 {
     const scope_channel_t *input = &scope_channels[scope_channel_index];
+    int16_t offset_mv;
+    uint16_t gain_permille;
+    portENTER_CRITICAL(&scope_lock);
+    offset_mv = scope_offsets_mv[scope_channel_index];
+    gain_permille = scope_gains_permille[scope_channel_index];
+    portEXIT_CRITICAL(&scope_lock);
     lv_label_set_text_fmt(scope_channel_label, "G%d", input->pin);
     lv_label_set_text(scope_run_label, scope_running ? "HOLD" : "RUN");
     uint32_t us_per_div = 30000000 / scope_sample_rates[scope_rate_index];
@@ -571,6 +1939,10 @@ static void scope_update_controls(void)
     lv_label_set_text_fmt(scope_scale_label, "%u mV/div", scope_ranges_mv[scope_range_index] / 10);
     lv_label_set_text(scope_trigger_label, scope_trigger_mode == 0 ? "AUTO" : scope_trigger_mode == 1 ? "RISE" : "FALL");
     lv_label_set_text_fmt(scope_level_label, "Trigger %u mV", scope_trigger_mv);
+    if (scope_offset_label) lv_label_set_text_fmt(scope_offset_label, "Offset\n%d mV", (int)offset_mv);
+    if (scope_gain_label)
+        lv_label_set_text_fmt(scope_gain_label, "Scale\n%u.%u%%",
+                              (unsigned)(gain_permille / 10), (unsigned)(gain_permille % 10));
 }
 
 static void scope_tick(lv_timer_t *timer)
@@ -598,28 +1970,27 @@ static void scope_tick(lv_timer_t *timer)
         if (mv < minimum) minimum = mv;
         if (mv > maximum) maximum = mv;
     }
-    size_t first_crossing = 0, last_crossing = 0, crossings = 0;
-    for (size_t i = 1; i < count; i++) {
-        bool crossing = scope_trigger_mode == 2 ? scope_snapshot[i - 1] > scope_trigger_mv && scope_snapshot[i] <= scope_trigger_mv
-                                                : scope_snapshot[i - 1] < scope_trigger_mv && scope_snapshot[i] >= scope_trigger_mv;
-        if (crossing) {
-            if (!crossings) first_crossing = i;
-            last_crossing = i;
-            crossings++;
-        }
-    }
-    uint32_t hz = crossings > 1 ? (crossings - 1) * scope_sample_rates[scope_rate_index] /
-                                  (last_crossing - first_crossing) : 0;
+    scope_measurement_t measurement;
+    bool measured = scope_measure(scope_snapshot, count, scope_trigger_mv,
+                                  scope_sample_rates[scope_rate_index], &measurement);
     uint16_t now = scope_chart_points[SCOPE_CHART_POINTS - 1];
     uint16_t average = sum / SCOPE_CHART_POINTS;
     uint16_t peak_to_peak = maximum - minimum;
+    char timing[64];
+    if (measured)
+        snprintf(timing, sizeof(timing), "Freq %lu Hz   Duty %u.%u%%",
+                 (unsigned long)measurement.frequency_hz,
+                 measurement.duty_permille / 10, measurement.duty_permille % 10);
+    else
+        snprintf(timing, sizeof(timing), "Freq --   Duty --");
     lv_label_set_text_fmt(scope_stats,
                           "Now %u.%03u V   Min %u.%03u   Max %u.%03u   Vpp %u.%03u\n"
-                          "Avg %u.%03u V   Freq %lu Hz   %lu kS/s",
+                          "Avg %u.%03u V   %s   %lu kS/s",
                           now / 1000, now % 1000, minimum / 1000, minimum % 1000,
                           maximum / 1000, maximum % 1000, peak_to_peak / 1000, peak_to_peak % 1000,
-                          average / 1000, average % 1000, (unsigned long)hz,
+                          average / 1000, average % 1000, timing,
                           (unsigned long)(scope_sample_rates[scope_rate_index] / 1000));
+    scope_chart_ready = true;
     lv_chart_refresh(scope_chart);
 }
 
@@ -627,6 +1998,7 @@ static void scope_channel_clicked(lv_event_t *event)
 {
     (void)event;
     scope_channel_index = (scope_channel_index + 1) % SCOPE_CHANNEL_COUNT;
+    scope_chart_ready = false;
     scope_update_controls();
 }
 
@@ -641,6 +2013,7 @@ static void scope_rate_clicked(lv_event_t *event)
 {
     (void)event;
     scope_rate_index = (scope_rate_index + 1) % (sizeof(scope_sample_rates) / sizeof(scope_sample_rates[0]));
+    scope_chart_ready = false;
     scope_update_controls();
 }
 
@@ -665,6 +2038,160 @@ static void scope_level_clicked(lv_event_t *event)
     int level = scope_trigger_mv + (int)(intptr_t)lv_event_get_user_data(event);
     scope_trigger_mv = level < 0 ? 0 : level > scope_ranges_mv[scope_range_index] ? scope_ranges_mv[scope_range_index] : level;
     scope_update_controls();
+}
+
+static void scope_calibration_saved(void)
+{
+    portENTER_CRITICAL(&scope_lock);
+    scope_ring_head = scope_ring_count = 0;
+    portEXIT_CRITICAL(&scope_lock);
+    scope_chart_ready = false;
+    esp_err_t error = save_scope_calibration();
+    const scope_channel_t *input = &scope_channels[scope_channel_index];
+    if (error == ESP_OK)
+        snprintf(scope_capture_notice, sizeof(scope_capture_notice), "G%d calibration saved", input->pin);
+    else
+        snprintf(scope_capture_notice, sizeof(scope_capture_notice), "Calibration is temporary: %s",
+                 esp_err_to_name(error));
+    if (scope_capture_status) lv_label_set_text(scope_capture_status, scope_capture_notice);
+    scope_update_controls();
+}
+
+static void scope_offset_clicked(lv_event_t *event)
+{
+    (void)event;
+    portENTER_CRITICAL(&scope_lock);
+    scope_offsets_mv[scope_channel_index] = scope_next_offset(scope_offsets_mv[scope_channel_index]);
+    portEXIT_CRITICAL(&scope_lock);
+    scope_calibration_saved();
+}
+
+static void scope_gain_clicked(lv_event_t *event)
+{
+    (void)event;
+    portENTER_CRITICAL(&scope_lock);
+    scope_gains_permille[scope_channel_index] = scope_next_gain(scope_gains_permille[scope_channel_index]);
+    portEXIT_CRITICAL(&scope_lock);
+    scope_calibration_saved();
+}
+
+static void scope_calibration_reset_clicked(lv_event_t *event)
+{
+    (void)event;
+    portENTER_CRITICAL(&scope_lock);
+    scope_offsets_mv[scope_channel_index] = 0;
+    scope_gains_permille[scope_channel_index] = 1000;
+    portEXIT_CRITICAL(&scope_lock);
+    scope_calibration_saved();
+}
+
+static void scope_capture_clicked(lv_event_t *event)
+{
+    (void)event;
+    if (!scope_chart_ready) {
+        lv_label_set_text(scope_capture_status, "Wait for a complete chart before saving");
+        return;
+    }
+    if (!sd_ready) {
+        int error = sd_error_snapshot();
+        lv_label_set_text_fmt(scope_capture_status, "SD unavailable: %s", strerror(error ? error : ENODEV));
+        return;
+    }
+    if (mkdir(SCOPE_PATH, 0775) != 0 && errno != EEXIST) {
+        int error = errno ? errno : EIO;
+        sd_record_error(error);
+        lv_label_set_text_fmt(scope_capture_status, "Could not create Scope folder: %s", strerror(error));
+        return;
+    }
+
+    time_t captured_at = time(NULL);
+    struct tm local;
+    char date[7], clock[7], directory[64], temporary_path[96] = "", final_path[96] = "";
+    localtime_r(&captured_at, &local);
+    strftime(date, sizeof(date), "%y%m%d", &local);
+    strftime(clock, sizeof(clock), "%H%M%S", &local);
+    snprintf(directory, sizeof(directory), SCOPE_PATH "/%s", date);
+    if (mkdir(directory, 0775) != 0 && errno != EEXIST) {
+        int error = errno ? errno : EIO;
+        sd_record_error(error);
+        lv_label_set_text_fmt(scope_capture_status, "Could not create capture folder: %s", strerror(error));
+        return;
+    }
+
+    FILE *file = NULL;
+    int create_error = EEXIST;
+    for (unsigned suffix = 0; suffix < 100 && !file; suffix++) {
+        char stem[9];
+        snprintf(stem, sizeof(stem), "%s%02u", clock, suffix);
+        snprintf(temporary_path, sizeof(temporary_path), "%s/%s.TMP", directory, stem);
+        snprintf(final_path, sizeof(final_path), "%s/%s.CSV", directory, stem);
+        struct stat info;
+        if (stat(final_path, &info) == 0) continue;
+        if (errno != ENOENT) {
+            create_error = errno ? errno : EIO;
+            break;
+        }
+        int descriptor = open(temporary_path, O_WRONLY | O_CREAT | O_EXCL, 0664);
+        if (descriptor < 0) {
+            if (errno == EEXIST) continue;
+            create_error = errno ? errno : EIO;
+            break;
+        }
+        file = fdopen(descriptor, "wb");
+        if (!file) {
+            create_error = errno ? errno : EIO;
+            close(descriptor);
+            remove(temporary_path);
+        }
+    }
+    if (!file) {
+        sd_record_error(create_error);
+        lv_label_set_text_fmt(scope_capture_status, "Could not create capture: %s", strerror(create_error));
+        return;
+    }
+
+    uint8_t channel_index = scope_channel_index;
+    uint8_t rate_index = scope_rate_index;
+    int16_t offset_mv;
+    uint16_t gain_permille;
+    portENTER_CRITICAL(&scope_lock);
+    offset_mv = scope_offsets_mv[channel_index];
+    gain_permille = scope_gains_permille[channel_index];
+    portEXIT_CRITICAL(&scope_lock);
+    uint32_t rate = scope_sample_rates[rate_index];
+    bool write_ok = fputs("unix_time,elapsed_us,gpio,millivolts,sample_rate_hz,offset_mv,scale_permille\n", file) >= 0;
+    for (size_t i = 0; write_ok && i < SCOPE_CHART_POINTS; i++) {
+        uint32_t elapsed_us = (uint32_t)((uint64_t)i * 1000000U / rate);
+        write_ok = fprintf(file, "%lld,%lu,%d,%ld,%lu,%d,%u\n",
+                           (long long)captured_at, (unsigned long)elapsed_us,
+                           (int)scope_channels[channel_index].pin, (long)scope_chart_points[i],
+                           (unsigned long)rate, (int)offset_mv, (unsigned)gain_permille) >= 0;
+    }
+
+    bool saved = write_ok && storage_commit_new_file(&file, temporary_path, final_path) == 0;
+    if (!saved && file) {
+        errno = errno ? errno : EIO;
+        storage_commit_new_file(&file, temporary_path, final_path);
+    }
+    if (saved) {
+        const char *name = strrchr(final_path, '/');
+        snprintf(scope_capture_notice, sizeof(scope_capture_notice), "Saved %s",
+                 name ? name + 1 : "Scope CSV");
+    } else {
+        int error = errno ? errno : EIO;
+        sd_record_error(error);
+        struct stat info;
+        bool retained = stat(temporary_path, &info) == 0;
+        const char *name = strrchr(temporary_path, '/');
+        if (retained)
+            snprintf(scope_capture_notice, sizeof(scope_capture_notice),
+                     "Capture not published; %s retained (%s)",
+                     name ? name + 1 : "TMP", strerror(error));
+        else
+            snprintf(scope_capture_notice, sizeof(scope_capture_notice),
+                     "Capture failed: %s", strerror(error));
+    }
+    lv_label_set_text(scope_capture_status, scope_capture_notice);
 }
 
 static uint8_t bcd(int value)
@@ -758,6 +2285,98 @@ static void alarm_self_test(void)
     assert(alarm_wrap(60, 60) == 0);
 }
 
+static bool display_brightness_valid(uint8_t value)
+{
+    for (size_t i = 0; i < sizeof(display_brightness_choices) / sizeof(display_brightness_choices[0]); i++)
+        if (display_brightness_choices[i] == value) return true;
+    return false;
+}
+
+static bool display_timeout_valid(uint16_t value)
+{
+    for (size_t i = 0; i < sizeof(screen_timeout_choices) / sizeof(screen_timeout_choices[0]); i++)
+        if (screen_timeout_choices[i] == value) return true;
+    return false;
+}
+
+static uint8_t display_next_brightness(uint8_t value)
+{
+    for (size_t i = 0; i < sizeof(display_brightness_choices) / sizeof(display_brightness_choices[0]); i++)
+        if (display_brightness_choices[i] == value)
+            return display_brightness_choices[(i + 1) % (sizeof(display_brightness_choices) /
+                                                         sizeof(display_brightness_choices[0]))];
+    return display_brightness_choices[0];
+}
+
+static uint16_t display_next_timeout(uint16_t value)
+{
+    for (size_t i = 0; i < sizeof(screen_timeout_choices) / sizeof(screen_timeout_choices[0]); i++)
+        if (screen_timeout_choices[i] == value)
+            return screen_timeout_choices[(i + 1) % (sizeof(screen_timeout_choices) /
+                                                      sizeof(screen_timeout_choices[0]))];
+    return screen_timeout_choices[0];
+}
+
+static bool display_timeout_elapsed(uint32_t inactive_ms, uint16_t timeout_seconds, bool inhibited)
+{
+    return !inhibited && timeout_seconds != 0 && inactive_ms >= (uint32_t)timeout_seconds * 1000U;
+}
+
+static bool display_set_power_state(display_power_state_t state)
+{
+    int brightness = state == DISPLAY_AWAKE ? display_brightness :
+                     state == DISPLAY_DIMMED ? (display_brightness < 20 ? display_brightness : 20) : 0;
+    esp_err_t error = bsp_display_brightness_set(brightness);
+    if (error == ESP_OK) {
+        display_power_state = state;
+        return true;
+    }
+    ESP_LOGE("display", "Could not set backlight to %d%%: %s", brightness, esp_err_to_name(error));
+    return false;
+}
+
+static void load_display_settings(void)
+{
+    if (nvs_init_error != ESP_OK) return;
+    nvs_handle_t handle;
+    if (nvs_open("tab5", NVS_READONLY, &handle) != ESP_OK) return;
+    uint8_t brightness;
+    uint16_t timeout;
+    if (nvs_get_u8(handle, "brightness", &brightness) == ESP_OK && display_brightness_valid(brightness))
+        display_brightness = brightness;
+    if (nvs_get_u16(handle, "screen_timeout", &timeout) == ESP_OK && display_timeout_valid(timeout))
+        screen_timeout_seconds = timeout;
+    nvs_close(handle);
+}
+
+static void save_display_settings(void)
+{
+    if (nvs_init_error != ESP_OK) return;
+    nvs_handle_t handle;
+    esp_err_t error = nvs_open("tab5", NVS_READWRITE, &handle);
+    if (error == ESP_OK) {
+        error = nvs_set_u8(handle, "brightness", display_brightness);
+        if (error == ESP_OK) error = nvs_set_u16(handle, "screen_timeout", screen_timeout_seconds);
+        if (error == ESP_OK) error = nvs_commit(handle);
+        nvs_close(handle);
+    }
+    if (error != ESP_OK) ESP_LOGW("display", "Could not save display settings: %s", esp_err_to_name(error));
+}
+
+static void display_self_test(void)
+{
+    assert(display_brightness_valid(100) && display_brightness_valid(25));
+    assert(!display_brightness_valid(0) && !display_brightness_valid(74));
+    assert(display_timeout_valid(0) && display_timeout_valid(300));
+    assert(!display_timeout_valid(301));
+    assert(display_next_brightness(25) == 100);
+    assert(display_next_timeout(0) == 300);
+    assert(!display_timeout_elapsed(299999, 300, false));
+    assert(display_timeout_elapsed(300000, 300, false));
+    assert(!display_timeout_elapsed(UINT32_MAX, 0, false));
+    assert(!display_timeout_elapsed(UINT32_MAX, 300, true));
+}
+
 static void load_alarms(void)
 {
     for (size_t i = 0; i < ALARM_COUNT; i++) {
@@ -832,6 +2451,8 @@ static void alarm_sound_task(void *argument)
 static void alarm_trigger(uint8_t index)
 {
     if (alarm_active) return;
+    lv_display_trigger_activity(NULL);
+    screensaver_close();
     alarm_active = true;
     alarm_active_index = index;
 
@@ -869,6 +2490,7 @@ static void alarm_trigger(uint8_t index)
 
 static void alarm_check(time_t now, const struct tm *local)
 {
+    if (ota_busy) return;
     if (!alarm_active && alarm_snooze_until && now >= alarm_snooze_until) {
         alarm_snooze_until = 0;
         alarm_trigger(alarm_snooze_index);
@@ -1011,12 +2633,12 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 
 static bool start_wifi(void)
 {
-    esp_err_t error = nvs_flash_init();
-    if (error == ESP_ERR_NVS_NO_FREE_PAGES || error == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        error = nvs_flash_init();
+    nvs_init_error = nvs_flash_init();
+    if (nvs_init_error != ESP_OK) {
+        ESP_LOGE("tab5-os", "NVS unavailable; settings preserved: %s", esp_err_to_name(nvs_init_error));
+        return false;
     }
-    if (error != ESP_OK || esp_netif_init() != ESP_OK ||
+    if (esp_netif_init() != ESP_OK ||
         esp_event_loop_create_default() != ESP_OK || !esp_netif_create_default_wifi_sta()) return false;
 
     wifi_init_config_t init = WIFI_INIT_CONFIG_DEFAULT();
@@ -1031,7 +2653,7 @@ static bool start_wifi(void)
         snprintf(wifi_ssid, sizeof(wifi_ssid), "%s", (char *)saved.sta.ssid);
         wifi_should_connect = wifi_ssid[0] != '\0';
     }
-    error = esp_wifi_start();
+    esp_err_t error = esp_wifi_start();
     if (error != ESP_OK) ESP_LOGE("tab5-os", "Wi-Fi start failed: %s", esp_err_to_name(error));
     return error == ESP_OK;
 }
@@ -1111,13 +2733,13 @@ static void remote_desktop_task(void *argument)
 {
     (void)argument;
     const size_t pixel_bytes = SCREEN_WIDTH * SCREEN_HEIGHT * 2;
-    uint8_t *pixels = heap_caps_malloc(pixel_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    uint8_t *encoded = heap_caps_malloc(pixel_bytes * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    uint8_t *pixels = NULL;
+    uint8_t *encoded = NULL;
     uint8_t *framebuffer = NULL;
     esp_err_t frame_error = esp_lcd_dpi_panel_get_frame_buffer(
         bsp_display_get_panel_handle(), 1, (void **)&framebuffer);
-    if (!pixels || !encoded || frame_error != ESP_OK) {
-        ESP_LOGE("tab5-os", "Remote desktop buffer allocation failed");
+    if (frame_error != ESP_OK) {
+        ESP_LOGE("tab5-os", "Remote desktop framebuffer unavailable");
         vTaskDelete(NULL);
     }
 
@@ -1136,6 +2758,17 @@ static void remote_desktop_task(void *argument)
         used = 0;
 
         if (packet[2] == 1) {
+            if (!pixels) {
+                pixels = heap_caps_malloc(pixel_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                encoded = heap_caps_malloc(pixel_bytes * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                if (!pixels || !encoded) {
+                    heap_caps_free(pixels);
+                    heap_caps_free(encoded);
+                    pixels = encoded = NULL;
+                    ESP_LOGE("tab5-os", "Remote desktop buffer allocation failed");
+                    continue;
+                }
+            }
             send_remote_frame(framebuffer, pixels, encoded);
             vTaskDelay(pdMS_TO_TICKS(20));
         } else if (packet[2] == 2) {
@@ -1162,17 +2795,43 @@ static void start_remote_desktop(lv_display_t *display)
     xTaskCreate(remote_desktop_task, "remote-desktop", 6144, NULL, 4, NULL);
 }
 
+static bool bytes_are_erased(const uint8_t *data, size_t length)
+{
+    for (size_t i = 0; i < length; i++) if (data[i] != 0xff) return false;
+    return true;
+}
+
+static bool storage_partition_is_erased(void)
+{
+    const esp_partition_t *partition = esp_partition_find_first(ESP_PARTITION_TYPE_DATA,
+                                                                 ESP_PARTITION_SUBTYPE_ANY, "storage");
+    if (!partition) return false;
+    uint8_t data[256];
+    for (size_t offset = 0; offset < partition->size; offset += sizeof(data)) {
+        size_t length = partition->size - offset < sizeof(data) ? partition->size - offset : sizeof(data);
+        if (esp_partition_read(partition, offset, data, length) != ESP_OK || !bytes_are_erased(data, length))
+            return false;
+    }
+    return true;
+}
+
 static bool mount_internal(void)
 {
-    const esp_vfs_spiffs_conf_t config = {
+    esp_vfs_spiffs_conf_t config = {
         .base_path = INTERNAL_PATH,
         .partition_label = "storage",
         .max_files = 5,
         .format_if_mount_failed = false,
     };
-    esp_err_t error = esp_vfs_spiffs_register(&config);
-    if (error != ESP_OK) ESP_LOGW("tab5-os", "Internal storage unavailable: %s", esp_err_to_name(error));
-    return error == ESP_OK;
+    storage_init_error = esp_vfs_spiffs_register(&config);
+    if (storage_init_error != ESP_OK && storage_partition_is_erased()) {
+        ESP_LOGI("tab5-os", "Initializing blank internal storage");
+        config.format_if_mount_failed = true;
+        storage_init_error = esp_vfs_spiffs_register(&config);
+    }
+    if (storage_init_error != ESP_OK)
+        ESP_LOGW("tab5-os", "Internal storage unavailable: %s", esp_err_to_name(storage_init_error));
+    return storage_init_error == ESP_OK;
 }
 
 static lv_obj_t *button(lv_obj_t *parent, const char *text, lv_event_cb_t callback)
@@ -1188,7 +2847,8 @@ static lv_obj_t *button(lv_obj_t *parent, const char *text, lv_event_cb_t callba
 }
 
 static void app_icon(lv_obj_t *parent, const char *symbol, const char *name,
-                     uint32_t color, lv_event_cb_t callback, int column, int row)
+                     uint32_t color, lv_event_cb_t callback, void *user_data,
+                     int column, int row)
 {
     lv_obj_t *cell = lv_obj_create(parent);
     lv_obj_remove_style_all(cell);
@@ -1201,7 +2861,7 @@ static void app_icon(lv_obj_t *parent, const char *symbol, const char *name,
     lv_obj_set_size(tile, 150, 150);
     lv_obj_set_style_radius(tile, 28, 0);
     lv_obj_set_style_bg_color(tile, lv_color_hex(color), 0);
-    lv_obj_add_event_cb(tile, callback, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(tile, callback, LV_EVENT_CLICKED, user_data);
     lv_obj_t *icon = lv_label_create(tile);
     lv_label_set_text(icon, symbol);
     lv_obj_set_style_text_font(icon, &lv_font_montserrat_48, 0);
@@ -1937,6 +3597,15 @@ static bool browser_resolve_url(const char *base, const char *link, char *output
     }
     const char *scheme_end = strstr(base, "://");
     if (!scheme_end) return false;
+    if (link[0] == '?') {
+        const char *end = strpbrk(base, "?#");
+        size_t prefix = (end ? end : base + strlen(base)) - base;
+        size_t length = strlen(link);
+        if (prefix + length >= capacity) return false;
+        memcpy(output, base, prefix);
+        memcpy(output + prefix, link, length + 1);
+        return true;
+    }
     if (link[0] == '/' && link[1] == '/') {
         size_t prefix = scheme_end - base;
         size_t length = strlen(link);
@@ -1946,7 +3615,7 @@ static bool browser_resolve_url(const char *base, const char *link, char *output
         memcpy(output + prefix + 1, link, length + 1);
         return true;
     }
-    const char *host_end = strchr(scheme_end + 3, '/');
+    const char *host_end = strpbrk(scheme_end + 3, "/?#");
     if (!host_end) host_end = base + strlen(base);
     if (link[0] == '/') {
         size_t prefix = host_end - base;
@@ -1956,15 +3625,42 @@ static bool browser_resolve_url(const char *base, const char *link, char *output
         memcpy(output + prefix, link, length + 1);
         return true;
     }
-    const char *path_end = strrchr(base, '/');
-    if (!path_end || path_end < host_end) path_end = host_end;
-    size_t prefix = path_end - base;
+    const char *base_end = strpbrk(host_end, "?#");
+    if (!base_end) base_end = base + strlen(base);
+    const char *path_end = host_end;
+    for (const char *p = host_end; p < base_end; p++) if (*p == '/') path_end = p;
+    size_t root = host_end - base + 1;
+    size_t used = path_end - base + 1;
+    if (used >= capacity) return false;
+    if (host_end == base_end) {
+        memcpy(output, base, used - 1);
+        output[used - 1] = '/';
+    } else {
+        memcpy(output, base, used);
+    }
+    while (browser_prefix(link, "./")) link += 2;
+    while (browser_prefix(link, "../")) {
+        link += 3;
+        if (used > root) {
+            used--;
+            while (used > root && output[used - 1] != '/') used--;
+        }
+    }
     size_t length = strlen(link);
-    if (prefix + 1 + length >= capacity) return false;
-    memcpy(output, base, prefix);
-    output[prefix] = '/';
-    memcpy(output + prefix + 1, link, length + 1);
+    if (used + length >= capacity) return false;
+    memcpy(output + used, link, length + 1);
     return true;
+}
+
+static void browser_self_test(void)
+{
+    char url[128];
+    assert(browser_resolve_url("https://example.com/a/page.html", "?p=2", url, sizeof(url)) &&
+           strcmp(url, "https://example.com/a/page.html?p=2") == 0);
+    assert(browser_resolve_url("https://example.com/a/page.html", "../next", url, sizeof(url)) &&
+           strcmp(url, "https://example.com/next") == 0);
+    assert(browser_resolve_url("https://example.com/a/page.html", "./next", url, sizeof(url)) &&
+           strcmp(url, "https://example.com/a/next") == 0);
 }
 
 static void browser_extract_links(const char *html, const char *base)
@@ -2202,10 +3898,13 @@ static void browser_tick(lv_timer_t *timer)
 
 static void clear_content(void)
 {
-    if (wifi_timer) {
-        lv_timer_delete(wifi_timer);
-        wifi_timer = NULL;
-    }
+    void (*leave)(void) = active_app_leave;
+    active_app_leave = NULL;
+    if (leave) leave();
+    signal_tool_stop();
+    spi_tool_stop();
+    uart_tool_stop();
+    ender3_tool_stop();
     if (chat_timer) {
         lv_timer_delete(chat_timer);
         chat_timer = NULL;
@@ -2231,6 +3930,14 @@ static void clear_content(void)
             gpio_controls[i].level_label = NULL;
         }
     }
+    if (i2c_timer) {
+        lv_timer_delete(i2c_timer);
+        i2c_timer = NULL;
+    }
+    i2c_capture_stop();
+    i2c_watch_enabled = false;
+    i2c_write_armed = false;
+    i2c_write_armed_at_ms = 0;
     if (scope_timer) {
         lv_timer_delete(scope_timer);
         scope_timer = NULL;
@@ -2239,7 +3946,19 @@ static void clear_content(void)
         lv_timer_delete(weather_timer);
         weather_timer = NULL;
     }
-    scope_active = false;
+    if (govee_timer) {
+        lv_timer_delete(govee_timer);
+        govee_timer = NULL;
+    }
+    if (ring_timer) {
+        lv_timer_delete(ring_timer);
+        ring_timer = NULL;
+    }
+    if (servo_timer) {
+        lv_timer_delete(servo_timer);
+        servo_timer = NULL;
+    }
+    servo_stop();
     wifi_status = NULL;
     wifi_list = NULL;
     chat_output = NULL;
@@ -2264,9 +3983,23 @@ static void clear_content(void)
     ebook_next = NULL;
     ota_status = NULL;
     ota_button = NULL;
+    i2c_status = NULL;
+    i2c_devices = NULL;
+    i2c_address_label = NULL;
+    i2c_register_label = NULL;
+    i2c_read_result = NULL;
+    i2c_speed_label = NULL;
+    i2c_watch_label = NULL;
+    i2c_value_label = NULL;
+    i2c_write_label = NULL;
+    i2c_capture_label = NULL;
+    i2c_capture_status = NULL;
     battery_metrics = NULL;
     battery_chart = NULL;
     battery_series = NULL;
+    storage_status = NULL;
+    storage_format_label = NULL;
+    storage_format_armed = false;
     clock_time = NULL;
     clock_date = NULL;
     clock_status = NULL;
@@ -2283,14 +4016,45 @@ static void clear_content(void)
     scope_scale_label = NULL;
     scope_trigger_label = NULL;
     scope_level_label = NULL;
+    scope_offset_label = NULL;
+    scope_gain_label = NULL;
+    scope_capture_status = NULL;
     weather_status = NULL;
     weather_location_area = NULL;
     weather_body = NULL;
     weather_keyboard = NULL;
     weather_keys_label = NULL;
+    govee_status = NULL;
+    govee_toggle_label = NULL;
+    govee_temperature = NULL;
+    govee_humidity = NULL;
+    govee_details = NULL;
+    ring_status = NULL;
+    ring_toggle_label = NULL;
+    ring_battery_label = NULL;
+    ring_hr_label = NULL;
+    ring_hr_status = NULL;
+    ring_hr_button_label = NULL;
+    ring_hr_chart = NULL;
+    ring_hr_series = NULL;
+    ring_details = NULL;
+    ride_status = NULL;
+    ride_toggle_label = NULL;
+    ride_power_label = NULL;
+    ride_cadence_label = NULL;
+    ride_hr_label = NULL;
+    ride_stats = NULL;
+    ride_button_label = NULL;
+    ride_history = NULL;
+    ride_chart = NULL;
+    ride_power_series = NULL;
+    ride_hr_series = NULL;
+    servo_status = NULL;
+    servo_position = NULL;
+    servo_range_label = NULL;
+    servo_speed_label = NULL;
     lv_obj_clean(content);
-    lv_obj_scroll_to(content, 0, 0, LV_ANIM_OFF);
-    lv_async_call(reset_content_scroll, content);
+    lv_obj_scroll_to_y(content, 0, LV_ANIM_OFF);
     lv_obj_add_flag(content, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -2299,6 +4063,7 @@ static void clear_content(void)
 static void home_clicked(lv_event_t *event)
 {
     (void)event;
+    if (ota_busy) return;
     show_launcher();
 }
 
@@ -2321,6 +4086,8 @@ static void open_file(const char *path)
     lv_obj_set_size(viewer, 640, 900);
     lv_textarea_set_text(viewer, text);
     lv_textarea_set_one_line(viewer, false);
+    lv_textarea_set_cursor_pos(viewer, 0);
+    lv_obj_scroll_to_y(viewer, 0, LV_ANIM_OFF);
 }
 
 static void file_clicked(lv_event_t *event)
@@ -2429,9 +4196,17 @@ static bool ebook_download_default(const ebook_default_t *book)
     snprintf(path, sizeof(path), SD_PATH "/BOOKS/%s", book->filename);
     snprintf(temporary, sizeof(temporary), "%s", path);
     snprintf(strrchr(temporary, '.'), 5, ".TMP");
+    if (remove(temporary) != 0 && errno != ENOENT) {
+        int remove_error = errno ? errno : EIO;
+        sd_record_error(remove_error);
+        ESP_LOGE("tab5-os", "Could not clear %s: %s", temporary, strerror(remove_error));
+        return false;
+    }
     FILE *file = fopen(temporary, "wb");
     if (!file) {
-        ESP_LOGE("tab5-os", "Could not create %s", temporary);
+        int open_error = errno ? errno : EIO;
+        sd_record_error(open_error);
+        ESP_LOGE("tab5-os", "Could not create %s: %s", temporary, strerror(open_error));
         return false;
     }
     esp_http_client_config_t config = {
@@ -2453,8 +4228,18 @@ static bool ebook_download_default(const ebook_default_t *book)
     esp_err_t error = esp_http_client_perform(client);
     int status = esp_http_client_get_status_code(client);
     esp_http_client_cleanup(client);
-    bool saved = fclose(file) == 0 && error == ESP_OK && status >= 200 && status < 300 && rename(temporary, path) == 0;
-    if (!saved) remove(temporary);
+    bool downloaded = error == ESP_OK && status >= 200 && status < 300;
+    bool saved = false;
+    if (downloaded) {
+        saved = storage_commit_new_file(&file, temporary, path) == 0;
+        if (!saved) sd_record_error(errno ? errno : EIO);
+    } else {
+        int stream_error = ferror(file) ? (errno ? errno : EIO) : 0;
+        if (fclose(file) != 0 && !stream_error) stream_error = errno ? errno : EIO;
+        file = NULL;
+        remove(temporary);
+        if (stream_error) sd_record_error(stream_error);
+    }
     ESP_LOGI("tab5-os", "Default ebook %s: %s (%d)", book->filename, saved ? "saved" : "failed", status);
     return saved;
 }
@@ -2624,10 +4409,20 @@ static void show_ebooks(void)
 
     bool created = mkdir(SD_PATH "/BOOKS", 0775) == 0;
     if (created) {
-        FILE *welcome = fopen(SD_PATH "/BOOKS/WELCOME.TXT", "wb");
+        const char *temporary = SD_PATH "/BOOKS/WELCOME.TMP";
+        const char *final = SD_PATH "/BOOKS/WELCOME.TXT";
+        FILE *welcome = fopen(temporary, "wb");
         if (welcome) {
-            fputs("Welcome to Tab5 Books!\n\nCopy .txt ebooks into the BOOKS folder on the SD card. Use Next and Prev to move through the book, and Text to change the reading size.\n", welcome);
-            fclose(welcome);
+            if (fputs("Welcome to Tab5 Books!\n\nCopy .txt ebooks into the BOOKS folder on the SD card. Use Next and Prev to move through the book, and Text to change the reading size.\n", welcome) < 0) {
+                int error = errno ? errno : EIO;
+                fclose(welcome);
+                remove(temporary);
+                sd_record_error(error);
+            } else if (storage_commit_new_file(&welcome, temporary, final) != 0) {
+                sd_record_error(errno ? errno : EIO);
+            }
+        } else {
+            sd_record_error(errno ? errno : EIO);
         }
     }
     DIR *dir = opendir(SD_PATH "/BOOKS");
@@ -2670,14 +4465,38 @@ static void ebooks_clicked(lv_event_t *event)
 static void save_note(lv_event_t *event)
 {
     lv_obj_t *status = lv_event_get_user_data(event);
-    FILE *file = fopen(SD_PATH "/DOCS/NOTE.TXT", "wb");
+    mkdir(SD_PATH "/DOCS", 0775);
+    const char *temporary_path = SD_PATH "/DOCS/NOTE.TMP";
+    const char *final_path = SD_PATH "/DOCS/NOTE.TXT";
+    const char *backup_path = SD_PATH "/DOCS/NOTE.BAK";
+    remove(temporary_path);
+    FILE *file = fopen(temporary_path, "wb");
     if (!file) {
-        lv_label_set_text(status, "Save failed");
+        int error = errno ? errno : EIO;
+        sd_record_error(error);
+        lv_label_set_text_fmt(status, "Save failed: %s", strerror(error));
         return;
     }
-    fputs(lv_textarea_get_text(note_area), file);
-    fclose(file);
-    lv_label_set_text(status, "Saved to /sdcard/DOCS/NOTE.TXT");
+    if (fputs(lv_textarea_get_text(note_area), file) < 0) {
+        int write_error = errno ? errno : EIO;
+        fclose(file);
+        file = NULL;
+        remove(temporary_path);
+        sd_record_error(write_error);
+        lv_label_set_text_fmt(status, "Save failed: %s", strerror(write_error));
+        return;
+    }
+    if (storage_commit_replace_file(&file, temporary_path, final_path, backup_path) != 0) {
+        int save_error = errno;
+        sd_record_error(save_error);
+        struct stat info;
+        if (stat(temporary_path, &info) == 0)
+            lv_label_set_text(status, "Save not published; NOTE.TMP was retained");
+        else
+            lv_label_set_text_fmt(status, "Save failed: %s", strerror(save_error));
+        return;
+    }
+    lv_label_set_text(status, "Saved safely to /sdcard/DOCS/NOTE.TXT");
 }
 
 static void notes_clicked(lv_event_t *event)
@@ -2700,6 +4519,7 @@ static void notes_clicked(lv_event_t *event)
     if (!sd_ready) lv_obj_add_state(save, LV_STATE_DISABLED);
 
     static char note[2048];
+    storage_recover_replace(SD_PATH "/DOCS/NOTE.TXT", SD_PATH "/DOCS/NOTE.BAK");
     FILE *file = fopen(SD_PATH "/DOCS/NOTE.TXT", "rb");
     size_t read = file ? fread(note, 1, sizeof(note) - 1, file) : 0;
     if (file) fclose(file);
@@ -2816,12 +4636,26 @@ static void wifi_network_clicked(lv_event_t *event)
     lv_obj_t *keyboard = lv_keyboard_create(content);
     lv_obj_set_size(keyboard, 640, 540);
     lv_keyboard_set_textarea(keyboard, wifi_password_area);
+    active_app_leave = settings_leave;
+}
+
+static bool wifi_forget_confirmation_valid(bool armed, uint32_t armed_at, uint32_t now)
+{
+    return armed && (uint32_t)(now - armed_at) <= 5000U;
 }
 
 static void wifi_forget_clicked(lv_event_t *event)
 {
     (void)event;
-    if (!wifi_ready) return;
+    if (!wifi_ready || !wifi_ssid[0]) return;
+    uint32_t now = lv_tick_get();
+    if (!wifi_forget_confirmation_valid(wifi_forget_armed, wifi_forget_armed_at, now)) {
+        wifi_forget_armed = true;
+        wifi_forget_armed_at = now;
+        lv_label_set_text(wifi_status, "Tap Forget again within 5 seconds to erase the saved network");
+        return;
+    }
+    wifi_forget_armed = false;
     wifi_config_t empty = {0};
     wifi_should_connect = false;
     wifi_connecting = false;
@@ -2835,11 +4669,16 @@ static void wifi_forget_clicked(lv_event_t *event)
 static void wifi_tick(lv_timer_t *timer)
 {
     (void)timer;
-    if (!wifi_ready) lv_label_set_text(wifi_status, "Wi-Fi hardware unavailable");
+    if (wifi_forget_confirmation_valid(wifi_forget_armed, wifi_forget_armed_at, lv_tick_get())) {
+        lv_label_set_text(wifi_status, "Tap Forget again within 5 seconds to erase the saved network");
+    } else if (!wifi_ready) lv_label_set_text(wifi_status, "Wi-Fi hardware unavailable");
     else if (wifi_connected) lv_label_set_text_fmt(wifi_status, "Connected: %s\nIP: %s", wifi_ssid, wifi_ip);
     else if (wifi_connecting) lv_label_set_text_fmt(wifi_status, "Connecting to %s...", wifi_ssid);
     else if (wifi_ssid[0]) lv_label_set_text_fmt(wifi_status, "Not connected: %s", wifi_ssid);
     else lv_label_set_text(wifi_status, "Not connected");
+    if (wifi_forget_armed &&
+        !wifi_forget_confirmation_valid(true, wifi_forget_armed_at, lv_tick_get()))
+        wifi_forget_armed = false;
 
     if (!wifi_scan_done) return;
     wifi_scan_done = false;
@@ -2854,19 +4693,75 @@ static void wifi_tick(lv_timer_t *timer)
     }
     for (uint16_t i = 0; i < wifi_ap_count; i++) {
         char label[96];
-        snprintf(label, sizeof(label), "%s   %d dBm%s", wifi_aps[i].ssid, wifi_aps[i].rssi,
+        snprintf(label, sizeof(label), "%s   ch %u   %d dBm%s", wifi_aps[i].ssid,
+                 (unsigned)wifi_aps[i].primary, wifi_aps[i].rssi,
                  wifi_aps[i].authmode == WIFI_AUTH_OPEN ? "" : "   locked");
         lv_obj_t *network = lv_list_add_button(wifi_list, LV_SYMBOL_WIFI, label);
         lv_obj_add_event_cb(network, wifi_network_clicked, LV_EVENT_CLICKED, &wifi_aps[i]);
     }
 }
 
+static void display_timeout_label_update(lv_obj_t *label)
+{
+    if (screen_timeout_seconds == 0) lv_label_set_text(label, "Screen off\nNever");
+    else lv_label_set_text_fmt(label, "Screen off\n%u min", screen_timeout_seconds / 60);
+}
+
+static void display_brightness_clicked(lv_event_t *event)
+{
+    display_brightness = display_next_brightness(display_brightness);
+    lv_display_trigger_activity(NULL);
+    display_set_power_state(DISPLAY_AWAKE);
+    lv_label_set_text_fmt(lv_obj_get_child(lv_event_get_target(event), 0),
+                          "Brightness\n%u%%", display_brightness);
+    save_display_settings();
+}
+
+static void screen_timeout_clicked(lv_event_t *event)
+{
+    screen_timeout_seconds = display_next_timeout(screen_timeout_seconds);
+    lv_display_trigger_activity(NULL);
+    display_set_power_state(DISPLAY_AWAKE);
+    display_timeout_label_update(lv_obj_get_child(lv_event_get_target(event), 0));
+    save_display_settings();
+}
+
+static void settings_leave(void)
+{
+    wifi_forget_armed = false;
+    if (wifi_timer) {
+        lv_timer_delete(wifi_timer);
+        wifi_timer = NULL;
+    }
+    network_tool_stop();
+}
+
+static void network_tools_clicked(lv_event_t *event)
+{
+    (void)event;
+    clear_content();
+    network_tool_show(content, wifi_connected);
+    active_app_leave = settings_leave;
+}
+
 static void show_settings(void)
 {
     clear_content();
     lv_obj_t *title = lv_label_create(content);
-    lv_label_set_text(title, "Wi-Fi Settings");
+    lv_label_set_text(title, "Settings");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+
+    lv_obj_t *display_row = lv_obj_create(content);
+    lv_obj_set_size(display_row, 640, 100);
+    lv_obj_clear_flag(display_row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(display_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(display_row, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *brightness = button(display_row, "", display_brightness_clicked);
+    lv_obj_set_size(brightness, 290, 82);
+    lv_label_set_text_fmt(lv_obj_get_child(brightness, 0), "Brightness\n%u%%", display_brightness);
+    lv_obj_t *timeout = button(display_row, "", screen_timeout_clicked);
+    lv_obj_set_size(timeout, 290, 82);
+    display_timeout_label_update(lv_obj_get_child(timeout, 0));
 
     wifi_status = lv_label_create(content);
     lv_obj_set_size(wifi_status, 640, 75);
@@ -2877,16 +4772,23 @@ static void show_settings(void)
     lv_obj_set_flex_align(actions, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_t *scan = button(actions, "Scan", wifi_scan_clicked);
     lv_obj_t *forget = button(actions, "Forget", wifi_forget_clicked);
+    lv_obj_t *tools = button(actions, "Tools", network_tools_clicked);
+    lv_obj_set_size(scan, 180, 82);
+    lv_obj_set_size(forget, 180, 82);
+    lv_obj_set_size(tools, 180, 82);
 
     wifi_list = lv_list_create(content);
-    lv_obj_set_size(wifi_list, 640, 800);
+    lv_obj_set_size(wifi_list, 640, 680);
     lv_list_add_text(wifi_list, wifi_ready ? "Tap Scan to find networks" : "Wi-Fi hardware unavailable");
     if (!wifi_ready) {
         lv_obj_add_state(scan, LV_STATE_DISABLED);
         lv_obj_add_state(forget, LV_STATE_DISABLED);
+        lv_obj_add_state(tools, LV_STATE_DISABLED);
     }
+    if (!wifi_ssid[0]) lv_obj_add_state(forget, LV_STATE_DISABLED);
     wifi_timer = lv_timer_create(wifi_tick, 250, NULL);
     wifi_tick(wifi_timer);
+    active_app_leave = settings_leave;
 }
 
 static void settings_clicked(lv_event_t *event)
@@ -3039,27 +4941,141 @@ static void browser_clicked(lv_event_t *event)
     show_browser();
 }
 
+static void ota_record_pending(const char *version)
+{
+    if (nvs_init_error != ESP_OK) return;
+    nvs_handle_t handle;
+    esp_err_t error = nvs_open("tab5", NVS_READWRITE, &handle);
+    if (error == ESP_OK) {
+        error = nvs_set_str(handle, "ota_pending", version);
+        if (error == ESP_OK) error = nvs_commit(handle);
+        nvs_close(handle);
+    }
+    if (error != ESP_OK)
+        ESP_LOGW("tab5-os", "Could not record pending OTA version: %s", esp_err_to_name(error));
+}
+
+static void ota_record_result(const char *result)
+{
+    snprintf(ota_last_result, sizeof(ota_last_result), "%s", result);
+    if (nvs_init_error != ESP_OK) return;
+    nvs_handle_t handle;
+    esp_err_t error = nvs_open("tab5", NVS_READWRITE, &handle);
+    if (error == ESP_OK) {
+        error = nvs_set_str(handle, "ota_result", ota_last_result);
+        if (error == ESP_OK) {
+            esp_err_t erase_error = nvs_erase_key(handle, "ota_pending");
+            if (erase_error != ESP_OK && erase_error != ESP_ERR_NVS_NOT_FOUND) error = erase_error;
+        }
+        if (error == ESP_OK) error = nvs_commit(handle);
+        nvs_close(handle);
+    }
+    if (error != ESP_OK)
+        ESP_LOGW("tab5-os", "Could not record OTA result: %s", esp_err_to_name(error));
+}
+
+static void ota_load_result(void)
+{
+    if (nvs_init_error != ESP_OK) return;
+    nvs_handle_t handle;
+    if (nvs_open("tab5", NVS_READONLY, &handle) != ESP_OK) return;
+    size_t size = sizeof(ota_last_result);
+    nvs_get_str(handle, "ota_result", ota_last_result, &size);
+    char pending[32] = "";
+    size = sizeof(pending);
+    esp_err_t pending_error = nvs_get_str(handle, "ota_pending", pending, &size);
+    nvs_close(handle);
+    if (pending_error != ESP_OK || !pending[0]) return;
+
+    const esp_app_desc_t *running_description = esp_app_get_description();
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    bool running_pending = strcmp(running_description->version, pending) == 0 &&
+                           esp_ota_get_state_partition(running, &state) == ESP_OK &&
+                           (state == ESP_OTA_IMG_NEW || state == ESP_OTA_IMG_PENDING_VERIFY);
+    if (running_pending) {
+        snprintf(ota_last_result, sizeof(ota_last_result), "Installing %s; health check pending", pending);
+        return;
+    }
+
+    char result[64];
+    if (strcmp(running_description->version, pending) == 0) {
+        snprintf(result, sizeof(result), "Installed %s", pending);
+    } else {
+        const esp_partition_t *invalid = esp_ota_get_last_invalid_partition();
+        esp_app_desc_t invalid_description;
+        bool rolled_back = invalid &&
+                           esp_ota_get_partition_description(invalid, &invalid_description) == ESP_OK &&
+                           strcmp(invalid_description.version, pending) == 0;
+        snprintf(result, sizeof(result), rolled_back ? "Rolled back %s" : "Update to %s did not activate", pending);
+    }
+    ota_record_result(result);
+}
+
+static const char *restart_blocker(void)
+{
+    if (ebook_download_busy) return "Wait for book downloads to finish";
+    if (ride_recording || ride_file) return "Stop and save the active ride first";
+    if (i2c_capture_file) return "Stop and save the I2C capture first";
+    if (signal_tool_busy()) return "Stop the PWM output first";
+    if (spi_tool_busy()) return "Stop the SPI interface first";
+    if (uart_tool_busy()) return "Stop and save the serial session first";
+    if (ender3_tool_busy()) return "Stop the Ender 3 connection first";
+    if (voice_recording || voice_mic_open) return "Finish the voice recording first";
+    if (scope_sampling) return "Wait for the scope to release its input";
+    if (servo_running) return "Stop the Servo Toy output first";
+    if (weather_busy) return "Wait for weather settings to finish saving";
+    if (chat_busy || browser_busy || wifi_scan_busy || network_tool_busy() ||
+        http_tool_busy() || mqtt_tool_busy())
+        return "Wait for the active network task to finish";
+    if (ble_tool_busy()) return "Disconnect the BLE GATT Explorer first";
+    if (alarm_active) return "Dismiss the active alarm first";
+    if (ring_hr_samples && uxQueueMessagesWaiting(ring_hr_samples)) return "Wait for ring data to finish saving";
+
+    portENTER_CRITICAL(&govee_lock);
+    bool govee = govee_enabled;
+    portEXIT_CRITICAL(&govee_lock);
+    if (govee) return "Turn Govee Bluetooth off first";
+
+    portENTER_CRITICAL(&ring_lock);
+    bool ring = ring_enabled || ring_connecting || ring_connected || ring_stopping || ring_hr_active ||
+                ring_sync_active || ring_sync_pending;
+    portEXIT_CRITICAL(&ring_lock);
+    if (ring) return "Turn Ring Bluetooth off first";
+
+    portENTER_CRITICAL(&kickr_lock);
+    bool kickr = kickr_enabled || kickr_connecting || kickr_connected || kickr_stopping;
+    portEXIT_CRITICAL(&kickr_lock);
+    if (kickr) return "Turn KICKR Bluetooth off first";
+    return NULL;
+}
+
 static void ota_update_task(void *argument)
 {
     (void)argument;
     for (;;) {
-        esp_http_client_config_t http = {
-            .url = OTA_URL,
-            .crt_bundle_attach = esp_crt_bundle_attach,
-            .timeout_ms = 30000,
-            .buffer_size = 1024,
-            .buffer_size_tx = 1536,
-            .keep_alive_enable = true,
-            .max_redirection_count = 5,
-        };
-        esp_https_ota_config_t config = {.http_config = &http};
-        ESP_LOGI("tab5-os", "OTA update starting");
-        esp_err_t error = esp_https_ota(&config);
+        ota_manifest_t manifest;
+        ota_error[0] = '\0';
+        ESP_LOGI("tab5-os", "OTA manifest check starting");
+        esp_err_t error = ota_manifest_fetch(OTA_MANIFEST_URL, &manifest,
+                                             ota_error, sizeof(ota_error));
+        if (error == ESP_OK)
+            error = ota_manifest_check(&manifest, esp_app_get_description()->version,
+                                       ota_error, sizeof(ota_error));
+        if (error == ESP_OK) {
+            ESP_LOGI("tab5-os", "Installing verified OTA manifest version %s", manifest.version);
+            error = ota_manifest_install(&manifest, ota_error, sizeof(ota_error));
+        }
         ota_ok = error == ESP_OK;
-        if (!ota_ok) snprintf(ota_error, sizeof(ota_error), "Update failed: %s", esp_err_to_name(error));
-        ota_busy = false;
+        if (!ota_ok && !ota_error[0])
+            snprintf(ota_error, sizeof(ota_error), "Update failed: %s", esp_err_to_name(error));
+        if (!ota_ok) ota_busy = false;
         ota_done = true;
         if (ota_ok) {
+            const esp_partition_t *installed = esp_ota_get_boot_partition();
+            esp_app_desc_t installed_description;
+            if (installed && esp_ota_get_partition_description(installed, &installed_description) == ESP_OK)
+                ota_record_pending(installed_description.version);
             ESP_LOGI("tab5-os", "OTA update installed; restarting");
             vTaskDelay(pdMS_TO_TICKS(2000));
             esp_restart();
@@ -3077,14 +5093,17 @@ static void ota_clicked(lv_event_t *event)
         lv_label_set_text(ota_status, "Connect to Wi-Fi first");
         return;
     }
-    if (ebook_download_busy) {
-        lv_label_set_text(ota_status, "Wait for book downloads to finish");
+    const char *blocker = restart_blocker();
+    if (blocker) {
+        lv_label_set_text(ota_status, blocker);
         return;
     }
+    lv_display_trigger_activity(NULL);
+    screensaver_close();
     ota_busy = true;
     ota_done = false;
     ota_ok = false;
-    lv_label_set_text(ota_status, "Downloading update...");
+    lv_label_set_text(ota_status, "Checking stable release manifest...");
     lv_obj_add_state(ota_button, LV_STATE_DISABLED);
     if (ota_task_handle) {
         xTaskNotifyGive(ota_task_handle);
@@ -3101,7 +5120,84 @@ static void ota_tick(lv_timer_t *timer)
     if (!ota_done || !ota_status) return;
     ota_done = false;
     lv_label_set_text(ota_status, ota_ok ? "Installed. Restarting..." : ota_error);
-    if (!ota_ok && ota_button) lv_obj_remove_state(ota_button, LV_STATE_DISABLED);
+    if (!ota_ok) {
+        lv_display_trigger_activity(NULL);
+        screensaver_close();
+        if (ota_button) lv_obj_remove_state(ota_button, LV_STATE_DISABLED);
+    }
+}
+
+static const char *reset_reason_name(esp_reset_reason_t reason)
+{
+    switch (reason) {
+        case ESP_RST_POWERON: return "power on";
+        case ESP_RST_EXT: return "external pin";
+        case ESP_RST_SW: return "software restart";
+        case ESP_RST_PANIC: return "panic";
+        case ESP_RST_INT_WDT: return "interrupt watchdog";
+        case ESP_RST_TASK_WDT: return "task watchdog";
+        case ESP_RST_WDT: return "watchdog";
+        case ESP_RST_DEEPSLEEP: return "deep-sleep wake";
+        case ESP_RST_BROWNOUT: return "brownout";
+        case ESP_RST_SDIO: return "SDIO";
+        case ESP_RST_USB: return "USB";
+        case ESP_RST_JTAG: return "JTAG";
+        case ESP_RST_EFUSE: return "eFuse error";
+        case ESP_RST_PWR_GLITCH: return "power glitch";
+        case ESP_RST_CPU_LOCKUP: return "CPU lockup";
+        default: return "unknown";
+    }
+}
+
+static const char *ota_state_name(esp_ota_img_states_t state)
+{
+    switch (state) {
+        case ESP_OTA_IMG_NEW: return "new";
+        case ESP_OTA_IMG_PENDING_VERIFY: return "health check pending";
+        case ESP_OTA_IMG_VALID: return "validated";
+        case ESP_OTA_IMG_INVALID: return "invalid";
+        case ESP_OTA_IMG_ABORTED: return "rolled back";
+        default: return "not tracked";
+    }
+}
+
+static void system_self_test(void)
+{
+    uint8_t erased[] = {0xff, 0xff, 0xff};
+    assert(strcmp(reset_reason_name(ESP_RST_POWERON), "power on") == 0);
+    assert(strcmp(reset_reason_name(ESP_RST_TASK_WDT), "task watchdog") == 0);
+    assert(strcmp(ota_state_name(ESP_OTA_IMG_PENDING_VERIFY), "health check pending") == 0);
+    assert(bytes_are_erased(erased, sizeof(erased)));
+    erased[1] = 0;
+    assert(!bytes_are_erased(erased, sizeof(erased)));
+    assert(wifi_forget_confirmation_valid(true, 100, 5100));
+    assert(!wifi_forget_confirmation_valid(true, 100, 5101));
+    assert(!wifi_forget_confirmation_valid(false, 100, 100));
+}
+
+static void storage_format_clicked(lv_event_t *event)
+{
+    if (internal_ready || ota_busy) return;
+    if (!storage_format_armed) {
+        storage_format_armed = true;
+        lv_label_set_text(storage_format_label, "Erase and initialize");
+        lv_label_set_text(storage_status, "This erases damaged internal storage. Tap again to confirm.");
+        return;
+    }
+    storage_format_armed = false;
+    lv_label_set_text(storage_status, "Initializing internal storage...");
+    lv_refr_now(NULL);
+    storage_init_error = esp_spiffs_format("storage");
+    internal_ready = storage_init_error == ESP_OK && mount_internal();
+    if (internal_ready) {
+        lv_label_set_text(storage_status, "Internal storage is ready");
+        lv_label_set_text(storage_format_label, "Internal storage ready");
+        lv_obj_add_state(lv_event_get_target(event), LV_STATE_DISABLED);
+        if (ota_health_window_elapsed) validate_running_ota();
+    } else {
+        lv_label_set_text_fmt(storage_status, "Initialization failed: %s", esp_err_to_name(storage_init_error));
+        lv_label_set_text(storage_format_label, "Try initialization again");
+    }
 }
 
 static void system_clicked(lv_event_t *event)
@@ -3113,14 +5209,71 @@ static void system_clicked(lv_event_t *event)
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
     esp_chip_info_t chip;
     esp_chip_info(&chip);
+    const esp_app_desc_t *app = esp_app_get_description();
+    uint64_t uptime = esp_timer_get_time() / 1000000;
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t ota_state = ESP_OTA_IMG_UNDEFINED;
+    const char *ota_state_text = esp_ota_get_state_partition(running, &ota_state) == ESP_OK
+                                 ? ota_state_name(ota_state) : "not tracked";
+    char last_rollback[40] = "none recorded";
+    const esp_partition_t *invalid = esp_ota_get_last_invalid_partition();
+    if (invalid) {
+        esp_app_desc_t description;
+        if (esp_ota_get_partition_description(invalid, &description) == ESP_OK)
+            snprintf(last_rollback, sizeof(last_rollback), "%s", description.version);
+    }
+    char internal_text[64] = "unavailable";
+    size_t internal_total = 0, internal_used = 0;
+    if (internal_ready && esp_spiffs_info("storage", &internal_total, &internal_used) == ESP_OK)
+        snprintf(internal_text, sizeof(internal_text), "mounted, %u KB free",
+                 (unsigned)((internal_total - internal_used) / 1024));
+    char sd_text[64] = "not inserted";
+    uint64_t sd_total = 0, sd_free = 0;
+    int sd_error = sd_error_snapshot();
+    if (sd_media_lost(sd_error)) {
+        snprintf(sd_text, sizeof(sd_text), "removed/unresponsive; reinsert and reboot");
+    } else if (sd_error == ENOSPC) {
+        snprintf(sd_text, sizeof(sd_text), "full; reads remain available");
+    } else if (sd_error == EROFS) {
+        snprintf(sd_text, sizeof(sd_text), "read-only/write-protected");
+    } else if (sd_ready) {
+        if (esp_vfs_fat_info(SD_PATH, &sd_total, &sd_free) == ESP_OK)
+            snprintf(sd_text, sizeof(sd_text), "mounted, %llu MB free",
+                     (unsigned long long)(sd_free / (1024 * 1024)));
+        else
+            snprintf(sd_text, sizeof(sd_text), "mounted but not responding");
+    }
     lv_obj_t *info = lv_label_create(content);
     lv_label_set_text_fmt(info,
-        "Tab5 OS %s\n\nESP32-P4 rev %d.%d\n%d CPU cores\n%lu KB free RAM\n32 MB PSRAM\n720 x 1280 ST7121\n\nInternal: %s\nSD card: %s",
-        esp_app_get_description()->version,
+        "Tab5 OS %s\nBuilt %s %s with %s\n\n"
+        "ESP32-P4 rev %d.%d  |  %d cores\nPanel: %s 720 x 1280\n"
+        "Reset: %s\nUptime: %lu d %02lu:%02lu\n"
+        "Internal heap: %lu KB free / %lu KB minimum\nPSRAM: %lu KB free / %lu KB total\n\n"
+        "Settings: %s\nInternal: %s\nSD card: %s\nWi-Fi: %s\n"
+        "OTA image: %s\nLast OTA: %s\nInvalid OTA image: %s",
+        app->version, app->date, app->time, app->idf_ver,
         chip.revision / 100, chip.revision % 100, chip.cores,
-        (unsigned long)(heap_caps_get_free_size(MALLOC_CAP_8BIT) / 1024),
-        internal_ready ? "mounted" : "unavailable", sd_ready ? "mounted" : "not inserted");
+        bsp_display_get_panel_ic(), reset_reason_name(esp_reset_reason()),
+        (unsigned long)(uptime / 86400), (unsigned long)(uptime / 3600 % 24),
+        (unsigned long)(uptime / 60 % 60),
+        (unsigned long)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024),
+        (unsigned long)(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024),
+        (unsigned long)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
+        (unsigned long)(heap_caps_get_total_size(MALLOC_CAP_SPIRAM) / 1024),
+        nvs_init_error == ESP_OK ? "ready" : esp_err_to_name(nvs_init_error),
+        internal_text, sd_text,
+        wifi_connected ? wifi_ip : wifi_ready ? "disconnected" : "unavailable",
+        ota_state_text, ota_last_result, last_rollback);
     lv_obj_set_style_text_line_space(info, 8, 0);
+    storage_format_armed = false;
+    if (!internal_ready) {
+        storage_status = lv_label_create(content);
+        lv_obj_set_width(storage_status, 620);
+        lv_label_set_text(storage_status, "Internal storage could not be mounted. Initialization erases it.");
+        lv_obj_t *format = button(content, "Initialize internal storage", storage_format_clicked);
+        storage_format_label = lv_obj_get_child(format, 0);
+        lv_obj_set_size(format, 520, 82);
+    }
     battery_metrics = lv_label_create(content);
     lv_label_set_text_fmt(battery_metrics, "%d.%03d V    %+d mA    %d%%",
         battery_millivolts / 1000, battery_millivolts % 1000, battery_milliamps, battery_percent);
@@ -3139,11 +5292,12 @@ static void system_clicked(lv_event_t *event)
         lv_chart_set_next_value(battery_chart, battery_series,
             battery_history[(first + i) % BATTERY_HISTORY_POINTS]);
     }
-    ota_button = button(content, "Install latest", ota_clicked);
+    ota_button = button(content, "Install stable", ota_clicked);
     lv_obj_set_size(ota_button, 320, 82);
     if (ota_busy) lv_obj_add_state(ota_button, LV_STATE_DISABLED);
     ota_status = lv_label_create(content);
-    lv_label_set_text(ota_status, ota_busy ? "Downloading update..." : "Updates use published GitHub release builds");
+    lv_label_set_text(ota_status, ota_busy ? "Checking stable release manifest..." :
+                                            "Manifest version, hardware, size, URL, and SHA-256 are verified before activation");
     lv_obj_set_width(ota_status, 620);
     ota_timer = lv_timer_create(ota_tick, 250, NULL);
 }
@@ -3266,6 +5420,574 @@ static void show_gpio(void)
     gpio_tick(NULL);
 }
 
+static void i2c_address_text(char text[5], uint8_t address)
+{
+    snprintf(text, 5, "0x%02X", address);
+}
+
+static uint8_t i2c_step_value(uint8_t value, int step, uint8_t minimum, uint8_t maximum)
+{
+    int next = value + step;
+    if (next < minimum) return minimum;
+    if (next > maximum) return maximum;
+    return (uint8_t)next;
+}
+
+static uint32_t i2c_next_speed(uint32_t speed_hz)
+{
+    return speed_hz == I2C_STANDARD_SPEED_HZ ? I2C_FAST_SPEED_HZ : I2C_STANDARD_SPEED_HZ;
+}
+
+static bool i2c_write_confirmation_valid(bool armed, uint32_t armed_at_ms, uint32_t now_ms)
+{
+    return armed && (uint32_t)(now_ms - armed_at_ms) < I2C_WRITE_CONFIRM_MS;
+}
+
+static void i2c_self_test(void)
+{
+    char text[5];
+    i2c_address_text(text, 0x3c);
+    assert(strcmp(text, "0x3C") == 0);
+    assert(i2c_step_value(0x08, -1, 0x08, 0x77) == 0x08);
+    assert(i2c_step_value(0x70, 0x10, 0x08, 0x77) == 0x77);
+    assert(i2c_step_value(0x00, -0x10, 0x00, 0xff) == 0x00);
+    assert(i2c_step_value(0xf8, 0x10, 0x00, 0xff) == 0xff);
+    assert(i2c_next_speed(I2C_STANDARD_SPEED_HZ) == I2C_FAST_SPEED_HZ);
+    assert(i2c_next_speed(I2C_FAST_SPEED_HZ) == I2C_STANDARD_SPEED_HZ);
+    assert(i2c_next_speed(0) == I2C_STANDARD_SPEED_HZ);
+    assert(!i2c_write_confirmation_valid(false, 100, 101));
+    assert(i2c_write_confirmation_valid(true, 100, 100 + I2C_WRITE_CONFIRM_MS - 1));
+    assert(!i2c_write_confirmation_valid(true, 100, 100 + I2C_WRITE_CONFIRM_MS));
+    assert(i2c_write_confirmation_valid(true, UINT32_MAX - 1000, 1000));
+}
+
+static void i2c_disarm_write(void)
+{
+    i2c_write_armed = false;
+    i2c_write_armed_at_ms = 0;
+}
+
+static void i2c_update_controls(void)
+{
+    if (i2c_address_label)
+        lv_label_set_text_fmt(i2c_address_label, "Address: 0x%02X", i2c_selected_address);
+    if (i2c_register_label)
+        lv_label_set_text_fmt(i2c_register_label, "Register: 0x%02X", i2c_selected_register);
+    if (i2c_speed_label)
+        lv_label_set_text_fmt(i2c_speed_label, "Register speed: %lu kHz",
+                              (unsigned long)(i2c_bus_speed_hz / 1000));
+    if (i2c_watch_label)
+        lv_label_set_text(i2c_watch_label, i2c_watch_enabled ? "WATCH 1 Hz: ON" : "WATCH 1 Hz: OFF");
+    if (i2c_value_label)
+        lv_label_set_text_fmt(i2c_value_label, "Write value: 0x%02X", i2c_write_value);
+    if (i2c_write_label)
+        lv_label_set_text(i2c_write_label, i2c_write_armed ? "CONFIRM WRITE" : "ARM WRITE BYTE");
+    if (i2c_capture_label)
+        lv_label_set_text(i2c_capture_label, i2c_capture_file ? "STOP & SAVE CSV" : "START CSV CAPTURE");
+}
+
+static bool i2c_capture_stop(void)
+{
+    if (!i2c_capture_file) return true;
+
+    const char *temporary_name = strrchr(i2c_capture_temporary_path, '/');
+    const char *final_name = strrchr(i2c_capture_final_path, '/');
+    bool saved = storage_commit_new_file(&i2c_capture_file, i2c_capture_temporary_path,
+                                         i2c_capture_final_path) == 0;
+    if (saved) {
+        snprintf(i2c_capture_notice, sizeof(i2c_capture_notice), "Saved %s",
+                 final_name ? final_name + 1 : "I2C CSV");
+    } else {
+        int save_error = errno ? errno : EIO;
+        sd_record_error(save_error);
+        snprintf(i2c_capture_notice, sizeof(i2c_capture_notice),
+                 "Capture not published; %s retained (%s)",
+                 temporary_name ? temporary_name + 1 : "TMP", strerror(save_error));
+    }
+    i2c_capture_temporary_path[0] = '\0';
+    i2c_capture_final_path[0] = '\0';
+    i2c_update_controls();
+    if (i2c_capture_status) lv_label_set_text(i2c_capture_status, i2c_capture_notice);
+    return saved;
+}
+
+static bool i2c_capture_start(void)
+{
+    i2c_capture_notice[0] = '\0';
+    if (!sd_ready) {
+        int error = sd_error_snapshot();
+        snprintf(i2c_capture_notice, sizeof(i2c_capture_notice), "SD unavailable: %s",
+                 strerror(error ? error : ENODEV));
+        if (i2c_capture_status) lv_label_set_text(i2c_capture_status, i2c_capture_notice);
+        return false;
+    }
+
+    if (mkdir(SD_PATH "/I2C", 0775) != 0 && errno != EEXIST) {
+        int error = errno ? errno : EIO;
+        sd_record_error(error);
+        snprintf(i2c_capture_notice, sizeof(i2c_capture_notice),
+                 "Could not create I2C folder: %s", strerror(error));
+        if (i2c_capture_status) lv_label_set_text(i2c_capture_status, i2c_capture_notice);
+        return false;
+    }
+
+    time_t now = time(NULL);
+    struct tm local;
+    char date[7], clock[7], directory[64];
+    localtime_r(&now, &local);
+    strftime(date, sizeof(date), "%y%m%d", &local);
+    strftime(clock, sizeof(clock), "%H%M%S", &local);
+    snprintf(directory, sizeof(directory), SD_PATH "/I2C/%s", date);
+    if (mkdir(directory, 0775) != 0 && errno != EEXIST) {
+        int error = errno ? errno : EIO;
+        sd_record_error(error);
+        snprintf(i2c_capture_notice, sizeof(i2c_capture_notice),
+                 "Could not create capture folder: %s", strerror(error));
+        if (i2c_capture_status) lv_label_set_text(i2c_capture_status, i2c_capture_notice);
+        return false;
+    }
+
+    int create_error = EEXIST;
+    bool temporary_created = false;
+    for (unsigned suffix = 0; suffix < 100 && !i2c_capture_file; suffix++) {
+        char stem[9];
+        snprintf(stem, sizeof(stem), "%s%02u", clock, suffix);
+        snprintf(i2c_capture_temporary_path, sizeof(i2c_capture_temporary_path),
+                 "%s/%s.TMP", directory, stem);
+        snprintf(i2c_capture_final_path, sizeof(i2c_capture_final_path),
+                 "%s/%s.CSV", directory, stem);
+        struct stat info;
+        if (stat(i2c_capture_final_path, &info) == 0) continue;
+        if (errno != ENOENT) {
+            create_error = errno ? errno : EIO;
+            break;
+        }
+        int descriptor = open(i2c_capture_temporary_path, O_WRONLY | O_CREAT | O_EXCL, 0664);
+        if (descriptor < 0) {
+            if (errno == EEXIST) continue;
+            create_error = errno ? errno : EIO;
+            break;
+        }
+        temporary_created = true;
+        i2c_capture_file = fdopen(descriptor, "wb");
+        if (!i2c_capture_file) {
+            create_error = errno ? errno : EIO;
+            close(descriptor);
+            break;
+        }
+    }
+    if (!i2c_capture_file) {
+        sd_record_error(create_error);
+        const char *name = strrchr(i2c_capture_temporary_path, '/');
+        if (temporary_created)
+            snprintf(i2c_capture_notice, sizeof(i2c_capture_notice),
+                     "Capture not started; %s retained (%s)",
+                     name ? name + 1 : "TMP", strerror(create_error));
+        else
+            snprintf(i2c_capture_notice, sizeof(i2c_capture_notice),
+                     "Could not create capture: %s", strerror(create_error));
+        i2c_capture_temporary_path[0] = '\0';
+        i2c_capture_final_path[0] = '\0';
+        if (i2c_capture_status) lv_label_set_text(i2c_capture_status, i2c_capture_notice);
+        return false;
+    }
+
+    if (fputs("unix_time,address,register,value,status,speed_khz\n", i2c_capture_file) < 0) {
+        int error = errno ? errno : EIO;
+        fclose(i2c_capture_file);
+        i2c_capture_file = NULL;
+        sd_record_error(error);
+        const char *name = strrchr(i2c_capture_temporary_path, '/');
+        snprintf(i2c_capture_notice, sizeof(i2c_capture_notice),
+                 "Capture not started; %s retained (%s)",
+                 name ? name + 1 : "TMP", strerror(error));
+        i2c_capture_temporary_path[0] = '\0';
+        i2c_capture_final_path[0] = '\0';
+        if (i2c_capture_status) lv_label_set_text(i2c_capture_status, i2c_capture_notice);
+        return false;
+    }
+
+    const char *name = strrchr(i2c_capture_temporary_path, '/');
+    snprintf(i2c_capture_notice, sizeof(i2c_capture_notice), "Logging to %s",
+             name ? name + 1 : "I2C TMP");
+    i2c_capture_last_flush_tick = xTaskGetTickCount();
+    i2c_watch_enabled = true;
+    i2c_update_controls();
+    if (i2c_capture_status) lv_label_set_text(i2c_capture_status, i2c_capture_notice);
+    return true;
+}
+
+static void i2c_capture_log(esp_err_t transaction_error, uint8_t value)
+{
+    if (!i2c_capture_file) return;
+
+    char value_text[5] = "";
+    if (transaction_error == ESP_OK) snprintf(value_text, sizeof(value_text), "0x%02X", value);
+    bool failed = fprintf(i2c_capture_file, "%lld,0x%02X,0x%02X,%s,%s,%lu\n",
+                          (long long)time(NULL), i2c_selected_address, i2c_selected_register,
+                          value_text, esp_err_to_name(transaction_error),
+                          (unsigned long)(i2c_bus_speed_hz / 1000)) < 0;
+    TickType_t now = xTaskGetTickCount();
+    if (!failed && now - i2c_capture_last_flush_tick >= pdMS_TO_TICKS(I2C_CAPTURE_FLUSH_MS)) {
+        failed = storage_sync_file(i2c_capture_file) != 0;
+        if (!failed) i2c_capture_last_flush_tick = now;
+    }
+    if (failed) {
+        int error = errno ? errno : EIO;
+        sd_record_error(error);
+        errno = error;
+        i2c_capture_stop();
+    }
+}
+
+static void i2c_address_step_clicked(lv_event_t *event)
+{
+    int step = (int)(intptr_t)lv_event_get_user_data(event);
+    i2c_disarm_write();
+    i2c_selected_address = i2c_step_value(i2c_selected_address, step, 0x08, 0x77);
+    i2c_update_controls();
+}
+
+static void i2c_register_step_clicked(lv_event_t *event)
+{
+    int step = (int)(intptr_t)lv_event_get_user_data(event);
+    i2c_disarm_write();
+    i2c_selected_register = i2c_step_value(i2c_selected_register, step, 0x00, 0xff);
+    i2c_update_controls();
+}
+
+static void i2c_value_step_clicked(lv_event_t *event)
+{
+    int step = (int)(intptr_t)lv_event_get_user_data(event);
+    i2c_disarm_write();
+    i2c_write_value = i2c_step_value(i2c_write_value, step, 0x00, 0xff);
+    i2c_update_controls();
+}
+
+static void i2c_speed_clicked(lv_event_t *event)
+{
+    (void)event;
+    i2c_disarm_write();
+    i2c_bus_speed_hz = i2c_next_speed(i2c_bus_speed_hz);
+    i2c_update_controls();
+}
+
+static lv_obj_t *i2c_step_button(lv_obj_t *parent, const char *text, lv_event_cb_t callback, int step)
+{
+    lv_obj_t *control = button(parent, text, NULL);
+    lv_obj_set_size(control, 125, 60);
+    lv_obj_add_event_cb(control, callback, LV_EVENT_CLICKED, (void *)(intptr_t)step);
+    return control;
+}
+
+static lv_obj_t *i2c_step_row(lv_event_cb_t callback)
+{
+    lv_obj_t *row = lv_obj_create(content);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, 620, 62);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    i2c_step_button(row, "-0x10", callback, -0x10);
+    i2c_step_button(row, "-1", callback, -1);
+    i2c_step_button(row, "+1", callback, 1);
+    i2c_step_button(row, "+0x10", callback, 0x10);
+    return row;
+}
+
+static void i2c_scan_clicked(lv_event_t *event)
+{
+    (void)event;
+    esp_err_t error = bsp_ext_i2c_init();
+    if (error != ESP_OK) {
+        lv_label_set_text_fmt(i2c_status, "Could not start I2C: %s", esp_err_to_name(error));
+        return;
+    }
+
+    lv_label_set_text(i2c_status, "Scanning 0x08-0x77...");
+    lv_label_set_text(i2c_devices, "");
+    lv_refr_now(NULL);
+
+    char found[768] = "";
+    size_t length = 0;
+    unsigned count = 0;
+    uint8_t first_address = 0;
+    for (uint8_t address = 0x08; address <= 0x77; address++) {
+        error = i2c_master_probe(bsp_ext_i2c_get_handle(), address, 10);
+        if (error == ESP_ERR_NOT_FOUND) continue;
+        if (error != ESP_OK) break;
+        if (count == 0) first_address = address;
+        char text[5];
+        i2c_address_text(text, address);
+        length += snprintf(found + length, sizeof(found) - length, "%s%s",
+                           count ? count % 8 ? "  " : "\n" : "", text);
+        count++;
+    }
+    esp_err_t deinit_error = bsp_ext_i2c_deinit();
+
+    if (deinit_error != ESP_OK) {
+        ESP_LOGE("i2c", "Could not release external I2C after scan: %s", esp_err_to_name(deinit_error));
+        lv_label_set_text_fmt(i2c_status, "I2C cleanup failed: %s", esp_err_to_name(deinit_error));
+    } else if (error == ESP_ERR_TIMEOUT) {
+        lv_label_set_text(i2c_status, "Bus timeout - check SDA, SCL, and pull-ups");
+    } else if (error != ESP_OK && error != ESP_ERR_NOT_FOUND) {
+        lv_label_set_text_fmt(i2c_status, "Scan stopped: %s", esp_err_to_name(error));
+    } else {
+        lv_label_set_text_fmt(i2c_status, "%u device%s found", count, count == 1 ? "" : "s");
+    }
+    lv_label_set_text(i2c_devices, count ? found : "No devices responded");
+    if (count) {
+        i2c_disarm_write();
+        i2c_selected_address = first_address;
+        i2c_update_controls();
+    }
+}
+
+static esp_err_t i2c_register_byte_transaction(uint8_t address, uint8_t register_address,
+                                               uint8_t *value, bool write)
+{
+    esp_err_t error = bsp_ext_i2c_init();
+    if (error != ESP_OK) return error;
+
+    i2c_master_dev_handle_t device = NULL;
+    i2c_device_config_t config = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = address,
+        .scl_speed_hz = i2c_bus_speed_hz,
+    };
+    error = i2c_master_bus_add_device(bsp_ext_i2c_get_handle(), &config, &device);
+    if (error == ESP_OK) {
+        uint8_t data[] = {register_address, *value};
+        error = write ? i2c_master_transmit(device, data, sizeof(data), 50) :
+                        i2c_master_transmit_receive(device, data, 1, value, 1, 50);
+    }
+    esp_err_t device_cleanup_error = device ? i2c_master_bus_rm_device(device) : ESP_OK;
+    esp_err_t bus_cleanup_error = bsp_ext_i2c_deinit();
+    if (device_cleanup_error != ESP_OK)
+        ESP_LOGE("i2c", "Could not remove external I2C device: %s", esp_err_to_name(device_cleanup_error));
+    if (bus_cleanup_error != ESP_OK)
+        ESP_LOGE("i2c", "Could not release external I2C bus: %s", esp_err_to_name(bus_cleanup_error));
+    if (device_cleanup_error != ESP_OK) return device_cleanup_error;
+    if (bus_cleanup_error != ESP_OK) return bus_cleanup_error;
+    return error;
+}
+
+static void i2c_read_once(bool watching)
+{
+    if (!i2c_read_result) return;
+    uint8_t value = 0;
+    esp_err_t error = i2c_register_byte_transaction(i2c_selected_address, i2c_selected_register,
+                                                    &value, false);
+    if (watching) i2c_capture_log(error, value);
+    if (error == ESP_OK) {
+        if (watching)
+            lv_label_set_text_fmt(i2c_read_result, "WATCH  0x%02X = 0x%02X  (%u)",
+                                  i2c_selected_register, value, value);
+        else
+            lv_label_set_text_fmt(i2c_read_result, "0x%02X = 0x%02X  (%u)",
+                                  i2c_selected_register, value, value);
+    }
+    else if (error == ESP_ERR_TIMEOUT)
+        lv_label_set_text(i2c_read_result, "Read timed out - check wiring and pull-ups");
+    else
+        lv_label_set_text_fmt(i2c_read_result, "Read failed: %s", esp_err_to_name(error));
+}
+
+static void i2c_read_clicked(lv_event_t *event)
+{
+    (void)event;
+    lv_label_set_text_fmt(i2c_read_result, "Reading 0x%02X register 0x%02X...",
+                          i2c_selected_address, i2c_selected_register);
+    lv_refr_now(NULL);
+    i2c_read_once(false);
+}
+
+static void i2c_watch_clicked(lv_event_t *event)
+{
+    (void)event;
+    i2c_disarm_write();
+    i2c_watch_enabled = !i2c_watch_enabled;
+    if (!i2c_watch_enabled && i2c_capture_file) i2c_capture_stop();
+    i2c_update_controls();
+    if (i2c_watch_enabled) i2c_read_once(true);
+    else lv_label_set_text(i2c_read_result, "1 Hz read watch stopped");
+}
+
+static void i2c_capture_clicked(lv_event_t *event)
+{
+    (void)event;
+    if (i2c_capture_file) {
+        i2c_capture_stop();
+    } else if (i2c_capture_start()) {
+        i2c_read_once(true);
+    }
+}
+
+static void i2c_write_clicked(lv_event_t *event)
+{
+    (void)event;
+    uint32_t now = lv_tick_get();
+    if (!i2c_write_confirmation_valid(i2c_write_armed, i2c_write_armed_at_ms, now)) {
+        i2c_watch_enabled = false;
+        if (i2c_capture_file) i2c_capture_stop();
+        i2c_write_armed = true;
+        i2c_write_armed_at_ms = now;
+        i2c_update_controls();
+        lv_label_set_text_fmt(i2c_read_result,
+                              "Armed: write 0x%02X to 0x%02X register 0x%02X. Tap again within 5s.",
+                              i2c_write_value, i2c_selected_address, i2c_selected_register);
+        return;
+    }
+
+    i2c_disarm_write();
+    i2c_update_controls();
+    lv_label_set_text_fmt(i2c_read_result, "Writing 0x%02X to register 0x%02X...",
+                          i2c_write_value, i2c_selected_register);
+    lv_refr_now(NULL);
+    uint8_t value = i2c_write_value;
+    esp_err_t error = i2c_register_byte_transaction(i2c_selected_address, i2c_selected_register,
+                                                    &value, true);
+    if (error == ESP_OK)
+        lv_label_set_text_fmt(i2c_read_result, "Wrote 0x%02X to register 0x%02X",
+                              value, i2c_selected_register);
+    else if (error == ESP_ERR_TIMEOUT)
+        lv_label_set_text(i2c_read_result, "Write timed out - check wiring and pull-ups");
+    else
+        lv_label_set_text_fmt(i2c_read_result, "Write failed: %s", esp_err_to_name(error));
+}
+
+static void i2c_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    if (i2c_write_armed &&
+        !i2c_write_confirmation_valid(true, i2c_write_armed_at_ms, lv_tick_get())) {
+        i2c_disarm_write();
+        i2c_update_controls();
+        if (i2c_read_result) lv_label_set_text(i2c_read_result, "Write confirmation expired");
+    }
+    if (i2c_watch_enabled) i2c_read_once(true);
+}
+
+static void i2c_clicked(lv_event_t *event)
+{
+    (void)event;
+    show_i2c();
+}
+
+static void uart_clicked(lv_event_t *event)
+{
+    (void)event;
+    clear_content();
+    uart_tool_show(content, sd_ready, sd_record_error);
+}
+
+static void ender3_clicked(lv_event_t *event)
+{
+    (void)event;
+    clear_content();
+    ender3_tool_show(content);
+}
+
+static void spi_clicked(lv_event_t *event)
+{
+    (void)event;
+    clear_content();
+    spi_tool_show(content);
+}
+
+static void signal_clicked(lv_event_t *event)
+{
+    (void)event;
+    clear_content();
+    signal_tool_show(content);
+}
+
+static void http_clicked(lv_event_t *event)
+{
+    (void)event;
+    clear_content();
+    http_tool_show(content, wifi_connected, sd_ready, sd_record_error);
+}
+
+static void mqtt_clicked(lv_event_t *event)
+{
+    (void)event;
+    clear_content();
+    mqtt_tool_show(content, wifi_connected, sd_ready, sd_record_error);
+}
+
+static void ble_clicked(lv_event_t *event)
+{
+    (void)event;
+    clear_content();
+    ble_tool_show(content, wifi_ready, sd_ready, ble_scan, ble_products_idle, sd_record_error);
+}
+
+static void show_i2c(void)
+{
+    clear_content();
+    lv_obj_set_style_pad_row(content, 12, 0);
+    lv_obj_t *title = lv_label_create(content);
+    lv_label_set_text(title, "External I2C Inspector");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+
+    lv_obj_t *help = lv_label_create(content);
+    lv_obj_set_width(help, 620);
+    lv_obj_set_style_text_align(help, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(help, "Grove/EXT: SDA G53, SCL G54; external 5V stays off.\n"
+                            "Share ground. Use 3.3V pull-ups or level-shift a 5V bus.\n"
+                            "One-byte reads can have side effects; check the device datasheet.\n"
+                            "Raw writes can reconfigure hardware; verify the register and value first.");
+
+    lv_obj_t *scan = button(content, LV_SYMBOL_REFRESH "  SCAN", i2c_scan_clicked);
+    lv_obj_set_size(scan, 620, 90);
+    i2c_status = lv_label_create(content);
+    lv_obj_set_width(i2c_status, 620);
+    lv_obj_set_style_text_align(i2c_status, LV_TEXT_ALIGN_CENTER, 0);
+    i2c_devices = lv_label_create(content);
+    lv_obj_set_width(i2c_devices, 620);
+    lv_obj_set_style_text_align(i2c_devices, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_t *speed = button(content, "", i2c_speed_clicked);
+    lv_obj_set_size(speed, 620, 70);
+    i2c_speed_label = lv_obj_get_child(speed, 0);
+    i2c_address_label = lv_label_create(content);
+    lv_obj_set_style_text_font(i2c_address_label, &lv_font_montserrat_28, 0);
+    i2c_step_row(i2c_address_step_clicked);
+    i2c_register_label = lv_label_create(content);
+    lv_obj_set_style_text_font(i2c_register_label, &lv_font_montserrat_28, 0);
+    i2c_step_row(i2c_register_step_clicked);
+    lv_obj_t *read_row = lv_obj_create(content);
+    lv_obj_remove_style_all(read_row);
+    lv_obj_set_size(read_row, 620, 72);
+    lv_obj_set_flex_flow(read_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(read_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *read = button(read_row, "READ BYTE", i2c_read_clicked);
+    lv_obj_set_size(read, 300, 70);
+    lv_obj_t *watch = button(read_row, "", i2c_watch_clicked);
+    lv_obj_set_size(watch, 300, 70);
+    i2c_watch_label = lv_obj_get_child(watch, 0);
+    i2c_read_result = lv_label_create(content);
+    lv_obj_set_width(i2c_read_result, 620);
+    lv_obj_set_style_text_align(i2c_read_result, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(i2c_read_result, "Select an address and register, then read once");
+    lv_obj_t *capture = button(content, "", i2c_capture_clicked);
+    lv_obj_set_size(capture, 620, 70);
+    i2c_capture_label = lv_obj_get_child(capture, 0);
+    i2c_capture_status = lv_label_create(content);
+    lv_obj_set_width(i2c_capture_status, 620);
+    lv_obj_set_style_text_align(i2c_capture_status, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(i2c_capture_status, i2c_capture_notice[0] ? i2c_capture_notice :
+                      "Optional 1 Hz CSV logging to the SD card");
+    i2c_value_label = lv_label_create(content);
+    lv_obj_set_style_text_font(i2c_value_label, &lv_font_montserrat_28, 0);
+    i2c_step_row(i2c_value_step_clicked);
+    lv_obj_t *write = button(content, "", i2c_write_clicked);
+    lv_obj_set_size(write, 620, 80);
+    i2c_write_label = lv_obj_get_child(write, 0);
+    i2c_update_controls();
+    i2c_scan_clicked(NULL);
+    i2c_timer = lv_timer_create(i2c_tick, 1000, NULL);
+}
+
 static lv_obj_t *scope_control(lv_obj_t *parent, const char *text, int width,
                                lv_event_cb_t callback, void *user_data, lv_obj_t **label_out)
 {
@@ -3324,7 +6046,7 @@ static void show_scope(void)
     lv_label_set_text(scope_stats, "Starting ADC...");
 
     scope_chart = lv_chart_create(content);
-    lv_obj_set_size(scope_chart, 650, 500);
+    lv_obj_set_size(scope_chart, 650, 420);
     lv_chart_set_type(scope_chart, LV_CHART_TYPE_LINE);
     lv_chart_set_point_count(scope_chart, SCOPE_CHART_POINTS);
     lv_chart_set_range(scope_chart, LV_CHART_AXIS_PRIMARY_Y, 0, scope_ranges_mv[scope_range_index]);
@@ -3348,6 +6070,20 @@ static void show_scope(void)
     lv_obj_set_style_text_align(scope_level_label, LV_TEXT_ALIGN_CENTER, 0);
     scope_control(row, LV_SYMBOL_PLUS, 100, scope_level_clicked, (void *)(intptr_t)100, NULL);
 
+    row = scope_row();
+    scope_control(row, "Offset\n0 mV", 180, scope_offset_clicked, NULL, &scope_offset_label);
+    scope_control(row, "Scale\n100.0%", 180, scope_gain_clicked, NULL, &scope_gain_label);
+    scope_control(row, "RESET CAL", 180, scope_calibration_reset_clicked, NULL, NULL);
+
+    row = scope_row();
+    scope_control(row, "SAVE CSV", 180, scope_capture_clicked, NULL, NULL);
+    scope_capture_status = lv_label_create(row);
+    lv_obj_set_width(scope_capture_status, 420);
+    lv_obj_set_style_text_align(scope_capture_status, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(scope_capture_status, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(scope_capture_status, scope_capture_notice[0] ? scope_capture_notice :
+                      "Save the visible 300-point chart to SD");
+
     lv_obj_t *warning = lv_label_create(content);
     lv_label_set_text(warning, "Inputs: G16 G18 G19 G49 G50 G51 G53 G54   |   0-3.3V only");
     lv_obj_set_width(warning, 650);
@@ -3355,10 +6091,765 @@ static void show_scope(void)
 
     scope_running = true;
     scope_error = false;
+    scope_chart_ready = false;
     scope_update_controls();
+    portENTER_CRITICAL(&scope_lock);
     scope_active = true;
+    portEXIT_CRITICAL(&scope_lock);
     if (!scope_task_handle) xTaskCreate(scope_task, "adc-scope", 4096, NULL, 5, &scope_task_handle);
     scope_timer = lv_timer_create(scope_tick, 150, NULL);
+}
+
+static bool govee_snapshot(govee_reading_t *reading, char *name, size_t name_size,
+                           char *address, size_t address_size, int8_t *rssi, time_t *updated)
+{
+    portENTER_CRITICAL(&govee_lock);
+    bool ready = govee_ready;
+    if (ready) {
+        *reading = govee_reading;
+        snprintf(name, name_size, "%s", govee_name);
+        snprintf(address, address_size, "%s", govee_address);
+        *rssi = govee_rssi;
+        *updated = govee_updated_at;
+    }
+    portEXIT_CRITICAL(&govee_lock);
+    return ready;
+}
+
+static void govee_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    if (!govee_status) return;
+    portENTER_CRITICAL(&govee_lock);
+    bool enabled = govee_enabled;
+    bool scanning = govee_scanning;
+    portEXIT_CRITICAL(&govee_lock);
+    if (govee_toggle_label)
+        lv_label_set_text(govee_toggle_label, enabled ? "Turn Govee Bluetooth off" : "Turn Govee Bluetooth on");
+    if (!enabled) {
+        lv_label_set_text(govee_status, "Govee Bluetooth is off");
+        lv_label_set_text(govee_temperature, "-- F");
+        lv_label_set_text(govee_humidity, "--% RH");
+        lv_label_set_text(govee_details, "Turn on Bluetooth to monitor broadcasts");
+        return;
+    }
+    govee_reading_t reading;
+    char name[sizeof(govee_name)], address[sizeof(govee_address)];
+    int8_t rssi;
+    time_t updated;
+    if (!govee_snapshot(&reading, name, sizeof(name), address, sizeof(address), &rssi, &updated)) {
+        lv_label_set_text(govee_status, scanning ? "Scanning for a Govee H5075..." : "Bluetooth is unavailable");
+        return;
+    }
+    int age = (int)(time(NULL) - updated);
+    int c_tenths = weather_round(reading.temperature_c * 10.0f);
+    lv_label_set_text_fmt(govee_status, "%s  |  updated %d sec ago", name, age < 0 ? 0 : age);
+    lv_label_set_text_fmt(govee_temperature, "%d F", weather_round(reading.temperature_c * 9.0f / 5.0f + 32.0f));
+    lv_label_set_text_fmt(govee_humidity, "%d%% RH", weather_round(reading.humidity));
+    lv_label_set_text_fmt(govee_details, "%s%d.%d C\nSensor battery %u%%\nSignal %d dBm\n%s",
+                          c_tenths < 0 ? "-" : "", abs(c_tenths) / 10, abs(c_tenths) % 10,
+                          reading.battery, rssi, address);
+}
+
+static void govee_toggle_clicked(lv_event_t *event)
+{
+    (void)event;
+    portENTER_CRITICAL(&govee_lock);
+    bool enabled = govee_enabled = !govee_enabled;
+    if (!enabled) govee_ready = false;
+    portEXIT_CRITICAL(&govee_lock);
+    ble_scan();
+    govee_tick(NULL);
+}
+
+static void show_govee(void)
+{
+    clear_content();
+    lv_obj_t *title = lv_label_create(content);
+    lv_label_set_text(title, "Govee H5075");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+    govee_status = lv_label_create(content);
+    lv_obj_set_width(govee_status, 620);
+    lv_obj_set_style_text_align(govee_status, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_t *toggle = button(content, "Turn Govee Bluetooth on", govee_toggle_clicked);
+    govee_toggle_label = lv_obj_get_child(toggle, 0);
+    lv_obj_set_size(toggle, 520, 82);
+
+    lv_obj_t *card = lv_obj_create(content);
+    lv_obj_set_size(card, 620, 610);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(card, 32, 0);
+    govee_temperature = lv_label_create(card);
+    lv_obj_set_style_text_font(govee_temperature, &lv_font_montserrat_48, 0);
+    govee_humidity = lv_label_create(card);
+    lv_obj_set_style_text_font(govee_humidity, &lv_font_montserrat_48, 0);
+    govee_details = lv_label_create(card);
+    lv_obj_set_width(govee_details, 560);
+    lv_obj_set_style_text_align(govee_details, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(govee_temperature, "-- F");
+    lv_label_set_text(govee_humidity, "--% RH");
+    lv_label_set_text(govee_details, "Waiting for a broadcast...");
+    govee_tick(NULL);
+    govee_timer = lv_timer_create(govee_tick, 1000, NULL);
+}
+
+static void govee_clicked(lv_event_t *event)
+{
+    (void)event;
+    show_govee();
+}
+
+static void ride_load_history(void)
+{
+    if (!ride_history) return;
+    storage_recover_replace(SD_PATH "/RIDES/SUMMARY.CSV", SD_PATH "/RIDES/SUMMARY.BAK");
+    FILE *file = fopen(SD_PATH "/RIDES/SUMMARY.CSV", "rb");
+    int rides = 0, best_power = 0;
+    long long start;
+    unsigned duration;
+    float distance, work;
+    int average_power, maximum_power, average_hr, maximum_hr;
+    uint64_t total_seconds = 0;
+    float total_distance = 0;
+    char line[160];
+    if (file) {
+        while (fgets(line, sizeof(line), file)) {
+            if (sscanf(line, "%lld,%u,%f,%f,%d,%d,%d,%d", &start, &duration, &distance,
+                       &work, &average_power, &maximum_power, &average_hr, &maximum_hr) != 8) continue;
+            rides++;
+            total_seconds += duration;
+            total_distance += distance;
+            if (maximum_power > best_power) best_power = maximum_power;
+        }
+        fclose(file);
+    }
+    lv_label_set_text_fmt(ride_history, "History: %d rides  |  %.1f mi  |  %.1f hr  |  best %d W",
+                          rides, total_distance * 0.621371f, total_seconds / 3600.0f, best_power);
+}
+
+static bool ride_append_summary(unsigned duration)
+{
+    mkdir(SD_PATH "/RIDES", 0775);
+    const char *temporary_path = SD_PATH "/RIDES/SUMMARY.TMP";
+    const char *final_path = SD_PATH "/RIDES/SUMMARY.CSV";
+    const char *backup_path = SD_PATH "/RIDES/SUMMARY.BAK";
+    if (storage_recover_replace(final_path, backup_path) != 0) return false;
+    remove(temporary_path);
+    FILE *source = fopen(final_path, "rb");
+    if (!source && errno != ENOENT) return false;
+    FILE *file = fopen(temporary_path, "wb");
+    if (!file) {
+        if (source) fclose(source);
+        return false;
+    }
+    bool ok = true;
+    bool empty = true;
+    int last = '\n';
+    char buffer[512];
+    while (source && ok) {
+        size_t length = fread(buffer, 1, sizeof(buffer), source);
+        if (length) {
+            empty = false;
+            last = (unsigned char)buffer[length - 1];
+            ok = fwrite(buffer, 1, length, file) == length;
+        }
+        if (length < sizeof(buffer)) {
+            if (ferror(source)) ok = false;
+            break;
+        }
+    }
+    if (source && fclose(source) != 0) ok = false;
+    if (ok && !empty && last != '\n') ok = fputc('\n', file) != EOF;
+    if (ok && empty)
+        ok = fputs("start_unix,duration_s,distance_km,work_kj,avg_power_w,max_power_w,avg_hr,max_hr\n", file) >= 0;
+    if (ok)
+        ok = fprintf(file, "%lld,%u,%.3f,%.1f,%d,%d,%d,%d\n", (long long)ride_started_at, duration,
+                     ride_distance_km, ride_work_kj,
+                     ride_power_samples ? (int)(ride_power_sum / ride_power_samples) : 0, ride_max_power,
+                     ride_hr_samples_count ? (int)(ride_hr_sum / ride_hr_samples_count) : 0, ride_max_hr) >= 0;
+    if (!ok) {
+        fclose(file);
+        remove(temporary_path);
+        return false;
+    }
+    return storage_commit_replace_file(&file, temporary_path, final_path, backup_path) == 0;
+}
+
+static void ride_clear_paths(void)
+{
+    ride_temporary_path[0] = '\0';
+    ride_final_path[0] = '\0';
+}
+
+static void ride_abort(const char *message, bool retain_temporary)
+{
+    ride_recording = false;
+    if (ride_file) {
+        fclose(ride_file);
+        ride_file = NULL;
+    }
+    const char *name = strrchr(ride_temporary_path, '/');
+    if (retain_temporary && ride_temporary_path[0])
+        snprintf(ride_notice, sizeof(ride_notice), "%s; %s retained", message, name ? name + 1 : "TMP");
+    else {
+        if (ride_temporary_path[0]) remove(ride_temporary_path);
+        snprintf(ride_notice, sizeof(ride_notice), "%s", message);
+    }
+    ride_clear_paths();
+}
+
+static bool ride_stop(void)
+{
+    if (!ride_recording) return false;
+    ride_recording = false;
+    unsigned duration = pdTICKS_TO_MS(xTaskGetTickCount() - ride_started_tick) / 1000;
+    if (storage_commit_new_file(&ride_file, ride_temporary_path, ride_final_path) != 0) {
+        int save_error = errno;
+        sd_record_error(save_error);
+        const char *name = strrchr(ride_temporary_path, '/');
+        snprintf(ride_notice, sizeof(ride_notice), "Ride not published; %s retained (%s)",
+                 name ? name + 1 : "TMP", strerror(save_error));
+        ride_clear_paths();
+        return false;
+    }
+    bool summary_ok = ride_append_summary(duration);
+    if (!summary_ok) sd_record_error(errno ? errno : EIO);
+    snprintf(ride_notice, sizeof(ride_notice), "%s",
+             summary_ok ? "Ride saved safely" : "Ride saved; history index update failed");
+    ride_clear_paths();
+    ride_load_history();
+    return true;
+}
+
+static bool ride_start(void)
+{
+    ride_notice[0] = '\0';
+    portENTER_CRITICAL(&kickr_lock);
+    bool subscribed = kickr_subscribed;
+    portEXIT_CRITICAL(&kickr_lock);
+    if (!sd_ready || !subscribed) return false;
+    mkdir(SD_PATH "/RIDES", 0775);
+    time_t now = time(NULL);
+    struct tm local;
+    char date[7], clock[7], directory[64];
+    localtime_r(&now, &local);
+    strftime(date, sizeof(date), "%y%m%d", &local);
+    strftime(clock, sizeof(clock), "%H%M%S", &local);
+    snprintf(directory, sizeof(directory), SD_PATH "/RIDES/%s", date);
+    if (mkdir(directory, 0775) != 0 && errno != EEXIST) {
+        int error = errno ? errno : EIO;
+        sd_record_error(error);
+        snprintf(ride_notice, sizeof(ride_notice), "Could not create ride folder: %s", strerror(error));
+        return false;
+    }
+    for (unsigned suffix = 0; suffix < 100 && !ride_file; suffix++) {
+        char stem[9];
+        snprintf(stem, sizeof(stem), "%s%02u", clock, suffix);
+        snprintf(ride_temporary_path, sizeof(ride_temporary_path), "%s/%s.TMP", directory, stem);
+        snprintf(ride_final_path, sizeof(ride_final_path), "%s/%s.CSV", directory, stem);
+        struct stat info;
+        if (stat(ride_final_path, &info) == 0) continue;
+        if (errno != ENOENT) break;
+        int descriptor = open(ride_temporary_path, O_WRONLY | O_CREAT | O_EXCL, 0664);
+        if (descriptor < 0) {
+            if (errno == EEXIST) continue;
+            break;
+        }
+        ride_file = fdopen(descriptor, "wb");
+        if (!ride_file) {
+            close(descriptor);
+            remove(ride_temporary_path);
+        }
+    }
+    if (!ride_file) {
+        sd_record_error(errno ? errno : EIO);
+        ride_clear_paths();
+        snprintf(ride_notice, sizeof(ride_notice), "Could not create a new ride file");
+        return false;
+    }
+    if (fputs("unix_time,elapsed_s,power_w,cadence_rpm,speed_kmh,heart_rate,resistance,distance_km,work_kj\n",
+              ride_file) < 0) {
+        sd_record_error(errno ? errno : EIO);
+        ride_abort("Could not write the ride header", false);
+        return false;
+    }
+    ride_started_at = now;
+    ride_started_tick = ride_last_log_tick = ride_last_flush_tick = xTaskGetTickCount();
+    ride_distance_km = ride_work_kj = 0;
+    ride_power_sum = ride_hr_sum = 0;
+    ride_power_samples = ride_hr_samples_count = 0;
+    ride_max_power = ride_max_hr = 0;
+    ride_next_hr_measure = 0;
+    ride_recording = true;
+    return true;
+}
+
+static void ride_button_clicked(lv_event_t *event)
+{
+    (void)event;
+    if (ride_recording) ride_stop();
+    else if (!ride_start() && ride_status && !ride_notice[0])
+        lv_label_set_text(ride_status, !sd_ready ? "SD card is unavailable" : "Wake and connect the KICKR first");
+    if (ride_status && ride_notice[0]) lv_label_set_text(ride_status, ride_notice);
+}
+
+static void cycling_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    kickr_data_t data;
+    bool enabled, found, connecting, connected, subscribed;
+    time_t updated;
+    portENTER_CRITICAL(&kickr_lock);
+    data = kickr_data;
+    enabled = kickr_enabled;
+    found = kickr_found;
+    connecting = kickr_connecting;
+    connected = kickr_connected;
+    subscribed = kickr_subscribed;
+    updated = kickr_updated_at;
+    portEXIT_CRITICAL(&kickr_lock);
+    portENTER_CRITICAL(&ring_lock);
+    int heart_rate = ring_heart_rate;
+    time_t heart_rate_time = ring_hr_updated_at;
+    portEXIT_CRITICAL(&ring_lock);
+
+    time_t now = time(NULL);
+    bool fresh = updated && now - updated <= 3;
+    bool fresh_hr = heart_rate_time && now - heart_rate_time <= 90;
+    if (!enabled) fresh = false;
+    if (!fresh) memset(&data, 0, sizeof(data));
+    if (!fresh_hr) heart_rate = -1;
+
+    TickType_t ticks = xTaskGetTickCount();
+    if (ride_recording && (ride_next_hr_measure == 0 || (int32_t)(ticks - ride_next_hr_measure) >= 0) &&
+        ring_hr_begin())
+        ride_next_hr_measure = ticks + pdMS_TO_TICKS(60000);
+
+    if (ride_recording && ticks - ride_last_log_tick >= pdMS_TO_TICKS(1000)) {
+        float seconds = (ticks - ride_last_log_tick) / (float)configTICK_RATE_HZ;
+        unsigned elapsed = pdTICKS_TO_MS(ticks - ride_started_tick) / 1000;
+        ride_last_log_tick = ticks;
+        ride_distance_km += data.speed_kmh * seconds / 3600.0f;
+        if (data.has_power) {
+            ride_work_kj += data.power_w * seconds / 1000.0f;
+            ride_power_sum += data.power_w;
+            ride_power_samples++;
+            if (data.power_w > ride_max_power) ride_max_power = data.power_w;
+        }
+        if (heart_rate > 0) {
+            ride_hr_sum += heart_rate;
+            ride_hr_samples_count++;
+            if (heart_rate > ride_max_hr) ride_max_hr = heart_rate;
+        }
+        bool write_failed = !ride_file || fprintf(ride_file, "%lld,%lld,%d,%.1f,%.2f,%d,%d,%.3f,%.1f\n",
+                (long long)now, (long long)elapsed, data.has_power ? data.power_w : 0,
+                data.has_cadence ? data.cadence_rpm : 0, data.has_speed ? data.speed_kmh : 0,
+                heart_rate, data.has_resistance ? data.resistance : 0, ride_distance_km, ride_work_kj) < 0;
+        if (!write_failed && ticks - ride_last_flush_tick >= pdMS_TO_TICKS(RIDE_FLUSH_MS)) {
+            write_failed = storage_sync_file(ride_file) != 0;
+            if (!write_failed) ride_last_flush_tick = ticks;
+        }
+        if (write_failed) {
+            int error = errno ? errno : EIO;
+            sd_record_error(error);
+            ride_abort("SD write failed", true);
+        }
+    }
+
+    if (!ride_status) return;
+    if (!ride_recording && ride_notice[0]) lv_label_set_text(ride_status, ride_notice);
+    else lv_label_set_text(ride_status, !enabled ? "KICKR Bluetooth is off" :
+                           subscribed ? (fresh ? "KICKR connected" : "KICKR connected - start pedaling") :
+                           connecting ? "Connecting to KICKR..." : connected ? "Reading KICKR services..." :
+                           found ? "KICKR disconnected - scanning..." : "Wake the KICKR by pedaling");
+    if (ride_toggle_label)
+        lv_label_set_text(ride_toggle_label, enabled ? "Turn KICKR Bluetooth off" : "Turn KICKR Bluetooth on");
+    lv_label_set_text_fmt(ride_power_label, data.has_power ? "%d W" : "-- W", data.power_w);
+    lv_label_set_text_fmt(ride_cadence_label, data.has_cadence ? "%.0f RPM" : "-- RPM", data.cadence_rpm);
+    lv_label_set_text_fmt(ride_hr_label, heart_rate > 0 ? "%d BPM" : "-- BPM", heart_rate);
+    unsigned elapsed = ride_recording ? pdTICKS_TO_MS(ticks - ride_started_tick) / 1000 : 0;
+    lv_label_set_text_fmt(ride_stats, "%.1f mph  |  %.2f mi  |  %.1f kJ  |  %02u:%02u:%02u",
+                          data.speed_kmh * 0.621371f, ride_distance_km * 0.621371f, ride_work_kj,
+                          elapsed / 3600, elapsed / 60 % 60, elapsed % 60);
+    lv_label_set_text(ride_button_label, ride_recording ? "Stop & save" : "Start ride");
+    if (ride_chart && fresh) {
+        lv_chart_set_next_value(ride_chart, ride_power_series, data.has_power ? data.power_w : 0);
+        lv_chart_set_next_value(ride_chart, ride_hr_series, heart_rate > 0 ? heart_rate : LV_CHART_POINT_NONE);
+    }
+}
+
+static void kickr_toggle_clicked(lv_event_t *event)
+{
+    (void)event;
+    portENTER_CRITICAL(&kickr_lock);
+    bool enabled = kickr_enabled = !kickr_enabled;
+    bool cancel = !enabled && kickr_connecting;
+    bool disconnect = !enabled && kickr_connected;
+    uint16_t connection = kickr_conn_handle;
+    if (!enabled) {
+        kickr_stopping = cancel || disconnect;
+        kickr_found = false;
+        kickr_subscribed = false;
+        kickr_updated_at = 0;
+        memset(&kickr_data, 0, sizeof(kickr_data));
+    }
+    portEXIT_CRITICAL(&kickr_lock);
+    if (!enabled && ride_recording) ride_stop();
+    if (cancel) {
+        int rc = ble_gap_conn_cancel();
+        if (rc) ESP_LOGW("kickr", "Connection cancel failed: %d", rc);
+    }
+    if (disconnect) {
+        int rc = ble_gap_terminate(connection, BLE_ERR_REM_USER_CONN_TERM);
+        if (rc) ESP_LOGW("kickr", "Disconnect request failed: %d", rc);
+    }
+    ble_scan();
+    cycling_tick(NULL);
+}
+
+static void cycling_clicked(lv_event_t *event)
+{
+    (void)event;
+    show_cycling();
+}
+
+static void show_cycling(void)
+{
+    clear_content();
+    lv_obj_t *title = lv_label_create(content);
+    lv_label_set_text(title, "Cycling");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+    ride_status = lv_label_create(content);
+    lv_obj_set_width(ride_status, 640);
+    lv_obj_set_style_text_align(ride_status, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_t *toggle = button(content, "Turn KICKR Bluetooth on", kickr_toggle_clicked);
+    ride_toggle_label = lv_obj_get_child(toggle, 0);
+    lv_obj_set_size(toggle, 520, 82);
+
+    lv_obj_t *metrics = lv_obj_create(content);
+    lv_obj_set_size(metrics, 640, 180);
+    lv_obj_clear_flag(metrics, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(metrics, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(metrics, LV_FLEX_ALIGN_SPACE_AROUND, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    ride_power_label = lv_label_create(metrics);
+    ride_cadence_label = lv_label_create(metrics);
+    ride_hr_label = lv_label_create(metrics);
+    lv_obj_set_style_text_font(ride_power_label, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_font(ride_cadence_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_font(ride_hr_label, &lv_font_montserrat_28, 0);
+
+    ride_stats = lv_label_create(content);
+    lv_obj_set_width(ride_stats, 640);
+    lv_obj_set_style_text_align(ride_stats, LV_TEXT_ALIGN_CENTER, 0);
+    ride_chart = lv_chart_create(content);
+    lv_obj_set_size(ride_chart, 640, 350);
+    lv_chart_set_type(ride_chart, LV_CHART_TYPE_LINE);
+    lv_chart_set_point_count(ride_chart, RIDE_CHART_POINTS);
+    lv_chart_set_range(ride_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 1000);
+    lv_chart_set_range(ride_chart, LV_CHART_AXIS_SECONDARY_Y, 40, 220);
+    lv_chart_set_div_line_count(ride_chart, 5, 7);
+    ride_power_series = lv_chart_add_series(ride_chart, lv_palette_main(LV_PALETTE_BLUE), LV_CHART_AXIS_PRIMARY_Y);
+    ride_hr_series = lv_chart_add_series(ride_chart, lv_palette_main(LV_PALETTE_RED), LV_CHART_AXIS_SECONDARY_Y);
+
+    lv_obj_t *start = button(content, ride_recording ? "Stop & save" : "Start ride", ride_button_clicked);
+    lv_obj_set_size(start, 520, 82);
+    ride_button_label = lv_obj_get_child(start, 0);
+    ride_history = lv_label_create(content);
+    lv_obj_set_width(ride_history, 640);
+    lv_obj_set_style_text_align(ride_history, LV_TEXT_ALIGN_CENTER, 0);
+    ride_load_history();
+    cycling_tick(NULL);
+}
+
+static void ring_chart_render(void)
+{
+    if (!ring_hr_chart || !ring_hr_series) return;
+    uint8_t values[RING_HR_HISTORY_POINTS], count, first;
+    portENTER_CRITICAL(&ring_lock);
+    count = ring_hr_history_count;
+    first = (ring_hr_history_head + RING_HR_HISTORY_POINTS - count) % RING_HR_HISTORY_POINTS;
+    for (uint8_t i = 0; i < count; i++) values[i] = ring_hr_history[(first + i) % RING_HR_HISTORY_POINTS];
+    portEXIT_CRITICAL(&ring_lock);
+    lv_chart_set_all_value(ring_hr_chart, ring_hr_series, LV_CHART_POINT_NONE);
+    for (uint8_t i = 0; i < count; i++) lv_chart_set_next_value(ring_hr_chart, ring_hr_series, values[i]);
+}
+
+static void ring_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    if (!ring_status) return;
+    char name[sizeof(ring_name)], address[sizeof(ring_address)];
+    int battery;
+    int8_t rssi;
+    time_t updated;
+    int heart_rate;
+    bool enabled, found, connecting, connected, charging, hr_active, sync_active;
+    int hr_error;
+    portENTER_CRITICAL(&ring_lock);
+    snprintf(name, sizeof(name), "%s", ring_name);
+    snprintf(address, sizeof(address), "%s", ring_address);
+    battery = ring_battery;
+    rssi = ring_rssi;
+    updated = ring_updated_at;
+    enabled = ring_enabled;
+    found = ring_found;
+    connecting = ring_connecting;
+    connected = ring_connected;
+    charging = ring_charging;
+    heart_rate = ring_heart_rate;
+    hr_active = ring_hr_active;
+    sync_active = ring_sync_active || ring_sync_pending;
+    hr_error = ring_hr_error;
+    portEXIT_CRITICAL(&ring_lock);
+    lv_label_set_text(ring_status, !enabled ? "Ring Bluetooth is off" : connected ? "Connected" : connecting ? "Connecting..." : found ? "Reconnecting..." : "Scanning...");
+    if (ring_toggle_label) lv_label_set_text(ring_toggle_label, enabled ? "Turn Ring Bluetooth off" : "Turn Ring Bluetooth on");
+    lv_label_set_text_fmt(ring_battery_label, battery < 0 ? "--%%" : "%d%%", battery);
+    if (ring_hr_label) lv_label_set_text_fmt(ring_hr_label, heart_rate < 0 ? "-- BPM" : "%d BPM", heart_rate);
+    if (ring_hr_button_label) lv_label_set_text(ring_hr_button_label, hr_active ? "Measuring..." : "Measure now");
+    if (ring_hr_status) {
+        if (ring_storage_error[0]) lv_label_set_text(ring_hr_status, ring_storage_error);
+        else if (!enabled) lv_label_set_text(ring_hr_status, "Turn on Ring Bluetooth to connect");
+        else if (!connected) lv_label_set_text(ring_hr_status, "Ring is disconnected");
+        else if (hr_active) lv_label_set_text(ring_hr_status, "Measuring - keep your hand still");
+        else if (sync_active) lv_label_set_text(ring_hr_status, "Syncing stored heart-rate history...");
+        else if (hr_error == 1) lv_label_set_text(ring_hr_status, "Adjust the ring for better skin contact");
+        else if (hr_error == 2) lv_label_set_text(ring_hr_status, "No reading yet - keep your hand still");
+        else lv_label_set_text(ring_hr_status, "Ring records every 5 min, even while away");
+    }
+    ring_chart_render();
+    if (!enabled) {
+        lv_label_set_text(ring_details, "Ring Bluetooth is off");
+    } else if (!found) {
+        lv_label_set_text(ring_details, "Looking for COLMI R12...");
+    } else {
+        int age = updated ? (int)(time(NULL) - updated) : 0;
+        if (updated)
+            lv_label_set_text_fmt(ring_details, "%s\n%s\n%s  |  signal %d dBm\nUpdated %d sec ago",
+                                  name, address, charging ? "Charging" : "On battery", rssi, age < 0 ? 0 : age);
+        else
+            lv_label_set_text_fmt(ring_details, "%s\n%s\n%s  |  signal %d dBm",
+                                  name, address, charging ? "Charging" : "On battery", rssi);
+    }
+}
+
+static void ring_hr_clicked(lv_event_t *event)
+{
+    (void)event;
+    portENTER_CRITICAL(&ring_lock);
+    bool enabled = ring_enabled;
+    bool active = ring_hr_active;
+    bool connected = ring_connected;
+    portEXIT_CRITICAL(&ring_lock);
+    if (active) return;
+    if (!enabled) {
+        lv_label_set_text(ring_hr_status, "Turn on Ring Bluetooth to connect");
+        return;
+    }
+    if (!connected) {
+        lv_label_set_text(ring_hr_status, "Ring is disconnected");
+        return;
+    }
+    if (!ring_hr_begin()) {
+        lv_label_set_text(ring_hr_status, "Could not start measurement");
+        return;
+    }
+    ring_tick(NULL);
+}
+
+static void ring_toggle_clicked(lv_event_t *event)
+{
+    (void)event;
+    portENTER_CRITICAL(&ring_lock);
+    bool enabled = ring_enabled = !ring_enabled;
+    bool cancel = !enabled && ring_connecting;
+    bool disconnect = !enabled && ring_connected;
+    uint16_t connection = ring_conn_handle;
+    if (!enabled) {
+        ring_stopping = cancel || disconnect;
+        ring_found = false;
+        ring_hr_active = false;
+        ring_sync_active = false;
+        ring_sync_pending = false;
+    }
+    portEXIT_CRITICAL(&ring_lock);
+    if (cancel) {
+        int rc = ble_gap_conn_cancel();
+        if (rc) ESP_LOGW("ring", "Connection cancel failed: %d", rc);
+    }
+    if (disconnect) {
+        int rc = ble_gap_terminate(connection, BLE_ERR_REM_USER_CONN_TERM);
+        if (rc) ESP_LOGW("ring", "Disconnect request failed: %d", rc);
+    }
+    ble_scan();
+    ring_tick(NULL);
+}
+
+static void show_ring(void)
+{
+    clear_content();
+    lv_obj_t *title = lv_label_create(content);
+    lv_label_set_text(title, "COLMI R12 Ring");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+    ring_status = lv_label_create(content);
+    lv_obj_set_width(ring_status, 620);
+    lv_obj_set_style_text_align(ring_status, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_t *toggle = button(content, "Turn Ring Bluetooth on", ring_toggle_clicked);
+    ring_toggle_label = lv_obj_get_child(toggle, 0);
+    lv_obj_set_size(toggle, 520, 82);
+    lv_obj_t *card = lv_obj_create(content);
+    lv_obj_set_size(card, 620, 500);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(card, 20, 0);
+    ring_battery_label = lv_label_create(card);
+    lv_obj_set_style_text_font(ring_battery_label, &lv_font_montserrat_28, 0);
+    ring_hr_label = lv_label_create(card);
+    lv_label_set_text(ring_hr_label, "-- BPM");
+    lv_obj_set_style_text_font(ring_hr_label, &lv_font_montserrat_48, 0);
+    ring_hr_status = lv_label_create(card);
+    lv_obj_set_width(ring_hr_status, 560);
+    lv_obj_set_style_text_align(ring_hr_status, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_t *measure = button(card, "Measure now", ring_hr_clicked);
+    ring_hr_button_label = lv_obj_get_child(measure, 0);
+    lv_obj_set_size(measure, 520, 82);
+    ring_details = lv_label_create(card);
+    lv_obj_set_width(ring_details, 560);
+    lv_obj_set_style_text_align(ring_details, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_t *disclaimer = lv_label_create(card);
+    lv_label_set_text(disclaimer, "Wellness estimate - not a medical measurement");
+    lv_obj_t *chart_title = lv_label_create(content);
+    lv_label_set_text(chart_title, "Heart rate - last 5 hours");
+    ring_hr_chart = lv_chart_create(content);
+    lv_obj_set_size(ring_hr_chart, 620, 260);
+    lv_chart_set_type(ring_hr_chart, LV_CHART_TYPE_LINE);
+    lv_chart_set_point_count(ring_hr_chart, RING_HR_HISTORY_POINTS);
+    lv_chart_set_range(ring_hr_chart, LV_CHART_AXIS_PRIMARY_Y, 40, 200);
+    lv_chart_set_div_line_count(ring_hr_chart, 5, 6);
+    ring_hr_series = lv_chart_add_series(ring_hr_chart, lv_palette_main(LV_PALETTE_RED), LV_CHART_AXIS_PRIMARY_Y);
+    ring_tick(NULL);
+    ring_timer = lv_timer_create(ring_tick, 1000, NULL);
+}
+
+static void ring_clicked(lv_event_t *event)
+{
+    (void)event;
+    show_ring();
+}
+
+static void servo_update_labels(void)
+{
+    static const char *ranges[] = {"Range: Narrow", "Range: Medium", "Range: Wide"};
+    static const char *speeds[] = {"Speed: Slow", "Speed: Medium", "Speed: Fast"};
+    if (servo_range_label) lv_label_set_text(servo_range_label, ranges[servo_range_index]);
+    if (servo_speed_label) lv_label_set_text(servo_speed_label, speeds[servo_speed_index]);
+}
+
+static void servo_tick(lv_timer_t *timer)
+{
+    (void)timer;
+    TickType_t now = xTaskGetTickCount();
+    if (servo_running && (int32_t)(now - servo_deadline) >= 0) servo_stop();
+    if (servo_running) {
+        static const uint16_t ranges[] = {250, 375, 500};
+        static const uint8_t steps[] = {3, 7, 12};
+        if ((int32_t)(now - servo_next_target) >= 0) {
+            uint16_t width = ranges[servo_range_index] * 2;
+            servo_target_us = 1500 - ranges[servo_range_index] + esp_random() % (width + 1);
+            servo_next_target = now + pdMS_TO_TICKS(700 + esp_random() % 1000);
+        }
+        uint8_t step = steps[servo_speed_index];
+        if (servo_pulse_us < servo_target_us)
+            servo_set_pulse(servo_pulse_us + step > servo_target_us ? servo_target_us : servo_pulse_us + step);
+        else if (servo_pulse_us > servo_target_us)
+            servo_set_pulse(servo_pulse_us - step < servo_target_us ? servo_target_us : servo_pulse_us - step);
+    }
+    if (servo_position)
+        lv_label_set_text_fmt(servo_position, "%d deg", ((int)servo_pulse_us - 1000) * 180 / 1000);
+}
+
+static void servo_start_clicked(lv_event_t *event)
+{
+    (void)event;
+    if (servo_running) return;
+    servo_pulse_us = servo_target_us = 1500;
+    esp_err_t error = servo_start_pwm();
+    if (error != ESP_OK) {
+        lv_label_set_text_fmt(servo_status, "Could not start: %s", esp_err_to_name(error));
+        return;
+    }
+    gpio_set_level(TOY_LED_PIN, 1);
+    TickType_t now = xTaskGetTickCount();
+    servo_next_target = now;
+    servo_deadline = now + pdMS_TO_TICKS(SERVO_TIMEOUT_MS);
+    servo_running = true;
+    lv_label_set_text(servo_status, "Running - auto-stops in 5 minutes");
+}
+
+static void servo_stop_clicked(lv_event_t *event)
+{
+    (void)event;
+    servo_stop();
+}
+
+static void servo_range_clicked(lv_event_t *event)
+{
+    (void)event;
+    servo_range_index = (servo_range_index + 1) % 3;
+    servo_update_labels();
+}
+
+static void servo_speed_clicked(lv_event_t *event)
+{
+    (void)event;
+    servo_speed_index = (servo_speed_index + 1) % 3;
+    servo_update_labels();
+}
+
+static void show_servo(void)
+{
+    clear_content();
+    lv_obj_t *title = lv_label_create(content);
+    lv_label_set_text(title, "Servo Toy");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+    servo_status = lv_label_create(content);
+    lv_label_set_text(servo_status, "Stopped - outputs off");
+    servo_position = lv_label_create(content);
+    lv_label_set_text(servo_position, "90 deg");
+    lv_obj_set_style_text_font(servo_position, &lv_font_montserrat_48, 0);
+
+    lv_obj_t *controls = lv_obj_create(content);
+    lv_obj_set_size(controls, 620, 100);
+    lv_obj_remove_flag(controls, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(controls, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(controls, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *range = button(controls, "Range: Medium", servo_range_clicked);
+    servo_range_label = lv_obj_get_child(range, 0);
+    lv_obj_set_size(range, 270, 72);
+    lv_obj_t *speed = button(controls, "Speed: Medium", servo_speed_clicked);
+    servo_speed_label = lv_obj_get_child(speed, 0);
+    lv_obj_set_size(speed, 270, 72);
+
+    lv_obj_t *start = button(content, "START", servo_start_clicked);
+    lv_obj_set_size(start, 620, 110);
+    lv_obj_t *stop = button(content, "STOP", servo_stop_clicked);
+    lv_obj_set_size(stop, 620, 150);
+    lv_obj_set_style_bg_color(stop, lv_color_hex(0xC62828), 0);
+
+    lv_obj_t *wiring = lv_label_create(content);
+    lv_obj_set_width(wiring, 620);
+    lv_label_set_long_mode(wiring, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(wiring, "G53: servo signal\nG54: LED driver signal\nUse external 5V servo power and common ground. Use a resistor and transistor/MOSFET for the LED. Leaving this app turns both outputs off.");
+    servo_update_labels();
+    servo_timer = lv_timer_create(servo_tick, 50, NULL);
+}
+
+static void servo_clicked(lv_event_t *event)
+{
+    (void)event;
+    show_servo();
 }
 
 static const char *weather_condition(uint8_t code)
@@ -3486,7 +6977,7 @@ static void weather_render(void)
 
 static void weather_start(const char *location)
 {
-    if (weather_busy) return;
+    if (weather_busy || ota_busy) return;
     if (!wifi_connected) {
         if (weather_status) lv_label_set_text(weather_status, "Connect to Wi-Fi first");
         return;
@@ -3618,6 +7109,7 @@ static void weather_clicked(lv_event_t *event)
 
 static void screensaver_close(void)
 {
+    if (!display_set_power_state(DISPLAY_AWAKE)) return;
     if (!screensaver) return;
     lv_obj_delete_async(screensaver);
     screensaver = screensaver_panel = screensaver_time = screensaver_date = screensaver_weather = NULL;
@@ -3628,6 +7120,7 @@ static void screensaver_close(void)
 static void screensaver_touched(lv_event_t *event)
 {
     (void)event;
+    lv_display_trigger_activity(NULL);
     screensaver_close();
 }
 
@@ -3636,6 +7129,16 @@ static const char *screensaver_symbol(uint8_t code)
     if (code <= 1) return "\\ | /\n--O--\n/ | \\";
     if (code <= 3 || code == 45 || code == 48) return " .--.\n(___)\n     ";
     return " .--.\n(___)\n /// ";
+}
+
+static void screensaver_disable_child_hits(lv_obj_t *parent)
+{
+    uint32_t count = lv_obj_get_child_count(parent);
+    for (uint32_t i = 0; i < count; i++) {
+        lv_obj_t *child = lv_obj_get_child(parent, i);
+        lv_obj_remove_flag(child, LV_OBJ_FLAG_CLICKABLE);
+        screensaver_disable_child_hits(child);
+    }
 }
 
 static void screensaver_update(void)
@@ -3651,9 +7154,18 @@ static void screensaver_update(void)
     strftime(text, sizeof(text), "%A, %B %d, %Y", &local);
     lv_label_set_text(screensaver_date, text);
     if (weather_has_data) {
-        lv_label_set_text_fmt(screensaver_weather, "%d F  |  %s\n%s\nBAT %d%%",
-            weather_round(weather_data.temperature), weather_condition(weather_data.code),
-            weather_data.place, battery_percent);
+        govee_reading_t indoor;
+        char name[sizeof(govee_name)], address[sizeof(govee_address)];
+        int8_t rssi;
+        time_t updated;
+        if (govee_snapshot(&indoor, name, sizeof(name), address, sizeof(address), &rssi, &updated) && now - updated < 300)
+            lv_label_set_text_fmt(screensaver_weather, "%d F  |  %s\n%s\nIndoor %d F  %d%% RH  |  BAT %d%%",
+                weather_round(weather_data.temperature), weather_condition(weather_data.code), weather_data.place,
+                weather_round(indoor.temperature_c * 9.0f / 5.0f + 32.0f), weather_round(indoor.humidity), battery_percent);
+        else
+            lv_label_set_text_fmt(screensaver_weather, "%d F  |  %s\n%s\nBAT %d%%",
+                weather_round(weather_data.temperature), weather_condition(weather_data.code),
+                weather_data.place, battery_percent);
         for (size_t i = 0; i < SCREENSAVER_FORECAST_ITEMS; i++) {
             char hour[12];
             weather_short_time(weather_data.hourly[i].time, hour);
@@ -3745,7 +7257,9 @@ static void screensaver_show(void)
     }
     lv_obj_t *source = lv_label_create(screensaver_panel);
     lv_label_set_text(source, "Weather data: Open-Meteo  |  Touch to wake");
+    screensaver_disable_child_hits(screensaver);
     screensaver_update();
+    display_set_power_state(DISPLAY_DIMMED);
     if (wifi_connected && (!weather_has_data || time(NULL) - weather_fetched_at > 15 * 60))
         weather_start(weather_location);
 }
@@ -3754,53 +7268,134 @@ static void screensaver_tick(lv_timer_t *timer)
 {
     (void)timer;
     uint32_t inactive = lv_display_get_inactive_time(NULL);
+    bool inhibited = alarm_active || ota_busy || ota_done;
+    if (inhibited) {
+        if (screensaver || display_power_state != DISPLAY_AWAKE) {
+            lv_display_trigger_activity(NULL);
+            screensaver_close();
+        }
+        return;
+    }
     if (screensaver) {
-        if (inactive < 1000 || alarm_active) screensaver_close();
-        else screensaver_update();
-    } else if (!alarm_active && inactive >= SCREENSAVER_IDLE_MS) {
+        if (inactive < 1000) {
+            screensaver_close();
+        } else if (display_timeout_elapsed(inactive, screen_timeout_seconds, false)) {
+            if (display_power_state != DISPLAY_OFF) display_set_power_state(DISPLAY_OFF);
+        } else {
+            if (display_power_state != DISPLAY_DIMMED) display_set_power_state(DISPLAY_DIMMED);
+            screensaver_update();
+        }
+    } else if (inactive >= SCREENSAVER_IDLE_MS) {
         screensaver_show();
     }
+}
+
+static const app_definition_t launcher_apps[] = {
+    {LV_SYMBOL_DIRECTORY, "Files", 0x2196F3, files_clicked, NULL, 0, 0},
+    {LV_SYMBOL_EDIT, "Notes", 0x00A896, notes_clicked, NULL, 1, 0},
+    {LV_SYMBOL_PLUS, "Counter", 0xF59E0B, counter_clicked, NULL, 2, 0},
+    {LV_SYMBOL_CHARGE, "GPIO", 0xE65100, gpio_clicked, NULL, 3, 0},
+    {LV_SYMBOL_WIFI, "Settings", 0x0288D1, settings_clicked, settings_leave, 0, 1},
+    {LV_SYMBOL_ENVELOPE, "AI Chat", 0xE91E63, chat_clicked, NULL, 1, 1},
+    {LV_SYMBOL_EYE_OPEN, "Browser", 0x3F51B5, browser_clicked, NULL, 2, 1},
+    {LV_SYMBOL_FILE, "Ebooks", 0x8D6E63, ebooks_clicked, NULL, 3, 1},
+    {LV_SYMBOL_LOOP, "Clock", 0x009688, clock_clicked, NULL, 0, 2},
+    {LV_SYMBOL_SETTINGS, "System", 0x7C4DFF, system_clicked, NULL, 1, 2},
+    {LV_SYMBOL_BARS, "Scope", 0x00897B, scope_clicked, scope_release, 2, 2},
+    {LV_SYMBOL_REFRESH, "Weather", 0x039BE5, weather_clicked, NULL, 3, 2},
+    {LV_SYMBOL_BLUETOOTH, "Govee", 0x26A69A, govee_clicked, NULL, 0, 3},
+    {LV_SYMBOL_BLUETOOTH, "Ring", 0x7E57C2, ring_clicked, NULL, 1, 3},
+    {LV_SYMBOL_PLAY, "Servo Toy", 0xEF6C00, servo_clicked, NULL, 2, 3},
+    {LV_SYMBOL_CHARGE, "Cycling", 0x1565C0, cycling_clicked, NULL, 3, 3},
+    {LV_SYMBOL_LIST, "I2C Tool", 0x00838F, i2c_clicked, NULL, 0, 4},
+    {LV_SYMBOL_CALL, "Serial", 0x5E35B1, uart_clicked, NULL, 1, 4},
+    {LV_SYMBOL_SHUFFLE, "SPI Master", 0xAD4B00, spi_clicked, NULL, 2, 4},
+    {LV_SYMBOL_TINT, "Signal Gen", 0xC62828, signal_clicked, NULL, 3, 4},
+    {LV_SYMBOL_DOWNLOAD, "HTTP Tool", 0x00695C, http_clicked, http_tool_stop, 0, 5},
+    {LV_SYMBOL_WIFI, "MQTT", 0x455A64, mqtt_clicked, mqtt_tool_stop, 1, 5},
+    {LV_SYMBOL_BLUETOOTH, "BLE GATT", 0x6A4C93, ble_clicked, ble_tool_stop, 2, 5},
+    {LV_SYMBOL_DRIVE, "Ender 3", 0x1B5E20, ender3_clicked, ender3_tool_stop, 0, 6},
+};
+
+static void launcher_app_clicked(lv_event_t *event)
+{
+    const app_definition_t *app = lv_event_get_user_data(event);
+    app->enter(event);
+    active_app_leave = app->leave;
 }
 
 static void show_launcher(void)
 {
     static int32_t columns[] = {
-        LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
+        LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
     static int32_t rows[] = {
-        LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
+        215, 215, 215, 215, 215, 215, 215,
+        LV_GRID_TEMPLATE_LAST};
     clear_content();
     lv_obj_set_grid_dsc_array(content, columns, rows);
     lv_obj_set_style_pad_row(content, 12, 0);
     lv_obj_set_style_pad_column(content, 12, 0);
-    app_icon(content, LV_SYMBOL_DIRECTORY, "Files", 0x2196F3, files_clicked, 0, 0);
-    app_icon(content, LV_SYMBOL_EDIT, "Notes", 0x00A896, notes_clicked, 1, 0);
-    app_icon(content, LV_SYMBOL_PLUS, "Counter", 0xF59E0B, counter_clicked, 2, 0);
-    app_icon(content, LV_SYMBOL_CHARGE, "GPIO", 0xE65100, gpio_clicked, 0, 1);
-    app_icon(content, LV_SYMBOL_WIFI, "Settings", 0x0288D1, settings_clicked, 1, 1);
-    app_icon(content, LV_SYMBOL_ENVELOPE, "AI Chat", 0xE91E63, chat_clicked, 2, 1);
-    app_icon(content, LV_SYMBOL_EYE_OPEN, "Browser", 0x3F51B5, browser_clicked, 0, 2);
-    app_icon(content, LV_SYMBOL_FILE, "Ebooks", 0x8D6E63, ebooks_clicked, 1, 2);
-    app_icon(content, LV_SYMBOL_LOOP, "Clock", 0x009688, clock_clicked, 2, 2);
-    app_icon(content, LV_SYMBOL_SETTINGS, "System", 0x7C4DFF, system_clicked, 0, 3);
-    app_icon(content, LV_SYMBOL_BARS, "Scope", 0x00897B, scope_clicked, 1, 3);
-    app_icon(content, LV_SYMBOL_REFRESH, "Weather", 0x039BE5, weather_clicked, 2, 3);
+    for (size_t i = 0; i < sizeof(launcher_apps) / sizeof(launcher_apps[0]); i++) {
+        const app_definition_t *app = &launcher_apps[i];
+        app_icon(content, app->symbol, app->name, app->color, launcher_app_clicked,
+                 (void *)app, app->column, app->row);
+    }
 }
 
-static void confirm_running_ota(void)
+static void validate_running_ota(void)
 {
     const esp_partition_t *running = esp_ota_get_running_partition();
     esp_ota_img_states_t state;
-    if (esp_ota_get_state_partition(running, &state) == ESP_OK && state == ESP_OTA_IMG_PENDING_VERIFY) {
-        ESP_ERROR_CHECK(esp_ota_mark_app_valid_cancel_rollback());
-        ESP_LOGI("tab5-os", "OTA image validated");
+    if (esp_ota_get_state_partition(running, &state) != ESP_OK || state != ESP_OTA_IMG_PENDING_VERIFY) return;
+    if (nvs_init_error != ESP_OK) {
+        ESP_LOGE("tab5-os", "OTA image not validated because NVS failed: %s", esp_err_to_name(nvs_init_error));
+        return;
     }
+    if (!internal_ready) {
+        ESP_LOGE("tab5-os", "OTA image not validated because internal storage failed: %s",
+                 esp_err_to_name(storage_init_error));
+        return;
+    }
+    esp_err_t error = esp_ota_mark_app_valid_cancel_rollback();
+    if (error == ESP_OK) {
+        char result[64];
+        snprintf(result, sizeof(result), "Installed %s", esp_app_get_description()->version);
+        ota_record_result(result);
+        ESP_LOGI("tab5-os", "OTA image validated after health window");
+    }
+    else ESP_LOGE("tab5-os", "OTA validation failed: %s", esp_err_to_name(error));
+}
+
+static void confirm_running_ota(lv_timer_t *timer)
+{
+    lv_timer_delete(timer);
+    ota_health_window_elapsed = true;
+    validate_running_ota();
 }
 
 void app_main(void)
 {
     scope_self_test();
+    i2c_self_test();
     alarm_self_test();
     weather_self_test();
+    browser_self_test();
+    govee_self_test();
+    sd_self_test();
+    ring_self_test();
+    kickr_self_test();
+    servo_self_test();
+    system_self_test();
+    display_self_test();
+    uart_tool_self_test();
+    ender3_tool_self_test();
+    spi_tool_self_test();
+    signal_tool_self_test();
+    network_tool_self_test();
+    http_tool_self_test();
+    mqtt_tool_self_test();
+    ble_tool_self_test();
+    ota_manifest_self_test();
     ESP_LOGI("tab5-os", "Starting Tab5 OS");
     ESP_ERROR_CHECK(bsp_i2c_init());
     bsp_io_expander_pi4ioe_init(bsp_i2c_get_handle());
@@ -3811,7 +7406,15 @@ void app_main(void)
     clock_init(bsp_i2c_get_handle());
     vTaskDelay(pdMS_TO_TICKS(250));
 
+    lv_display_t *display = bsp_display_start();
+    if (!display) {
+        ESP_LOGE("tab5-os", "Display initialization failed");
+        return;
+    }
     wifi_ready = start_wifi();
+    load_display_settings();
+    load_scope_calibration();
+    ota_load_result();
     load_alarms();
     load_weather_location();
     load_chat_config();
@@ -3819,7 +7422,6 @@ void app_main(void)
     internal_ready = mount_internal();
     sd_ready = bsp_sdcard_init(SD_PATH, 5) == ESP_OK;
 
-    lv_display_t *display = bsp_display_start();
     bsp_display_lock(0);
 
     lv_obj_t *screen = lv_screen_active();
@@ -3862,10 +7464,19 @@ void app_main(void)
     lv_obj_set_style_pad_row(content, 24, 0);
     show_launcher();
     start_remote_desktop(display);
+    ring_hr_queue_storage = heap_caps_malloc(320 * sizeof(ring_hr_sample_t),
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (ring_hr_queue_storage)
+        ring_hr_samples = xQueueCreateStatic(320, sizeof(ring_hr_sample_t), ring_hr_queue_storage,
+                                             &ring_hr_queue_control);
+    if (!ring_hr_samples) ESP_LOGE("ring", "Could not create heart-rate history queue");
+    if (wifi_ready) govee_start();
+    lv_timer_create(ring_health_tick, 1000, NULL);
+    lv_timer_create(cycling_tick, 1000, NULL);
+    lv_timer_create(confirm_running_ota, OTA_HEALTH_WINDOW_MS, NULL);
 
     bsp_display_unlock();
-    bsp_display_backlight_on();
-    confirm_running_ota();
+    display_set_power_state(DISPLAY_AWAKE);
     mkdir(SD_PATH "/BOOKS", 0775);
     ebook_start_default_downloads();
 }

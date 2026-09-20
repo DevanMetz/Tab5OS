@@ -26,6 +26,10 @@ For faster Windows iteration, put the ESP-IDF directory in `.idf-path`, then use
 
 Use `-Full` after bootloader or partition-table changes. Normal source edits retain the build tree, use project-local ccache with four jobs, and flash only the app partition.
 
+See [Install and recovery](docs/install-recovery.md) before a clean erase or when recovering a device that no longer boots. A clean factory recovery erases credentials, settings, both OTA slots, and internal SPIFFS data.
+
+Generated note and telemetry files follow the documented [SD-card paths and CSV conventions](docs/data-formats.md).
+
 ## USB remote desktop
 
 With Tab5 OS running over USB:
@@ -42,7 +46,13 @@ The checked-in defaults include M5Stack's required QIO, 200 MHz PSRAM, and L2-ca
 
 ## OTA releases
 
-The System app can install the latest tagged GitHub release over Wi-Fi. Push a `v*` tag to build and publish `tab5_os.bin` automatically. The first locally provisioned build migrates the revocable chat relay token into NVS, so public release binaries contain no device credential and OTA updates preserve chat configuration.
+The System app installs the latest stable tagged GitHub release over Wi-Fi. Pushes and pull requests run verification; a `v*` tag publishes app-only and factory/recovery images, a versioned OTA manifest, checksums, license/notices, and pinned dependencies from the same build. The updater verifies compatibility, version, exact size, embedded app version, and SHA-256 before activation. Tag a stable release only after completing the [hardware smoke checklist](docs/hardware-smoke-checklist.md). OTA images remain rollback candidates until the UI has stayed healthy for 30 seconds, and updates do not silently erase NVS settings. See the [OTA manifest contract](docs/ota-manifest.md) and [compatibility contract](docs/compatibility.md).
+
+External GPIO and I2C signals are 3.3 V only. External 5 V is off at boot and Tab5 OS does not currently expose a control to enable it. See [pin and interface safety](docs/pin-safety.md) before connecting external hardware.
+
+See [ROADMAP.md](ROADMAP.md) for the long-term product plan and current execution checkpoint.
+
+Architecture, troubleshooting, privacy, contribution, security-reporting, compatibility, and hardware-test contracts live in `docs/`, [CONTRIBUTING](CONTRIBUTING.md), and [SECURITY](SECURITY.md).
 
 ## Upstream
 
@@ -57,8 +67,20 @@ The small board-support components in `components/` come from M5Stack's Apache-2
 - [x] Notes, counter, and system apps
 - [x] Internet-synced RTC clock with persistent daily alarms and snooze
 - [x] Milwaukee weather plus a static time/date screensaver with hourly and daily forecasts
-- [x] GPIO control and eight-channel ADC oscilloscope
-- [x] Wi-Fi settings
+- [x] GPIO control and eight-channel ADC oscilloscope with frequency/duty measurement, persistent calibration, and SD capture
+- [x] External Grove I2C scan, 100/400 kHz byte read/watch, gated write, and SD capture on G53/G54
+- [x] UART1 and onboard RS-485 terminal with line settings, ASCII/hex I/O, send history, and SD capture
+- [x] Bounded SPI2 master console with selectable mode/clock and explicit M5-Bus chip-select
+- [x] G6 PWM and bounded single-pulse generator with isolated LEDC resources and automatic timeout
+- [x] User-controlled Govee H5075 monitoring and COLMI R12 health tools
+- [x] User-controlled KICKR cycling telemetry with SD ride logging
+- [x] Timed Servo Toy control with isolated PWM resources and safe output release
+- [x] Persistent brightness, dimmed idle screen, and configurable timed screen-off
+- [x] Recoverable notes plus durable ride, summary, ebook, and heart-rate storage paths
+- [x] Wi-Fi settings with channel/RSSI scan, address details, DNS lookup, four-probe ping, and mDNS service discovery
+- [x] Bounded HTTP request console with verified HTTPS, gated cleartext, capped previews, and opt-in redacted SD metadata logs
+- [x] MQTT 3.1.1 publish/subscribe console with verified TLS, explicit device-local TLS profiles, QoS/retain visibility, bounded history, and opt-in payload-free SD metadata logs
+- [x] Opt-in generic BLE advertisement scanner and GATT explorer with explicit connections, bounded discovery, reads, notifications, gated raw writes, and atomic evidence snapshots
 - [x] AI chat client through an authenticated HTTPS relay
 - [x] Start/stop microphone transcription with a live waveform
 - [x] Reader-mode web browser with HTTPS and clickable links
@@ -69,4 +91,4 @@ The small board-support components in `components/` come from M5Stack's Apache-2
 
 ## License
 
-Apache-2.0
+Apache-2.0. See [Third-party notices](THIRD_PARTY_NOTICES.md).

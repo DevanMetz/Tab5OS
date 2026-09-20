@@ -1,28 +1,122 @@
-name: Release firmware
+name: Verify and release
 
 on:
   push:
-    tags: ["v*"]
+  pull_request:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check whitespace
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if git cat-file -e "$BASE_SHA^{commit}" 2>/dev/null; then
+            git diff --check "$BASE_SHA" "$GITHUB_SHA"
+          else
+            git diff-tree --check --root --no-commit-id -r "$GITHUB_SHA"
+          fi
+      - name: Test relay
+        run: node --test relay/worker.test.mjs
+      - name: Test storage helper
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/storage_io.c tests/storage_io_test.c -o "$RUNNER_TEMP/storage_io_test"
+          "$RUNNER_TEMP/storage_io_test"
+      - name: Check Python tools
+        run: |
+          python3 -m compileall -q tools
+          python3 tools/remote_desktop.py --self-test
+
+  firmware:
     runs-on: ubuntu-latest
     container: espressif/idf:v5.4.2
     steps:
       - uses: actions/checkout@v4
+      - name: Clean ESP-IDF build
+        shell: bash
+        env:
+          MINIMUM_PREDECESSOR: v0.5.1
+        run: |
+          set -o pipefail
+          . "$IDF_PATH/export.sh"
+          REF_VERSION="${GITHUB_REF_NAME//\//-}"
+          PROJECT_VER="${REF_VERSION:0:22}-${GITHUB_SHA:0:8}"
+          idf.py set-target esp32p4
+          idf.py -D PROJECT_VER="$PROJECT_VER" build
+          idf.py size | tee build/image-size.txt
+          {
+            echo '### Firmware size'
+            echo '```text'
+            cat build/image-size.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            if ! [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::Release tags must use vMAJOR.MINOR.PATCH with an optional prerelease suffix"
+              exit 1
+            fi
+            IMAGE_SIZE="$(stat -c %s build/tab5_os.bin)"
+            IMAGE_SHA256="$(sha256sum build/tab5_os.bin | cut -d' ' -f1)"
+            RELEASE_CHANNEL=stable
+            [[ "$GITHUB_REF_NAME" == *-* ]] && RELEASE_CHANNEL=beta
+            PROJECT_VER="$PROJECT_VER" IMAGE_SIZE="$IMAGE_SIZE" IMAGE_SHA256="$IMAGE_SHA256" \
+              RELEASE_CHANNEL="$RELEASE_CHANNEL" \
+              python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          manifest = {
+              "schema": 1,
+              "version": os.environ["PROJECT_VER"],
+              "hardware": "m5stack-tab5",
+              "size": int(os.environ["IMAGE_SIZE"]),
+              "sha256": os.environ["IMAGE_SHA256"],
+              "url": f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/download/{tag}/tab5_os.bin",
+              "channel": os.environ["RELEASE_CHANNEL"],
+              "minimum_predecessor": os.environ["MINIMUM_PREDECESSOR"],
+          }
+          Path("build/tab5_os.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="ascii")
+          PY
+            idf.py -D PROJECT_VER="$PROJECT_VER" merge-bin -o tab5_os_factory.bin -f raw --fill-flash-size 16MB
+            cp LICENSE THIRD_PARTY_NOTICES.md dependencies.lock build/
+            cp managed_components/lvgl__lvgl/LICENCE.txt build/LVGL_LICENSE.txt
+            cp managed_components/lvgl__lvgl/COPYRIGHTS.md build/LVGL_COPYRIGHTS.md
+            (cd build && sha256sum tab5_os.bin tab5_os_factory.bin tab5_os.json LICENSE \
+              THIRD_PARTY_NOTICES.md dependencies.lock LVGL_LICENSE.txt LVGL_COPYRIGHTS.md > SHA256SUMS)
+          fi
       - shell: bash
-        run: . "$IDF_PATH/export.sh" && idf.py set-target esp32p4 && idf.py -D PROJECT_VER="$GITHUB_REF_NAME" build
+        run: test -s build/tab5_os.bin
       - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/v')
         with:
           name: firmware
-          path: build/tab5_os.bin
+          path: |
+            build/tab5_os.bin
+            build/tab5_os_factory.bin
+            build/tab5_os.json
+            build/SHA256SUMS
+            build/LICENSE
+            build/THIRD_PARTY_NOTICES.md
+            build/dependencies.lock
+            build/LVGL_LICENSE.txt
+            build/LVGL_COPYRIGHTS.md
+          if-no-files-found: error
 
   release:
-    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [checks, firmware]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -31,4 +125,9 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" firmware/tab5_os.bin --repo "$GITHUB_REPOSITORY" --generate-notes --title "Tab5 OS $GITHUB_REF_NAME"
+        shell: bash
+        run: |
+          options=()
+          [[ "$GITHUB_REF_NAME" == *-* ]] && options+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" firmware/* --repo "$GITHUB_REPOSITORY" \
+            --generate-notes --title "Tab5 OS $GITHUB_REF_NAME" "${options[@]}"

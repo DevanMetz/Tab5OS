@@ -141,7 +141,10 @@ esp_err_t bsp_ext_i2c_init(void)
         .sda_io_num                   = BSP_EXT_I2C_SDA,
         .flags.enable_internal_pullup = true,
     };
-    i2c_new_master_bus(&i2c_mst_config, &ext_i2c_bus_handle);
+    esp_err_t error = i2c_new_master_bus(&i2c_mst_config, &ext_i2c_bus_handle);
+    if (error != ESP_OK) {
+        return error;
+    }
 
     ext_i2c_initialized = true;
 
@@ -150,8 +153,23 @@ esp_err_t bsp_ext_i2c_init(void)
 
 esp_err_t bsp_ext_i2c_deinit(void)
 {
-    ext_i2c_initialized = false;
-    return i2c_del_master_bus(ext_i2c_bus_handle);
+    if (!ext_i2c_initialized) {
+        return ESP_OK;
+    }
+    esp_err_t error = i2c_del_master_bus(ext_i2c_bus_handle);
+    if (error == ESP_OK) {
+        ext_i2c_bus_handle = NULL;
+        ext_i2c_initialized = false;
+        const gpio_config_t released = {
+            .pin_bit_mask = (1ULL << BSP_EXT_I2C_SDA) | (1ULL << BSP_EXT_I2C_SCL),
+            .mode = GPIO_MODE_DISABLE,
+            .pull_up_en = GPIO_PULLUP_DISABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        error = gpio_config(&released);
+    }
+    return error;
 }
 
 i2c_master_bus_handle_t bsp_ext_i2c_get_handle(void)
@@ -261,6 +279,10 @@ void bsp_io_expander_pi4ioe_init(i2c_master_bus_handle_t bus_handle)
     i2c_master_transmit(i2c_dev_handle_pi4ioe1, write_buf, 2, I2C_MASTER_TIMEOUT_MS);
     write_buf[0] = PI4IO_REG_CHIP_RESET;
     i2c_master_transmit_receive(i2c_dev_handle_pi4ioe1, write_buf, 1, read_buf, 1, I2C_MASTER_TIMEOUT_MS);
+    /* Preload outputs while every pin is still an input, so EXT5V_EN (P2) never pulses high. */
+    write_buf[0] = PI4IO_REG_OUT_SET;
+    write_buf[1] = 0b01110010;
+    i2c_master_transmit(i2c_dev_handle_pi4ioe1, write_buf, 2, I2C_MASTER_TIMEOUT_MS);
     write_buf[0] = PI4IO_REG_IO_DIR;
     write_buf[1] = 0b01111111;
     i2c_master_transmit(i2c_dev_handle_pi4ioe1, write_buf, 2, I2C_MASTER_TIMEOUT_MS);  // 0: input 1: output
@@ -277,11 +299,6 @@ void bsp_io_expander_pi4ioe_init(i2c_master_bus_handle_t bus_handle)
 
     i2c_master_transmit(i2c_dev_handle_pi4ioe1, write_buf, 2,
                         I2C_MASTER_TIMEOUT_MS);  // P7 中断使能 0 enable, 1 disable
-    /* Output Port Register P1(SPK_EN), P2(EXT5V_EN), P4(LCD_RST), P5(TP_RST), P6(CAM)RST 输出高电平 */
-    write_buf[0] = PI4IO_REG_OUT_SET;
-    write_buf[1] = 0b01110110;
-    i2c_master_transmit(i2c_dev_handle_pi4ioe1, write_buf, 2, I2C_MASTER_TIMEOUT_MS);
-
     /* */
     i2c_device_config_t dev_cfg2 = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
@@ -1695,7 +1712,7 @@ lv_display_t* bsp_display_start(void)
                                  .buff_dma = true,
 #endif
                                  .buff_spiram = false,
-                                 .sw_rotate   = true,
+                                 .sw_rotate   = false,
                              }};
     return bsp_display_start_with_config(&cfg);
 }
