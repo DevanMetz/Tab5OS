@@ -2,6 +2,16 @@
 
 A small, open operating environment for the M5Stack Tab5. It boots an LVGL launcher with a file browser and basic apps.
 
+## Project map
+
+```mermaid
+flowchart LR
+    device["M5Stack Tab5<br/>ESP32-P4"] --> os["Tab5 OS<br/>LVGL launcher"]
+    os --> apps["Files, notes, clock<br/>and reader apps"]
+    os --> tools["GPIO, I2C, UART<br/>and BLE tools"]
+    os --> network["Wi-Fi tools, web<br/>and OTA updates"]
+```
+
 ## Hardware
 
 - M5Stack Tab5 (ESP32-P4)
