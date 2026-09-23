@@ -2,6 +2,8 @@
 
 Contributions are welcome, especially reproducible hardware results, safety fixes, focused protocol tools, documentation, and tests.
 
+Use the [bug or feature templates](https://github.com/DevanMetz/Tab5OS/issues/new/choose) for a proposed change or a reproducible problem. For a substantial new tool, discuss its scope before a pull request. Participation follows the [Code of conduct](CODE_OF_CONDUCT.md); report vulnerabilities privately through [SECURITY](SECURITY.md).
+
 ## Before changing code
 
 1. Read [ROADMAP](ROADMAP.md), [Architecture](docs/architecture.md), [Pin safety](docs/pin-safety.md), and the applicable hardware checklist section.
@@ -27,6 +29,10 @@ Run the checks relevant to the change:
 node --test relay\worker.test.mjs
 clang -std=c11 -Wall -Wextra -Werror -pedantic -I main main\storage_io.c tests\storage_io_test.c -o storage_io_test.exe
 .\storage_io_test.exe
+clang -std=c11 -Wall -Wextra -Werror -pedantic -I main main\capture_data.c tests\capture_data_test.c -o capture_data_test.exe
+.\capture_data_test.exe
+clang -std=c11 -Wall -Wextra -Werror -pedantic -I main main\serial_log_data.c tests\serial_log_data_test.c -o serial_log_data_test.exe
+.\serial_log_data_test.exe
 python -m compileall -q tools
 python tools\remote_desktop.py --self-test
 git diff --check
@@ -37,6 +43,6 @@ Hardware changes also need the exact panel, firmware commit, wiring, power sourc
 
 ## Pull requests
 
-Keep the change focused and explain the user outcome, safety/privacy impact, tests run, hardware evidence, remaining gates, and release/data-format compatibility. Do not mix reverse-engineering artifacts, generated build output, formatting churn, or unrelated refactors. Stable tags are created only after CI and the applicable two-panel hardware gates pass.
+Keep the change focused and explain the user outcome, safety/privacy impact, tests run, hardware evidence, remaining gates, and release/data-format compatibility. Do not mix reverse-engineering artifacts, generated build output, formatting churn, or unrelated refactors. Before a stable tag, pass CI, run the applicable checks on both panel families, and state any remaining gates in the release notes and hardware checklist. The v0.6.0 field beta has open gates documented there.
 
 For vulnerabilities or exposed secrets, follow [SECURITY](SECURITY.md) instead of opening a public issue.

@@ -13,9 +13,11 @@ Tab5 OS targets the 16 MiB M5Stack Tab5 with ESP32-P4 and the onboard ESP32-C6 h
 | OTA metadata | `0xf000` | `0x2000` | Managed by ESP-IDF. |
 | OTA app 0 | `0x20000` | 6 MiB | Current app-only USB offset. |
 | OTA app 1 | `0x620000` | 6 MiB | Alternate rollback slot. |
-| Internal SPIFFS `storage` | `0xc20000` | `0x3e0000` | Preserved by app-only and ordinary full source flashes. |
+| Internal SPIFFS `storage` | `0xc20000` | `0x3e0000` | Preserved by app-only and full source flashes when the layout is unchanged. |
 
 An app-only image is compatible only when the installed partition table, flash mode, bootloader expectations, and application offset already match. A 16 MiB factory image contains bootloader, partition table, initial OTA data, and app at those offsets and fills every other byte with erased `0xff`; writing it at offset zero deliberately removes every prior flash setting and internal file.
+
+Some earlier tablets have a factory app and 4 MiB OTA slots, with internal `storage` beginning at `0xc40000`. One ST7121 tablet installed v0.6.0 by OTA on that legacy table, but its older bootloader did not advance the image from `new` to `validated` until the v0.6.0 bootloader region was installed. This observation does not make the layouts interchangeable. Use the [partition-table check and migration guidance](install-recovery.md#check-the-installed-partition-table) before a USB flash; changing the layout does not migrate files or settings automatically.
 
 ## NVS and settings
 

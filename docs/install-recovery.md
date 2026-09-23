@@ -11,6 +11,19 @@ Tab5 OS uses ESP-IDF 5.4.2 and an ESP32-P4 target. Tagged releases contain an ap
 
 Replace `COM7` below with the port shown by Windows Device Manager.
 
+## Check the installed partition table
+
+Read the table before an app-only update if the tablet's flash history is unknown. The read is non-destructive:
+
+```powershell
+python -m esptool --chip esp32p4 -p COM7 read-flash 0x8000 0x1000 .\partition-table.bin
+python (Join-Path $env:IDF_PATH 'components/partition_table/gen_esp32part.py') .\partition-table.bin
+```
+
+Compare the result with the [current flash layout](compatibility.md#hardware-and-flash-layout). Some earlier tablets have a `factory` app at `0x20000`, 4 MiB OTA slots at `0x420000` and `0x820000`, and `storage` at `0xc40000`. The current layout has no factory app, uses 6 MiB OTA slots, and places `storage` at `0xc20000`.
+
+Do not use the app-only wrapper to migrate a legacy layout: writing `0x20000` updates its factory slot, which may not be the selected boot slot. A complete source flash changes the partition table but does not relocate old internal SPIFFS files. If those files matter, retain the old layout until you have a verified backup and migration plan. The factory image installs the current layout by erasing the entire internal flash.
+
 ## App-only update
 
 Use this only when the installed device already has Tab5 OS's current partition table. It preserves NVS settings and internal storage.
@@ -23,7 +36,7 @@ The wrapper builds the project and writes `build\tab5_os.bin` at the current app
 
 ## Complete source flash
 
-This writes the bootloader, partition table, initial OTA metadata, and application. It does not deliberately erase NVS or internal storage.
+This writes the bootloader, partition table, initial OTA metadata, and application. With the same partition layout, it does not deliberately erase NVS or internal storage. A changed layout can make prior internal data inaccessible; check the installed table first.
 
 ```powershell
 idf.py set-target esp32p4

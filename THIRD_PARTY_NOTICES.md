@@ -32,4 +32,6 @@ Source and license locations:
 - LVGL: <https://github.com/lvgl/lvgl>
 - M5Stack Tab5 user demo/BSP source: <https://github.com/m5stack/M5Tab5-UserDemo>
 
+The upstream M5Tab5-UserDemo repository has an MIT root license. Its `platforms/tab5/components/m5stack_tab5/` component has its own Apache-2.0 license and file headers; the vendored component retains that license in `components/m5stack_tab5/LICENSE`.
+
 This notice is informational and does not replace any license text shipped with the corresponding source or release.

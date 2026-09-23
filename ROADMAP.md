@@ -1,8 +1,8 @@
 # Tab5 OS long-term development plan
 
-Updated: 2026-08-10
+Updated: 2026-09-23
 
-This roadmap assumes one primary maintainer with occasional testers. Target windows express order and intent, not promises; a phase ships only when its exit gate passes on hardware.
+This roadmap assumes one primary maintainer with occasional testers. Target windows express order and intent, not promises. The v0.6.0 field beta was released with open hardware gates; a phase is complete only when its exit gate passes on hardware.
 
 ## Mission
 
@@ -32,11 +32,11 @@ Tab5 OS should complement calibrated bench instruments, not imitate them. Versio
 
 ## Starting point
 
-The released baseline is `v0.5.1`. It already boots both known display families and provides storage, notes, GPIO control, an ADC scope, Wi-Fi, clock and alarms, weather, chat and transcription, a reader browser, ebooks, USB remote desktop, and rollback OTA.
+The latest public release is [`v0.6.0`](https://github.com/DevanMetz/Tab5OS/releases/tag/v0.6.0). It includes the wired, BLE, Wi-Fi, capture, and Servo tools described below. The release notes and [hardware smoke checklist](docs/hardware-smoke-checklist.md) identify what passed on ST7121 and what remains unverified, including the ILI9881C family and deliberate OTA rollback.
 
-The current worktree is materially ahead of that release: it adds external I2C scanning, register read/watch/write, and capture, Govee and COLMI BLE support, cycling telemetry, and servo control. Those features are experimental until the v0.6 gate below passes.
+`main` is ahead of that tag with a UART/RS-485 log viewer in Files. It has been exercised with a published UART TX log on ST7121; RX, RS-485 traffic, and the other display family remain open.
 
-### Execution checkpoint: 2026-08-09
+### Execution checkpoint: 2026-09-23
 
 Phase 0 software work is implemented and builds cleanly:
 
@@ -54,7 +54,7 @@ Phase 0 software work is implemented and builds cleanly:
 - [x] Forgetting a saved Wi-Fi network now requires an unchanged second tap within five seconds; the control is disabled when no profile is saved.
 - [ ] Run the hardware matrix on both display/touch families, including OTA rollback and missing-peripheral cases.
 - [ ] Repeat the transition/pin test on ILI9881C hardware and complete the eight-hour soak.
-- [ ] Review and land the work as separate commits, then tag v0.6 only after every hardware gate passes.
+- [x] Land the software as reviewable commits and publish v0.6.0 with its tested scope and outstanding hardware gates stated in the release notes.
 
 Phase 1 software progress is also underway:
 
@@ -113,7 +113,7 @@ Phase 4 release hardening has started in software:
 - [x] Tag CI also publishes a native ESP-IDF 16 MiB merged factory/recovery image, Apache and LVGL license/notice files, and the pinned dependency lock. App-only, complete-source, and destructive factory paths plus the current partition/NVS/filesystem migration contract are documented.
 - [x] Architecture, troubleshooting, privacy, contribution, security-reporting/support, conduct, compatibility, installation/recovery, data-format, and pin-safety contracts are now repository-owned documentation.
 - [ ] Add independent release signing and verify the signature with an embedded public key; HTTPS/GitHub control remains the trust root until then.
-- [ ] Exercise valid, malformed, incompatible, downgrade, truncated, wrong-size, wrong-version, and wrong-hash manifests plus rollback on hardware before enabling the manifest path in a stable release.
+- [ ] Exercise valid, malformed, incompatible, downgrade, truncated, wrong-size, wrong-version, and wrong-hash manifests plus rollback on hardware before calling the manifest path hardware validated.
 - [ ] Verify the released factory image from checksums on a clean Windows machine, recover a fully erased Tab5, and confirm both display families plus deliberate NVS/SPIFFS erasure before calling distribution complete.
 
 Current strengths:
@@ -139,7 +139,7 @@ Current constraints and risks:
 
 | Target window | Release | Outcome |
 | --- | --- | --- |
-| Aug-Sep 2026 | v0.6 | Turn the current worktree into a safe, testable field beta |
+| Aug-Sep 2026 | v0.6 | Field beta released; hardware exit gates remain open |
 | Oct-Dec 2026 | v0.7 | Establish reliability, CI, recovery, and shared capture conventions |
 | Jan-Apr 2027 | v0.8 | Deliver the core wired electronics bench |
 | May-Aug 2027 | v0.9 | Add generic IoT commissioning and complete the IDF migration |
@@ -332,7 +332,7 @@ Work enters a milestone only if it materially improves one of the six core jobs:
 1. Run the checked smoke matrix on both display/touch families, including backlight/Servo and every G53/G54 transition.
 2. Complete the eight-hour mixed-use soak; the corrected ST7121 100-transition resource/heap test passes, while ILI9881C remains part of the two-panel matrix.
 3. Exercise ten OTA install/rollback cycles while preserving NVS and SD data.
-4. Land the current work as reviewable commits and publish v0.6 only after those gates pass.
+4. Close the v0.6.0 hardware gaps and document migration from the legacy factory/4 MiB OTA layout.
 5. Validate Phase 1 atomic writes, display wake, and SD full/removal behavior on hardware.
 6. Migrate each legacy app's cleanup into the static lifecycle table only when that app is materially changed.
 7. Hardware-validate the completed I2C inspect/control/capture workflow, including retained `.TMP` recovery.

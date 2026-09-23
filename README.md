@@ -1,6 +1,10 @@
 # Tab5 OS
 
-A small, open operating environment for the M5Stack Tab5. It boots an LVGL launcher with a file browser and basic apps.
+[![Verify and release](https://github.com/DevanMetz/Tab5OS/actions/workflows/release.yml/badge.svg)](https://github.com/DevanMetz/Tab5OS/actions/workflows/release.yml)
+
+Tab5 OS is an open ESP-IDF/LVGL environment for the M5Stack Tab5. It combines a file browser with wired, BLE, and Wi-Fi tools for inspecting devices and saving field captures.
+
+As of 2026-09-23, the latest published release is [v0.6.0](https://github.com/DevanMetz/Tab5OS/releases/tag/v0.6.0). `main` also contains a UART/RS-485 log viewer that has not been tagged. This is a field beta: the ST7121 tablet has passed the checks recorded in the [hardware smoke checklist](docs/hardware-smoke-checklist.md), while the other display family, electrical measurements, and several recovery/fault tests remain open.
 
 ## Project map
 
@@ -16,6 +20,12 @@ flowchart LR
 
 - M5Stack Tab5 (ESP32-P4)
 - Original ILI9881C/GT911 and newer ST7123/ST7121 display variants through M5Stack's factory BSP
+
+## Get started
+
+- For an existing tablet, read [Install and recovery](docs/install-recovery.md) and check its partition layout before choosing an app-only, source, or factory flash. Some earlier tablets have a different layout.
+- For a blank tablet or a deliberate clean recovery, download the factory image and `SHA256SUMS` from the [latest release](https://github.com/DevanMetz/Tab5OS/releases/latest), verify the hash, and follow the factory-image instructions. That path erases internal flash settings and files.
+- After boot, use System to confirm the firmware version, storage, Wi-Fi, and OTA state. Saved file paths and CSV formats are in [Data formats](docs/data-formats.md).
 
 ## Toolchain
 
@@ -34,7 +44,7 @@ For faster Windows iteration, put the ESP-IDF directory in `.idf-path`, then use
 .\tools\flash_idf.ps1 -Port COM7
 ```
 
-Use `-Full` after bootloader or partition-table changes. Normal source edits retain the build tree, use project-local ccache with four jobs, and flash only the app partition.
+Use `-Full` after bootloader or partition-table changes, after reviewing the layout and data-migration guidance in [Install and recovery](docs/install-recovery.md). Normal source edits retain the build tree, use project-local ccache with four jobs, and flash only the app partition.
 
 See [Install and recovery](docs/install-recovery.md) before a clean erase or when recovering a device that no longer boots. A clean factory recovery erases credentials, settings, both OTA slots, and internal SPIFFS data.
 
@@ -56,7 +66,9 @@ The checked-in defaults include M5Stack's required QIO, 200 MHz PSRAM, and L2-ca
 
 ## OTA releases
 
-The System app installs the latest stable tagged GitHub release over Wi-Fi. Pushes and pull requests run verification; a `v*` tag publishes app-only and factory/recovery images, a versioned OTA manifest, checksums, license/notices, and pinned dependencies from the same build. The updater verifies compatibility, version, exact size, embedded app version, and SHA-256 before activation. Tag a stable release only after completing the [hardware smoke checklist](docs/hardware-smoke-checklist.md). OTA images remain rollback candidates until the UI has stayed healthy for 30 seconds, and updates do not silently erase NVS settings. See the [OTA manifest contract](docs/ota-manifest.md) and [compatibility contract](docs/compatibility.md).
+The System app installs the latest stable tagged GitHub release over Wi-Fi. Pushes and pull requests run verification; a `v*` tag publishes app-only and factory/recovery images, a versioned OTA manifest, checksums, license/notices, and pinned dependencies from the same build. The updater verifies compatibility, version, exact size, embedded app version, and SHA-256 before activation. Before a new stable tag, run the applicable [hardware smoke checks](docs/hardware-smoke-checklist.md) and disclose remaining gaps in its release notes. On a matching rollback-enabled bootloader, OTA candidates remain pending until the UI has stayed healthy for 30 seconds. Updates do not silently erase NVS settings. See the [OTA manifest contract](docs/ota-manifest.md) and [compatibility contract](docs/compatibility.md).
+
+## Hardware safety
 
 External GPIO and I2C signals are 3.3 V only. External 5 V is off at boot and Tab5 OS does not currently expose a control to enable it. See [pin and interface safety](docs/pin-safety.md) before connecting external hardware.
 
@@ -64,11 +76,15 @@ See [ROADMAP.md](ROADMAP.md) for the long-term product plan and current executio
 
 Architecture, troubleshooting, privacy, contribution, security-reporting, compatibility, and hardware-test contracts live in `docs/`, [CONTRIBUTING](CONTRIBUTING.md), and [SECURITY](SECURITY.md).
 
+For help, check [Troubleshooting](docs/troubleshooting.md) or open a [bug report](https://github.com/DevanMetz/Tab5OS/issues/new/choose). Share vulnerabilities privately through [SECURITY](SECURITY.md).
+
 ## Upstream
 
-The small board-support components in `components/` come from M5Stack's Apache-2.0-licensed [M5Tab5-UserDemo](https://github.com/m5stack/M5Tab5-UserDemo). Managed dependencies are pinned in `dependencies.lock`.
+The vendored `components/m5stack_tab5/` board support comes from the Apache-2.0-licensed component inside M5Stack's [M5Tab5-UserDemo](https://github.com/m5stack/M5Tab5-UserDemo); that repository's root license is MIT. The ST7121 driver retains Espressif's Apache-2.0 headers. Managed dependencies are pinned in `dependencies.lock`; see [Third-party notices](THIRD_PARTY_NOTICES.md).
 
 ## Status
+
+These features are implemented on `main`; a checked item does not mean that every hardware or fault case has passed. The [smoke checklist](docs/hardware-smoke-checklist.md) records measured coverage.
 
 - [x] ESP32-P4 boot
 - [x] Display and backlight
@@ -99,7 +115,7 @@ The small board-support components in `components/` come from M5Stack's Apache-2
 - [x] SD-card ebook reader with three first-run Project Gutenberg classics
 - [x] Application launcher
 - [x] USB remote desktop
-- [x] HTTPS OTA updates with automatic rollback
+- [x] HTTPS OTA updates with rollback support on a matching bootloader and partition layout
 
 ## License
 
