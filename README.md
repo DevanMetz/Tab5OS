@@ -74,7 +74,7 @@ The small board-support components in `components/` come from M5Stack's Apache-2
 - [x] G6 PWM and bounded single-pulse generator with isolated LEDC resources and automatic timeout
 - [x] User-controlled Govee H5075 monitoring and COLMI R12 health tools
 - [x] User-controlled KICKR cycling telemetry with SD ride logging
-- [x] Timed Servo Toy control with isolated PWM resources and safe output release
+- [x] Timed Servo Toy control on G0 with sine sweeps at selectable 0.05-1.00 Hz, random motion, isolated PWM resources, and safe output release
 - [x] Persistent brightness, dimmed idle screen, and configurable timed screen-off
 - [x] Recoverable notes plus durable ride, summary, ebook, and heart-rate storage paths
 - [x] Wi-Fi settings with channel/RSSI scan, address details, DNS lookup, four-probe ping, and mDNS service discovery

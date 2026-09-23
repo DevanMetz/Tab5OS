@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -125,7 +126,7 @@
 #define TIME_ZONE "CST6CDT,M3.2.0,M11.1.0"
 #define GOVEE_TEMP_OFFSET_C 0.0f
 #define GOVEE_HUMIDITY_OFFSET 0.0f
-#define SERVO_PIN GPIO_NUM_53
+#define SERVO_PIN GPIO_NUM_0
 #define TOY_LED_PIN GPIO_NUM_54
 #define SERVO_LEDC_TIMER LEDC_TIMER_1
 #define SERVO_LEDC_CHANNEL LEDC_CHANNEL_2
@@ -611,15 +612,22 @@ static lv_obj_t *ride_chart;
 static lv_chart_series_t *ride_power_series, *ride_hr_series;
 static lv_obj_t *servo_status;
 static lv_obj_t *servo_position;
+static lv_obj_t *servo_mode_label;
 static lv_obj_t *servo_range_label;
-static lv_obj_t *servo_speed_label;
+static lv_obj_t *servo_rate_label;
 static lv_timer_t *servo_timer;
 static bool servo_running;
 static bool servo_pwm_ready;
+static bool servo_sine_mode = true;
+static const uint16_t servo_ranges_us[] = {250, 375, 500};
+static const uint8_t servo_frequencies_cHz[] = {5, 10, 20, 25, 50, 75, 100};
 static uint8_t servo_range_index = 1;
 static uint8_t servo_speed_index = 1;
+static uint8_t servo_frequency_index = 3;
 static uint16_t servo_pulse_us = 1500;
 static uint16_t servo_target_us = 1500;
+static uint32_t servo_phase;
+static uint32_t servo_updated_ms;
 static TickType_t servo_next_target;
 static TickType_t servo_deadline;
 static lv_obj_t *screensaver;
@@ -1556,6 +1564,17 @@ static uint32_t servo_duty(uint16_t pulse_us)
     return (uint32_t)pulse_us * ((1U << 14) - 1) / 20000;
 }
 
+static uint32_t servo_sine_advance(uint32_t phase, uint32_t elapsed_ms, uint8_t frequency_cHz)
+{
+    /* One cycle is 100000 units: milliseconds times hundredths of a hertz. */
+    return (phase + (uint64_t)elapsed_ms * frequency_cHz) % 100000U;
+}
+
+static uint16_t servo_sine_pulse(uint32_t phase, uint16_t amplitude_us)
+{
+    return (uint16_t)lroundf(1500.0f + amplitude_us * sinf(phase * (6.28318530718f / 100000.0f)));
+}
+
 static void servo_self_test(void)
 {
     assert(SERVO_LEDC_TIMER != LEDC_TIMER_0);
@@ -1563,6 +1582,18 @@ static void servo_self_test(void)
     assert(servo_duty(1000) == 819);
     assert(servo_duty(1500) == 1228);
     assert(servo_duty(2000) == 1638);
+    assert(servo_sine_pulse(0, 500) == 1500);
+    assert(servo_sine_pulse(25000, 500) == 2000);
+    assert(servo_sine_pulse(50000, 500) == 1500);
+    assert(servo_sine_pulse(75000, 500) == 1000);
+    assert(servo_sine_pulse(25000, 250) == 1750);
+    assert(servo_sine_pulse(75000, 375) == 1125);
+    assert(servo_sine_advance(0, 1000, 25) == 25000);
+    assert(servo_sine_advance(0, 4000, 25) == 0);
+    assert(servo_sine_advance(0, 20000, 5) == 0);
+    assert(servo_sine_advance(0, 1000, 100) == 0);
+    assert(servo_sine_advance(servo_sine_advance(0, 137, 25), 863, 25) == 25000);
+    assert(servo_sine_advance(25000, 1000, 50) == 75000);
 }
 
 static esp_err_t servo_start_pwm(void)
@@ -4051,8 +4082,9 @@ static void clear_content(void)
     ride_hr_series = NULL;
     servo_status = NULL;
     servo_position = NULL;
+    servo_mode_label = NULL;
     servo_range_label = NULL;
-    servo_speed_label = NULL;
+    servo_rate_label = NULL;
     lv_obj_clean(content);
     lv_obj_scroll_to_y(content, 0, LV_ANIM_OFF);
     lv_obj_add_flag(content, LV_OBJ_FLAG_SCROLLABLE);
@@ -6743,8 +6775,25 @@ static void servo_update_labels(void)
 {
     static const char *ranges[] = {"Range: Narrow", "Range: Medium", "Range: Wide"};
     static const char *speeds[] = {"Speed: Slow", "Speed: Medium", "Speed: Fast"};
+    if (servo_mode_label) lv_label_set_text(servo_mode_label, servo_sine_mode ? "Motion: Sine" : "Motion: Random");
     if (servo_range_label) lv_label_set_text(servo_range_label, ranges[servo_range_index]);
-    if (servo_speed_label) lv_label_set_text(servo_speed_label, speeds[servo_speed_index]);
+    if (servo_rate_label) {
+        if (servo_sine_mode) {
+            unsigned frequency = servo_frequencies_cHz[servo_frequency_index];
+            lv_label_set_text_fmt(servo_rate_label, "Freq: %u.%02u Hz", frequency / 100, frequency % 100);
+        } else {
+            lv_label_set_text(servo_rate_label, speeds[servo_speed_index]);
+        }
+    }
+}
+
+static void servo_update_sine(void)
+{
+    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    servo_phase = servo_sine_advance(servo_phase, now_ms - servo_updated_ms,
+                                   servo_frequencies_cHz[servo_frequency_index]);
+    servo_updated_ms = now_ms;
+    servo_set_pulse(servo_sine_pulse(servo_phase, servo_ranges_us[servo_range_index]));
 }
 
 static void servo_tick(lv_timer_t *timer)
@@ -6752,12 +6801,13 @@ static void servo_tick(lv_timer_t *timer)
     (void)timer;
     TickType_t now = xTaskGetTickCount();
     if (servo_running && (int32_t)(now - servo_deadline) >= 0) servo_stop();
-    if (servo_running) {
-        static const uint16_t ranges[] = {250, 375, 500};
+    if (servo_running && servo_sine_mode) {
+        servo_update_sine();
+    } else if (servo_running) {
         static const uint8_t steps[] = {3, 7, 12};
         if ((int32_t)(now - servo_next_target) >= 0) {
-            uint16_t width = ranges[servo_range_index] * 2;
-            servo_target_us = 1500 - ranges[servo_range_index] + esp_random() % (width + 1);
+            uint16_t width = servo_ranges_us[servo_range_index] * 2;
+            servo_target_us = 1500 - servo_ranges_us[servo_range_index] + esp_random() % (width + 1);
             servo_next_target = now + pdMS_TO_TICKS(700 + esp_random() % 1000);
         }
         uint8_t step = steps[servo_speed_index];
@@ -6782,6 +6832,8 @@ static void servo_start_clicked(lv_event_t *event)
     }
     gpio_set_level(TOY_LED_PIN, 1);
     TickType_t now = xTaskGetTickCount();
+    servo_phase = 0;
+    servo_updated_ms = (uint32_t)(esp_timer_get_time() / 1000);
     servo_next_target = now;
     servo_deadline = now + pdMS_TO_TICKS(SERVO_TIMEOUT_MS);
     servo_running = true;
@@ -6801,10 +6853,26 @@ static void servo_range_clicked(lv_event_t *event)
     servo_update_labels();
 }
 
-static void servo_speed_clicked(lv_event_t *event)
+static void servo_mode_clicked(lv_event_t *event)
 {
     (void)event;
-    servo_speed_index = (servo_speed_index + 1) % 3;
+    servo_stop();
+    servo_sine_mode = !servo_sine_mode;
+    if (servo_timer) lv_timer_set_period(servo_timer, servo_sine_mode ? 20 : 50);
+    servo_update_labels();
+}
+
+static void servo_rate_clicked(lv_event_t *event)
+{
+    (void)event;
+    if (servo_sine_mode) {
+        /* Account for time at the old frequency before changing it, without resetting phase. */
+        if (servo_running) servo_update_sine();
+        servo_frequency_index = (servo_frequency_index + 1) %
+                                (sizeof(servo_frequencies_cHz) / sizeof(servo_frequencies_cHz[0]));
+    } else {
+        servo_speed_index = (servo_speed_index + 1) % 3;
+    }
     servo_update_labels();
 }
 
@@ -6820,6 +6888,10 @@ static void show_servo(void)
     lv_label_set_text(servo_position, "90 deg");
     lv_obj_set_style_text_font(servo_position, &lv_font_montserrat_48, 0);
 
+    lv_obj_t *mode = button(content, "Motion: Sine", servo_mode_clicked);
+    servo_mode_label = lv_obj_get_child(mode, 0);
+    lv_obj_set_size(mode, 620, 72);
+
     lv_obj_t *controls = lv_obj_create(content);
     lv_obj_set_size(controls, 620, 100);
     lv_obj_remove_flag(controls, LV_OBJ_FLAG_SCROLLABLE);
@@ -6828,9 +6900,13 @@ static void show_servo(void)
     lv_obj_t *range = button(controls, "Range: Medium", servo_range_clicked);
     servo_range_label = lv_obj_get_child(range, 0);
     lv_obj_set_size(range, 270, 72);
-    lv_obj_t *speed = button(controls, "Speed: Medium", servo_speed_clicked);
-    servo_speed_label = lv_obj_get_child(speed, 0);
-    lv_obj_set_size(speed, 270, 72);
+    lv_obj_t *rate = button(controls, "Freq: 0.25 Hz", servo_rate_clicked);
+    servo_rate_label = lv_obj_get_child(rate, 0);
+    lv_obj_set_size(rate, 270, 72);
+
+    lv_obj_t *hint = lv_label_create(content);
+    lv_obj_set_width(hint, 620);
+    lv_label_set_text(hint, "Sine frequency is full back-and-forth cycles per second.\nTap Motion to switch modes; switching stops the servo.");
 
     lv_obj_t *start = button(content, "START", servo_start_clicked);
     lv_obj_set_size(start, 620, 110);
@@ -6841,9 +6917,9 @@ static void show_servo(void)
     lv_obj_t *wiring = lv_label_create(content);
     lv_obj_set_width(wiring, 620);
     lv_label_set_long_mode(wiring, LV_LABEL_LONG_WRAP);
-    lv_label_set_text(wiring, "G53: servo signal\nG54: LED driver signal\nUse external 5V servo power and common ground. Use a resistor and transistor/MOSFET for the LED. Leaving this app turns both outputs off.");
+    lv_label_set_text_fmt(wiring, "G%d: servo signal\nG%d: LED driver signal\nUse external 5V servo power and common ground. Use a resistor and transistor/MOSFET for the LED. Leaving this app turns both outputs off.", SERVO_PIN, TOY_LED_PIN);
     servo_update_labels();
-    servo_timer = lv_timer_create(servo_tick, 50, NULL);
+    servo_timer = lv_timer_create(servo_tick, servo_sine_mode ? 20 : 50, NULL);
 }
 
 static void servo_clicked(lv_event_t *event)

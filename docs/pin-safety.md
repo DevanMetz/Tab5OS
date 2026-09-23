@@ -7,7 +7,8 @@ Tab5 external logic is 3.3 V only. Do not connect 5 V pull-ups or logic directly
 | Interface | Pins | Tab5 OS policy |
 | --- | --- | --- |
 | USB console, flashing, and remote desktop | USB Type-C Serial/JTAG | Always reserved. Firmware builds require this to be the sole console. |
-| Grove I2C, GPIO, and Servo Toy | G53/G54 | One tool at a time. Leaving the tool releases both pins; I2C requires 3.3 V pull-ups. |
+| Grove I2C and GPIO | G53/G54 | One tool at a time. Leaving the tool releases both pins; I2C requires 3.3 V pull-ups. G54 is also the Servo Toy LED driver signal. |
+| Servo Toy | G0 servo signal, G54 LED driver signal | 3.3 V logic signals only. Use external 5 V servo power with common ground and a resistor plus transistor/MOSFET for the LED. Stop/Home releases both outputs; G0 is shared with GPIO controls. |
 | ADC Scope | G16/G18/G19/G49/G50/G51/G53/G54 | Input-only, 0-3.3 V maximum. Per-input scale/offset are software corrections, not input protection or proof of calibration. G18/G19 also belong to SPI and G53/G54 to Grove tools. |
 | UART terminal | UART1, G47 TX/G48 RX | Default 3.3 V M5-Bus pair. Settings changes require the terminal to be stopped; both pins are released on exit. |
 | Legacy M5-Bus UART0 labels | G37 TX/G38 RX | Not the default: both are ESP32-P4 strapping pins and connected equipment can disturb reset. |

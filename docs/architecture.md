@@ -14,7 +14,8 @@ The static launcher table in `main/main.c` owns each tile's enter callback and o
 
 Every resource has one owner at a time:
 
-- G53/G54: GPIO, Scope ADC, Servo Toy, or external I2C.
+- G53/G54: GPIO, Scope ADC, or external I2C; Servo Toy also uses G54 for its LED driver.
+- G0: GPIO or Servo Toy PWM.
 - G6 and LEDC timer 2/channel 3: Signal Generator.
 - LEDC timer 1/channel 2: Servo; display backlight remains timer 0/channel 1.
 - UART1: G47/G48 terminal or onboard RS-485 through its explicit mode.

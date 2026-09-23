@@ -40,7 +40,7 @@ The current worktree is materially ahead of that release: it adds external I2C s
 
 Phase 0 software work is implemented and builds cleanly:
 
-- [x] Servo owns LEDC timer 1/channel 2 and releases G53/G54 safely without touching the backlight.
+- [x] Servo owns LEDC timer 1/channel 2 and releases its outputs safely without touching the backlight.
 - [x] Govee, Ring, and KICKR Bluetooth activity is off at boot and requires an explicit user toggle.
 - [x] GPIO, Scope, Servo, and external I2C share the app-exit release path; app switching waits for Scope teardown before reusing the pins.
 - [x] External 5 V remains off at boot and has no implicit enable path.
@@ -128,7 +128,7 @@ Current constraints and risks:
 
 - Nearly all firmware lives in one roughly 7,000-line `main/main.c`.
 - The static launcher/lifecycle table exists, but most legacy app timers, pins, and UI pointers still use the shared manual cleanup path until those apps are touched.
-- G53/G54 remain shared by GPIO, ADC, Servo, and external I2C, so their software release path still needs hardware transition testing.
+- G53/G54 remain shared by GPIO, ADC, and external I2C; Servo uses G0 for PWM and G54 for its LED, so their software release paths still need hardware transition testing.
 - OTA metadata and image hashes are verified through a versioned stable manifest, but the manifest is not yet independently signed; GitHub repository control and Web PKI remain trusted.
 - SD writers now preserve or repair incomplete data, but removable/full-card behavior and retained-temp recovery still need field validation.
 - Reverse-engineered wearable work is excluded from release inputs but still needs a provenance decision before publication.
