@@ -29,6 +29,10 @@ jobs:
         run: |
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/storage_io.c tests/storage_io_test.c -o "$RUNNER_TEMP/storage_io_test"
           "$RUNNER_TEMP/storage_io_test"
+      - name: Test capture reader
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/capture_data.c tests/capture_data_test.c -o "$RUNNER_TEMP/capture_data_test"
+          "$RUNNER_TEMP/capture_data_test"
       - name: Check Python tools
         run: |
           python3 -m compileall -q tools

@@ -21,6 +21,8 @@ Tab5 OS keeps user-owned documents and logs on the removable microSD card. Built
 
 Files ending in `.TMP` are unpublished: they may be incomplete after power loss, or fully synced but retained because publication failed. They must not be reported as finished captures without validation. A `.BAK` file is the previous complete generation and can be used for recovery when its corresponding final file is absent.
 
+Files opens published Scope and I2C `.CSV` captures as graphs when their headers match the formats below. The viewer shows up to the first 2,048 well-formed rows, leaves the file unchanged, and shows failed I2C reads as gaps. Other files retain the text preview.
+
 ## CSV conventions
 
 - UTF-8/ASCII text, comma separator, decimal point `.` and LF line endings.

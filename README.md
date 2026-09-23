@@ -64,6 +64,7 @@ The small board-support components in `components/` come from M5Stack's Apache-2
 - [x] Display and backlight
 - [x] Touch input
 - [x] SPIFFS/microSD file browser
+- [x] Saved Scope and I2C capture graphs in Files, with zoom, pan, cursor values, and visible-range statistics
 - [x] Notes, counter, and system apps
 - [x] Internet-synced RTC clock with persistent daily alarms and snooze
 - [x] Milwaukee weather plus a static time/date screensaver with hourly and daily forecasts
