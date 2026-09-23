@@ -23,6 +23,8 @@ Files ending in `.TMP` are unpublished: they may be incomplete after power loss,
 
 Files opens published Scope and I2C `.CSV` captures as graphs when their headers match the formats below. The viewer shows up to the first 2,048 well-formed rows, leaves the file unchanged, and shows failed I2C reads as gaps. Other files retain the text preview.
 
+Files also opens published UART and RS-485 `.CSV` logs as a timestamped RX/TX timeline. The viewer loads up to the first 512 well-formed rows, shows eight rows per page, and lets you filter by direction or switch between hex and escaped ASCII without changing the file. Unpublished `.TMP` files retain the text preview.
+
 ## CSV conventions
 
 - UTF-8/ASCII text, comma separator, decimal point `.` and LF line endings.

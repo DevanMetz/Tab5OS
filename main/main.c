@@ -15,6 +15,7 @@
 #include "bsp/esp-bsp.h"
 #include "storage_io.h"
 #include "capture_viewer.h"
+#include "serial_log_viewer.h"
 #include "ble_tool.h"
 #include "http_tool.h"
 #include "mqtt_tool.h"
@@ -3934,6 +3935,7 @@ static void clear_content(void)
     active_app_leave = NULL;
     if (leave) leave();
     capture_viewer_stop();
+    serial_log_viewer_stop();
     signal_tool_stop();
     spi_tool_stop();
     uart_tool_stop();
@@ -4115,6 +4117,7 @@ static void open_file(const char *path)
     lv_obj_t *back = button(content, "Back to files", file_back_clicked);
     lv_obj_set_size(back, 640, 68);
     if (capture_viewer_show(content, path)) return;
+    if (serial_log_viewer_show(content, path)) return;
     lv_obj_t *title = lv_label_create(content);
     lv_label_set_text(title, path);
     lv_obj_set_width(title, 620);

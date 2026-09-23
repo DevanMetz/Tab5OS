@@ -33,6 +33,10 @@ jobs:
         run: |
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/capture_data.c tests/capture_data_test.c -o "$RUNNER_TEMP/capture_data_test"
           "$RUNNER_TEMP/capture_data_test"
+      - name: Test serial log reader
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/serial_log_data.c tests/serial_log_data_test.c -o "$RUNNER_TEMP/serial_log_data_test"
+          "$RUNNER_TEMP/serial_log_data_test"
       - name: Check Python tools
         run: |
           python3 -m compileall -q tools
