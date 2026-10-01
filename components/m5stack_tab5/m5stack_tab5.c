@@ -18,6 +18,7 @@
 #include "usb/usb_host.h"
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "sdmmc_cmd.h"
 #include "esp_lcd_st7123.h"
 #include "esp_lcd_st7121.h"
@@ -42,6 +43,8 @@ sdmmc_card_t* bsp_sdcard = NULL;
 
 // USB Host Library task
 static TaskHandle_t usb_host_task;
+static SemaphoreHandle_t usb_host_done;
+static volatile bool usb_host_stopping;
 
 // sys i2c
 static bool i2c_initialized               = false;
@@ -279,9 +282,10 @@ void bsp_io_expander_pi4ioe_init(i2c_master_bus_handle_t bus_handle)
     i2c_master_transmit(i2c_dev_handle_pi4ioe1, write_buf, 2, I2C_MASTER_TIMEOUT_MS);
     write_buf[0] = PI4IO_REG_CHIP_RESET;
     i2c_master_transmit_receive(i2c_dev_handle_pi4ioe1, write_buf, 1, read_buf, 1, I2C_MASTER_TIMEOUT_MS);
-    /* Preload outputs while every pin is still an input, so EXT5V_EN (P2) never pulses high. */
+    /* Preload outputs while every pin is still an input. Keep EXT5V_EN (P2)
+     * and SPK_EN (P1) off; the uninitialized codec must not drive the speaker. */
     write_buf[0] = PI4IO_REG_OUT_SET;
-    write_buf[1] = 0b01110010;
+    write_buf[1] = 0b01110000;
     i2c_master_transmit(i2c_dev_handle_pi4ioe1, write_buf, 2, I2C_MASTER_TIMEOUT_MS);
     write_buf[0] = PI4IO_REG_IO_DIR;
     write_buf[1] = 0b01111111;
@@ -339,6 +343,18 @@ void bsp_io_expander_pi4ioe_init(i2c_master_bus_handle_t bus_handle)
     // write_buf[1] = 0b10001001;
     write_buf[1] = 0b00001001;
     i2c_master_transmit(i2c_dev_handle_pi4ioe2, write_buf, 2, I2C_MASTER_TIMEOUT_MS);
+}
+
+esp_err_t bsp_set_speaker_en(bool en)
+{
+    if (!i2c_dev_handle_pi4ioe1) return ESP_ERR_INVALID_STATE;
+    uint8_t reg = PI4IO_REG_OUT_SET;
+    uint8_t outputs;
+    esp_err_t error = i2c_master_transmit_receive(i2c_dev_handle_pi4ioe1, &reg, 1,
+                                                  &outputs, 1, I2C_MASTER_TIMEOUT_MS);
+    if (error != ESP_OK) return error;
+    uint8_t command[2] = {PI4IO_REG_OUT_SET, (uint8_t)((outputs & ~0x02U) | (en ? 0x02U : 0))};
+    return i2c_master_transmit(i2c_dev_handle_pi4ioe1, command, sizeof(command), I2C_MASTER_TIMEOUT_MS);
 }
 
 void bsp_set_charge_qc_en(bool en)
@@ -1771,47 +1787,68 @@ void bsp_display_unlock(void)
 //==================================================================================
 static void usb_lib_task(void* arg)
 {
+    // Start only after installation succeeds. This also makes task allocation
+    // failure recoverable without leaving an installed host with no event task.
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     while (1) {
-        // Start handling system events
-        uint32_t event_flags;
-        usb_host_lib_handle_events(portMAX_DELAY, &event_flags);
-        if (event_flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
-            ESP_ERROR_CHECK(usb_host_device_free_all());
+        uint32_t event_flags = 0;
+        usb_host_lib_handle_events(pdMS_TO_TICKS(50), &event_flags);
+        if (usb_host_stopping || (event_flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS)) {
+            esp_err_t error = usb_host_device_free_all();
+            // NOT_FINISHED needs more event processing, not an abort. Uninstall
+            // must also run outside handle_events(), which marks the host busy.
+            if (usb_host_stopping && error == ESP_OK && usb_host_uninstall() == ESP_OK) {
+                ESP_LOGI(TAG, "USB host stopped");
+                xSemaphoreGive(usb_host_done);
+                vTaskDelete(NULL);
+            }
         }
         if (event_flags & USB_HOST_LIB_EVENT_FLAGS_ALL_FREE) {
             ESP_LOGI(TAG, "USB: All devices freed");
-            // Continue handling USB events to allow device reconnection
-            // The only way this task can be stopped is by calling bsp_usb_host_stop()
         }
     }
 }
 
 esp_err_t bsp_usb_host_start(bsp_usb_host_power_mode_t mode, bool limit_500mA)
 {
-    // Install USB Host driver. Should only be called once in entire application
+    if (usb_host_task) return ESP_ERR_INVALID_STATE;
+    usb_host_done = xSemaphoreCreateBinary();
+    if (!usb_host_done) return ESP_ERR_NO_MEM;
+    usb_host_stopping = false;
+    if (xTaskCreate(usb_lib_task, "usb_lib", 4096, NULL, 10, &usb_host_task) != pdTRUE) {
+        vSemaphoreDelete(usb_host_done);
+        usb_host_done = NULL;
+        return ESP_ERR_NO_MEM;
+    }
+
     ESP_LOGI(TAG, "Installing USB Host");
     const usb_host_config_t host_config = {
         .skip_phy_setup = false,
         .intr_flags     = ESP_INTR_FLAG_LEVEL1,
     };
-    BSP_ERROR_CHECK_RETURN_ERR(usb_host_install(&host_config));
-
-    // Create a task that will handle USB library events
-    if (xTaskCreate(usb_lib_task, "usb_lib", 4096, NULL, 10, &usb_host_task) != pdTRUE) {
-        ESP_LOGE(TAG, "Creating USB host lib task failed");
-        abort();
+    esp_err_t error = usb_host_install(&host_config);
+    if (error != ESP_OK) {
+        vTaskDelete(usb_host_task);
+        usb_host_task = NULL;
+        vSemaphoreDelete(usb_host_done);
+        usb_host_done = NULL;
+        return error;
     }
-
+    xTaskNotifyGive(usb_host_task);
     return ESP_OK;
 }
 
 esp_err_t bsp_usb_host_stop(void)
 {
-    usb_host_uninstall();
-    if (usb_host_task) {
-        vTaskSuspend(usb_host_task);
-        vTaskDelete(usb_host_task);
+    if (!usb_host_task) return ESP_OK;
+    usb_host_stopping = true;
+    if (xSemaphoreTake(usb_host_done, pdMS_TO_TICKS(3000)) != pdTRUE) {
+        // Keep the task and completion semaphore alive; a later stop can join it.
+        return ESP_ERR_TIMEOUT;
     }
+    usb_host_task = NULL;
+    vSemaphoreDelete(usb_host_done);
+    usb_host_done = NULL;
     return ESP_OK;
 }
 

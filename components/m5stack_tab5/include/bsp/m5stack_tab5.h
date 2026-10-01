@@ -174,6 +174,9 @@ esp_err_t bsp_audio_init(const i2s_std_config_t *i2s_config);
  */
 esp_codec_dev_handle_t bsp_audio_codec_speaker_init(void);
 
+/** Enable the speaker amplifier only after configuring the codec; off at boot. */
+esp_err_t bsp_set_speaker_en(bool en);
+
 /**
  * @brief Initialize microphone codec device
  *
@@ -429,17 +432,20 @@ typedef enum bsp_usb_host_power_mode_t {
  *     - ESP_OK                 On success
  *     - ESP_ERR_INVALID_ARG    Parameter error
  *     - ESP_ERR_NO_MEM         Memory cannot be allocated
+ *     - ESP_ERR_INVALID_STATE  Host is already running or still stopping
  */
 esp_err_t bsp_usb_host_start(bsp_usb_host_power_mode_t mode, bool limit_500mA);
 
 /**
  * @brief Stop USB host
  *
- * USB Host lib will be uninstalled and power from connector removed.
+ * Deregister all clients first. The event task drains pending device events
+ * before uninstalling the host. On timeout it remains owned; call stop again
+ * before restarting. Connector power is controlled separately by the caller.
  *
  * @return
  *     - ESP_OK              On success
- *     - ESP_ERR_INVALID_ARG Parameter error
+ *     - ESP_ERR_TIMEOUT     Cleanup is still pending after three seconds
  */
 esp_err_t bsp_usb_host_stop(void);
 

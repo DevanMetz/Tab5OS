@@ -25,6 +25,8 @@ Files opens published Scope and I2C `.CSV` captures as graphs when their headers
 
 Files also opens published UART and RS-485 `.CSV` logs as a timestamped RX/TX timeline. The viewer loads up to the first 512 well-formed rows, shows eight rows per page, and lets you filter by direction or switch between hex and escaped ASCII without changing the file. Unpublished `.TMP` files retain the text preview.
 
+Choose a record from the current page and tap **COPY ROW** to put its original 1-128 bytes on the shared RAM clipboard. The selector and timeline use the same record numbers: positions among loaded valid rows, not physical CSV line numbers. Page/filter changes select the first matching record on the new page; changing Hex/ASCII preserves the selection. Rows of 129-256 bytes remain viewable but cannot be partially copied. Empty filters and failed copies preserve the clipboard. Record bytes can then be pasted into Byte Lab or RTU Frames; a logged RX/TX chunk may split or combine protocol frames, so a record is not a guarantee of a complete message. Copy changes neither the CSV nor the displayed byte values.
+
 ## CSV conventions
 
 - UTF-8/ASCII text, comma separator, decimal point `.` and LF line endings.
@@ -59,6 +61,8 @@ unix_time,address,register,value,status,speed_khz
 
 I2C address, register, and successful values use `0xNN` notation. A failed transaction leaves `value` empty and records the ESP-IDF error name in `status`.
 
+Watch/CSV always records one byte per 1 Hz sample, independently of the inspector's 1-32-byte one-shot setting. READ ONCE stops Watch and finishes the active CSV before its transaction. Multi-byte saved reads stay in RAM and may be copied into Byte Lab; they do not change this CSV schema.
+
 Scope chart header:
 
 ```text
@@ -81,7 +85,7 @@ HTTP metadata header:
 unix_time,method,url,status,response_bytes,duration_ms,outcome
 ```
 
-`url` retains the scheme, host, port, and path but removes the query string and fragment. Embedded URL credentials are rejected before a request starts. `outcome` is `complete`, `preview_truncated`, or the ESP-IDF transport error name; a non-2xx HTTP response is still a completed HTTP exchange and its status remains authoritative.
+`url` retains the scheme, host, port, and path but removes the query string and fragment. Embedded URL credentials are rejected before a request starts. `outcome` is `complete`, `preview_truncated`, `incomplete_response`, or the ESP-IDF transport error name; a non-2xx HTTP response is still a completed HTTP exchange and its status remains authoritative. `incomplete_response` means the client received fewer bytes than promised or did not finish the chunk framing, even if the SDK's request function returned success. The byte count and any preview describe only the body received.
 
 MQTT metadata header:
 
@@ -99,6 +103,6 @@ BLE evidence header:
 unix_time,event,address,name,rssi,service_uuid,characteristic_uuid,handle,properties,value_hex
 ```
 
-`event` is `advertisement`, `characteristic`, `read`, or `notification`. Properties use `R` for read, `W` for write with response, `w` for write without response, `N` for notify, and `I` for indicate. The snapshot is deliberately bounded to eight advertisers, 16 services, 32 characteristics, and 64 displayed value bytes. It includes nearby device names and addresses, so saving is explicit and the UI discloses this privacy tradeoff.
+`event` is `advertisement`, `characteristic`, `read`, `notification`, or `indication`. Properties use `R` for read, `W` for write with response, `w` for write without response, `N` for notify, and `I` for indicate. The snapshot is deliberately bounded to eight advertisers, 16 services, 32 characteristics, and 64 displayed value bytes. A trailing ` ...` marks a truncated value; `[unavailable]` means receive-buffer copying failed and no bytes are exported. These markers are not hex bytes. Earlier firmware labeled indications as `notification`. It includes nearby device names and addresses, so saving is explicit and the UI discloses this privacy tradeoff.
 
 These formats are still pre-1.0. Add fields at the end when possible, never silently change a unit, and document any incompatible migration in release notes.

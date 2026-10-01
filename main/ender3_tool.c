@@ -110,7 +110,6 @@ static volatile bool connected_flag;
 static volatile bool init_pending;
 static volatile bool host_started;
 static volatile bool cdc_driver_ready;
-static volatile bool conn_task_alive;
 static volatile esp_err_t host_error;
 
 static cdc_acm_dev_hdl_t cdc_hdl;
@@ -419,7 +418,16 @@ static void conn_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(250));
         }
     }
-    conn_task_alive = false;
+    // Stop can arrive before the connected branch runs. Close the retained
+    // device here too, before the caller uninstalls CDC or frees callback state.
+    xSemaphoreTake(dev_mutex, portMAX_DELAY);
+    if (cdc_hdl) {
+        cdc_acm_host_close(cdc_hdl);
+        cdc_hdl = NULL;
+    }
+    xSemaphoreGive(dev_mutex);
+    connected_flag = false;
+    init_pending = false;
     xSemaphoreGive(conn_done_sem);
     vTaskDelete(NULL);
 }
@@ -516,7 +524,9 @@ static void update_status(void)
     }
     if (pos_label) {
         if (valid) {
-            lv_label_set_text_fmt(pos_label, "X %+7.1f   Y %+7.1f   ok:%u", (double)x, (double)y, acks);
+            char position_text[128];
+            snprintf(position_text, sizeof(position_text), "X %+7.1f   Y %+7.1f   ok:%u", (double)x, (double)y, acks);
+            lv_label_set_text(pos_label, position_text);
         } else {
             lv_label_set_text_fmt(pos_label, "X ?   Y ?   ok:%u", acks);
         }
@@ -769,12 +779,18 @@ static lv_obj_t *pad_button(lv_obj_t *parent, const char *text, uint32_t color,
 
 void ender3_tool_show(lv_obj_t *parent)
 {
+    ender3_tool_stop();
+    if (ender3_tool_busy()) {
+        lv_obj_t *pending = lv_label_create(parent);
+        lv_obj_set_width(pending, 640);
+        lv_label_set_text(pending, "USB cleanup is still pending. Return Home and retry.");
+        return;
+    }
     stop_requested = false;
     connected_flag = false;
     init_pending = false;
     host_started = false;
     cdc_driver_ready = false;
-    conn_task_alive = false;
     host_error = ESP_OK;
     cdc_hdl = NULL;
     move_dir = E3_DIR_NONE;
@@ -815,8 +831,8 @@ void ender3_tool_show(lv_obj_t *parent)
     lv_obj_set_style_text_align(status_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(status_label, "Starting USB host...");
 
-    if (!rx_mutex || !dev_mutex || !conn_sem || !conn_done_sem) {
-        set_status("Failed to allocate control semaphores");
+    if (!rx_mutex || !dev_mutex || !conn_sem || !conn_done_sem || !output_text) {
+        set_status("Failed to allocate controller memory");
         return;
     }
 
@@ -911,6 +927,7 @@ void ender3_tool_show(lv_obj_t *parent)
     host_error = bsp_usb_host_start(BSP_USB_HOST_POWER_MODE_USB_DEV, false);
     if (host_error != ESP_OK) {
         ESP_LOGE(TAG, "USB host start failed: %s", esp_err_to_name(host_error));
+        bsp_set_usb_5v_en(false);
         update_status();
         return;
     }
@@ -923,20 +940,17 @@ void ender3_tool_show(lv_obj_t *parent)
     }
     cdc_driver_ready = true;
     if (xTaskCreate(conn_task, "ender3-conn", 4096, NULL, 5, &conn_task_handle) != pdTRUE) {
-        cdc_acm_host_uninstall();
-        cdc_driver_ready = false;
         host_error = ESP_ERR_NO_MEM;
         update_status();
         return;
     }
-    conn_task_alive = true;
     set_status("Searching for Ender 3 on the USB-A port...\n"
                "Plug the printer USB cable (A to B) into the tablet.");
 }
 
 bool ender3_tool_busy(void)
 {
-    return conn_task_alive || cdc_driver_ready || connected_flag || init_pending;
+    return conn_task_handle || host_started || cdc_driver_ready || connected_flag || init_pending;
 }
 
 void ender3_tool_stop(void)
@@ -946,21 +960,46 @@ void ender3_tool_stop(void)
         tick_timer = NULL;
     }
     move_dir = E3_DIR_NONE;
-    if (conn_task_alive || cdc_driver_ready || connected_flag) {
-        stop_requested = true;
+    // Detach UI state even if asynchronous hardware cleanup cannot finish yet.
+    heap_caps_free(output_text);
+    output_text = NULL;
+    status_label = NULL;
+    pos_label = NULL;
+    response_label = NULL;
+    speed_value_label = NULL;
+    motor_label = NULL;
+    swap_label = NULL;
+    invert_x_label = NULL;
+    invert_y_label = NULL;
+    input_area = NULL;
+    output_area = NULL;
+    stop_requested = true;
+    if (conn_task_handle) {
         if (conn_sem) xSemaphoreGive(conn_sem);
-        if (conn_done_sem) xSemaphoreTake(conn_done_sem, pdMS_TO_TICKS(3000));
+        if (xSemaphoreTake(conn_done_sem, pdMS_TO_TICKS(3000)) != pdTRUE) {
+            host_error = ESP_ERR_TIMEOUT;
+            ESP_LOGW(TAG, "USB connection task cleanup is pending");
+            return;
+        }
+        conn_task_handle = NULL;
     }
     if (cdc_driver_ready) {
-        cdc_acm_host_uninstall();
+        host_error = cdc_acm_host_uninstall();
+        if (host_error != ESP_OK) {
+            ESP_LOGW(TAG, "CDC cleanup is pending: %s", esp_err_to_name(host_error));
+            return;
+        }
         cdc_driver_ready = false;
     }
     if (host_started) {
-        bsp_usb_host_stop();
+        host_error = bsp_usb_host_stop();
+        if (host_error != ESP_OK) {
+            ESP_LOGW(TAG, "USB host cleanup is pending: %s", esp_err_to_name(host_error));
+            return;
+        }
         host_started = false;
     }
     bsp_set_usb_5v_en(false);
-    conn_task_alive = false;
     connected_flag = false;
     init_pending = false;
     stop_requested = false;
@@ -980,19 +1019,6 @@ void ender3_tool_stop(void)
         vSemaphoreDelete(conn_done_sem);
         conn_done_sem = NULL;
     }
-    heap_caps_free(output_text);
-    output_text = NULL;
-    status_label = NULL;
-    pos_label = NULL;
-    response_label = NULL;
-    speed_value_label = NULL;
-    motor_label = NULL;
-    swap_label = NULL;
-    invert_x_label = NULL;
-    invert_y_label = NULL;
-    input_area = NULL;
-    output_area = NULL;
-    conn_task_handle = NULL;
 }
 
 // --- self-test (runs at boot before BSP init) ------------------------------

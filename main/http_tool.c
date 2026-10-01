@@ -41,6 +41,7 @@ typedef struct {
     size_t response_bytes;
     size_t preview_length;
     bool truncated;
+    bool incomplete;
     char content_type[96];
     char location[160];
     char preview[HTTP_PREVIEW_MAX + 1];
@@ -315,7 +316,8 @@ static int append_log(const http_job_t *job)
 
     char safe_url[HTTP_URL_MAX + 1];
     safe_log_url(job->url, safe_url);
-    const char *outcome = job->error != ESP_OK ? esp_err_to_name(job->error) :
+    const char *outcome = job->incomplete ? "incomplete_response" :
+                          job->error != ESP_OK ? esp_err_to_name(job->error) :
                           job->truncated ? "preview_truncated" : "complete";
     if (!first_error && (fprintf(file, "%lld,%s,", (long long)time(NULL),
                                  method_names[job->method == HTTP_METHOD_GET ? 0 :
@@ -367,6 +369,10 @@ static void perform_request(http_job_t *job)
             job->error = esp_http_client_perform(client);
             job->status = esp_http_client_get_status_code(client);
             job->socket_error = esp_http_client_get_errno(client);
+            if (job->error == ESP_OK && !esp_http_client_is_complete_data_received(client)) {
+                job->incomplete = true;
+                job->error = ESP_ERR_INVALID_RESPONSE;
+            }
         }
         esp_http_client_cleanup(client);
     }
@@ -424,7 +430,12 @@ static void http_tick(lv_timer_t *timer)
     if (response_area)
         lv_textarea_set_text(response_area, job->preview_length ? job->preview : "(empty response body)");
     if (status_label) {
-        if (job->error != ESP_OK) {
+        if (job->incomplete) {
+            lv_label_set_text_fmt(status_label,
+                                  "Incomplete HTTP %d response after %lu ms: %u body bytes received",
+                                  job->status, (unsigned long)job->duration_ms,
+                                  (unsigned)job->response_bytes);
+        } else if (job->error != ESP_OK) {
             lv_label_set_text_fmt(status_label, "Request failed after %lu ms: %s%s%s",
                                   (unsigned long)job->duration_ms, esp_err_to_name(job->error),
                                   job->socket_error ? " / " : "",
@@ -473,9 +484,24 @@ static lv_obj_t *row(lv_obj_t *parent)
     return container;
 }
 
-static void textarea_focused(lv_event_t *event)
+static void keyboard_hide(lv_event_t *event)
 {
-    if (keyboard) lv_keyboard_set_textarea(keyboard, lv_event_get_target_obj(event));
+    (void)event;
+    if (keyboard) {
+        lv_keyboard_set_textarea(keyboard, NULL);
+        lv_obj_add_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (response_area) lv_obj_remove_flag(response_area, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void textarea_event(lv_event_t *event)
+{
+    lv_event_code_t code = lv_event_get_code(event);
+    if (keyboard && (code == LV_EVENT_FOCUSED || code == LV_EVENT_CLICKED)) {
+        lv_keyboard_set_textarea(keyboard, lv_event_get_target_obj(event));
+        lv_obj_remove_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
+        if (response_area) lv_obj_add_flag(response_area, LV_OBJ_FLAG_HIDDEN);
+    }
     cleartext_armed = false;
 }
 
@@ -540,6 +566,7 @@ static void send_clicked(lv_event_t *event)
     }
     uint32_t hash = request_hash(job->method, job->url, job->headers, job->body);
     uint32_t now = lv_tick_get();
+    keyboard_hide(NULL);
     if (!secure && !confirmation_valid(cleartext_armed, cleartext_hash, hash,
                                        cleartext_armed_at, now)) {
         cleartext_armed = true;
@@ -588,6 +615,7 @@ void http_tool_stop(void)
     url_area = NULL;
     headers_area = NULL;
     body_area = NULL;
+    if (keyboard) lv_keyboard_set_textarea(keyboard, NULL);
     keyboard = NULL;
     method_label = NULL;
     log_label = NULL;
@@ -652,11 +680,17 @@ void http_tool_show(lv_obj_t *parent, bool connected, bool sd_available,
     lv_textarea_set_placeholder_text(response_area, "Response body preview");
 
     keyboard = lv_keyboard_create(parent);
-    lv_obj_set_size(keyboard, 640, 360);
-    lv_keyboard_set_textarea(keyboard, url_area);
-    lv_obj_add_event_cb(url_area, textarea_focused, LV_EVENT_FOCUSED, NULL);
-    lv_obj_add_event_cb(headers_area, textarea_focused, LV_EVENT_FOCUSED, NULL);
-    lv_obj_add_event_cb(body_area, textarea_focused, LV_EVENT_FOCUSED, NULL);
+    lv_obj_set_size(keyboard, 640, 300);
+    lv_obj_set_style_text_font(keyboard, &lv_font_montserrat_28, 0);
+    lv_obj_add_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_event_cb(keyboard, keyboard_hide, LV_EVENT_READY, NULL);
+    lv_obj_add_event_cb(keyboard, keyboard_hide, LV_EVENT_CANCEL, NULL);
+    lv_obj_t *inputs[] = {url_area, headers_area, body_area};
+    for (size_t i = 0; i < sizeof(inputs) / sizeof(inputs[0]); ++i) {
+        lv_obj_add_event_cb(inputs[i], textarea_event, LV_EVENT_FOCUSED, NULL);
+        lv_obj_add_event_cb(inputs[i], textarea_event, LV_EVENT_CLICKED, NULL);
+        lv_obj_add_event_cb(inputs[i], textarea_event, LV_EVENT_VALUE_CHANGED, NULL);
+    }
     update_controls();
     ui_timer = lv_timer_create(http_tick, 200, NULL);
     http_tick(ui_timer);

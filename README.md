@@ -91,24 +91,32 @@ These features are implemented on `main`; a checked item does not mean that ever
 - [x] Touch input
 - [x] SPIFFS/microSD file browser
 - [x] Saved Scope and I2C capture graphs in Files, with zoom, pan, cursor values, and visible-range statistics
-- [x] Saved UART and RS-485 logs in Files, with timestamped RX/TX paging, filters, and hex/ASCII views
+- [x] Saved UART and RS-485 logs in Files, with timestamped RX/TX paging, filters, hex/ASCII views, and selected-record copy to the byte clipboard
 - [x] Notes, counter, and system apps
+- [x] [Offline Electronics and Byte Lab apps](docs/offline-tools.md) for circuit/RC calculations, hex/ASCII decoding, integer/Float32 encoding and interpretation, and payload checksums
+- [x] [Subnet Lab](docs/offline-tools.md#subnet-lab) for offline IPv4 prefix/netmask calculations, broadcast and host ranges, and peer membership checks
+- [x] [Resistor Lab](docs/resistor-lab.md) for four/five color bands, tolerance ranges, numeric/R-decimal SMD markings, and EIA-96 decoding
 - [x] Internet-synced RTC clock with persistent daily alarms and snooze
 - [x] Milwaukee weather plus a static time/date screensaver with hourly and daily forecasts
 - [x] GPIO control and eight-channel ADC oscilloscope with frequency/duty measurement, persistent calibration, and SD capture
-- [x] External Grove I2C scan, 100/400 kHz byte read/watch, gated write, and SD capture on G53/G54
-- [x] UART1 and onboard RS-485 terminal with line settings, ASCII/hex I/O, send history, and SD capture
-- [x] Bounded SPI2 master console with selectable mode/clock and explicit M5-Bus chip-select
+- [x] External Grove I2C scan, 100/400 kHz reads of 1-32 bytes, one-byte watch/SD capture, saved-read copy into Byte Lab, and gated write on G53/G54
+- [x] [UART1 and onboard RS-485 terminal](docs/serial-terminal.md) with separate transmit/display formats, explicit line endings, exact byte history, clipboard paste/frozen RX copy, and SD capture
+- [x] Bounded SPI2 master console with selectable mode/clock, explicit M5-Bus chip-select, and saved RX copy into Byte Lab
 - [x] G6 PWM and bounded single-pulse generator with isolated LEDC resources and automatic timeout
 - [x] User-controlled Govee H5075 monitoring and COLMI R12 health tools
 - [x] User-controlled KICKR cycling telemetry with SD ride logging
 - [x] Timed Servo Toy control on G0 with sine sweeps at selectable 0.05-1.00 Hz, random motion, isolated PWM resources, and safe output release
 - [x] Persistent brightness, dimmed idle screen, and configurable timed screen-off
 - [x] Recoverable notes plus durable ride, summary, ebook, and heart-rate storage paths
-- [x] Wi-Fi settings with channel/RSSI scan, address details, DNS lookup, four-probe ping, and mDNS service discovery
-- [x] Bounded HTTP request console with verified HTTPS, gated cleartext, capped previews, and opt-in redacted SD metadata logs
+- [x] Wi-Fi settings with channel/RSSI scan, password Show/Hide and a compact keyboard, plus a Network launcher app for address details, DNS lookup, four-probe ping, and mDNS service discovery
+- [x] HTTP request console with verified HTTPS, gated cleartext, capped previews, and opt-in redacted SD metadata logs
+- [x] [Modbus TCP inspector](docs/modbus-tcp.md) with bounded register/coil reads, signed/unsigned/Float32 views and byte-order selection, TCP testing, exception reporting, and cancellation
+- [x] [RTU Frames](docs/modbus-rtu.md) for offline Modbus read-frame construction, CRC validation, reply decoding, and request copy to Serial; native checks, firmware build, and ST7121 example/clipboard handoff pass, with wired-fixture and broader panel checks pending
+- [x] [NTP Lab and Wake-on-LAN](docs/device-network-tools.md) for time-server measurements and explicitly confirmed device wake packets
+- [x] [UDP Console](docs/udp-console.md) for confirmed hex/ASCII datagrams, bounded reply previews, source-port selection, and cancellation
+- [x] [Shared byte clipboard](docs/offline-tools.md#move-bytes-between-apps) for preparing Byte Lab/RTU payloads in Serial, UDP or SPI and inspecting complete captured replies without retyping
 - [x] MQTT 3.1.1 publish/subscribe console with verified TLS, explicit device-local TLS profiles, QoS/retain visibility, bounded history, and opt-in payload-free SD metadata logs
-- [x] Opt-in generic BLE advertisement scanner and GATT explorer with explicit connections, bounded discovery, reads, notifications, gated raw writes, and atomic evidence snapshots
+- [x] Opt-in generic BLE advertisement scanner and GATT explorer with explicit connections, bounded discovery, reads, notifications/indications, complete received-value copy into Byte Lab, gated raw writes, and atomic evidence snapshots
 - [x] AI chat client through an authenticated HTTPS relay
 - [x] Start/stop microphone transcription with a live waveform
 - [x] Reader-mode web browser with HTTPS and clickable links

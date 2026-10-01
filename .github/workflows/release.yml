@@ -37,10 +37,45 @@ jobs:
         run: |
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/serial_log_data.c tests/serial_log_data_test.c -o "$RUNNER_TEMP/serial_log_data_test"
           "$RUNNER_TEMP/serial_log_data_test"
+      - name: Test I2C register transactions
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I tests/i2c_host -I main main/i2c_register.c tests/i2c_register_test.c -o "$RUNNER_TEMP/i2c_register_test"
+          "$RUNNER_TEMP/i2c_register_test"
       - name: Check Python tools
         run: |
           python3 -m compileall -q tools
           python3 tools/remote_desktop.py --self-test
+          python3 tools/modbus_test_server.py --self-test
+          python3 tools/udp_device_fixture.py --self-test
+          python3 tests/http_fixture_test.py
+      - name: Test app calculations and protocol parsing
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/payload_clipboard.c tests/payload_clipboard_test.c -o "$RUNNER_TEMP/payload_clipboard_test"
+          "$RUNNER_TEMP/payload_clipboard_test"
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/uart_data.c tests/uart_data_test.c -o "$RUNNER_TEMP/uart_data_test"
+          "$RUNNER_TEMP/uart_data_test"
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/ipv4_data.c tests/ipv4_data_test.c -o "$RUNNER_TEMP/ipv4_data_test"
+          "$RUNNER_TEMP/ipv4_data_test"
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/electronics_math.c tests/electronics_math_test.c -lm -o "$RUNNER_TEMP/electronics_math_test"
+          "$RUNNER_TEMP/electronics_math_test"
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/byte_data.c tests/byte_data_test.c -lm -o "$RUNNER_TEMP/byte_data_test"
+          "$RUNNER_TEMP/byte_data_test"
+          python3 tests/byte_reference_test.py "$RUNNER_TEMP/byte_data_test"
+          python3 tests/byte_encode_reference_test.py "$RUNNER_TEMP/byte_data_test"
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/modbus_data.c main/byte_data.c tests/modbus_data_test.c -lm -o "$RUNNER_TEMP/modbus_data_test"
+          "$RUNNER_TEMP/modbus_data_test"
+          python3 tests/modbus_reference_test.py "$RUNNER_TEMP/modbus_data_test"
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/modbus_data.c main/byte_data.c tests/modbus_rtu_test.c -lm -o "$RUNNER_TEMP/modbus_rtu_test"
+          "$RUNNER_TEMP/modbus_rtu_test"
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/ntp_data.c tests/ntp_data_test.c -lm -o "$RUNNER_TEMP/ntp_data_test"
+          "$RUNNER_TEMP/ntp_data_test"
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/wol_data.c main/ipv4_data.c tests/wol_data_test.c -o "$RUNNER_TEMP/wol_data_test"
+          "$RUNNER_TEMP/wol_data_test"
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/subnet_data.c main/ipv4_data.c tests/subnet_data_test.c -o "$RUNNER_TEMP/subnet_data_test"
+          "$RUNNER_TEMP/subnet_data_test"
+          python3 tests/subnet_reference_test.py "$RUNNER_TEMP/subnet_data_test"
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/resistor_data.c tests/resistor_data_test.c -lm -o "$RUNNER_TEMP/resistor_data_test"
+          "$RUNNER_TEMP/resistor_data_test"
 
   firmware:
     runs-on: ubuntu-latest

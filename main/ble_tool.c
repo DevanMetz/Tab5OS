@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -19,6 +20,7 @@
 #include "host/ble_hs_adv.h"
 #include "host/util/util.h"
 #include "os/os_mbuf.h"
+#include "payload_clipboard.h"
 #include "storage_io.h"
 
 #define BLE_TOOL_DEVICE_MAX 8
@@ -53,6 +55,7 @@ static portMUX_TYPE tool_lock = portMUX_INITIALIZER_UNLOCKED;
 static lv_obj_t *screen_parent;
 static lv_obj_t *status_label;
 static lv_obj_t *value_label;
+static lv_obj_t *copy_value_button;
 static lv_obj_t *write_area;
 static lv_timer_t *ui_timer;
 static ble_tool_scan_refresh_cb_t refresh_scan;
@@ -91,6 +94,8 @@ static size_t last_value_total;
 static uint16_t last_value_handle;
 static bool last_value_seen;
 static bool last_value_was_notification;
+static bool last_value_was_indication;
+static bool last_value_copy_failed;
 
 static bool write_armed;
 static uint32_t write_armed_at;
@@ -215,43 +220,86 @@ static void format_value(char *output, size_t capacity)
     uint16_t handle;
     bool seen;
     bool was_notification;
+    bool was_indication;
+    bool copy_failed;
     portENTER_CRITICAL(&tool_lock);
     length = last_value_length;
     total = last_value_total;
     handle = last_value_handle;
     seen = last_value_seen;
     was_notification = last_value_was_notification;
+    was_indication = last_value_was_indication;
+    copy_failed = last_value_copy_failed;
     memcpy(value, last_value, length);
     portEXIT_CRITICAL(&tool_lock);
     if (!seen) {
         snprintf(output, capacity, "No value read or received yet");
         return;
     }
-    int used = snprintf(output, capacity, "Handle 0x%04X: %u byte%s%s", handle,
-                        (unsigned)total, total == 1 ? "" : "s",
-                        was_notification ? " (notification received)" : "");
+    int used = snprintf(output, capacity, "Latest %s | handle 0x%04X | %u byte%s",
+                        was_indication ? "indication" : was_notification ? "notification" : "read response",
+                        handle, (unsigned)total, total == 1 ? "" : "s");
+    if (copy_failed) {
+        if (used > 0 && (size_t)used < capacity)
+            snprintf(output + used, capacity - (size_t)used, "\nReceive buffer unavailable; copy disabled.");
+        return;
+    }
     for (size_t i = 0; i < length && used > 0 && (size_t)used < capacity; i++)
         used += snprintf(output + used, capacity - (size_t)used, "%s%02X",
                          i ? " " : "\n", value[i]);
     if (total > length && used > 0 && (size_t)used < capacity)
-        snprintf(output + used, capacity - (size_t)used, " ...");
+        snprintf(output + used, capacity - (size_t)used, " ...\nPreview truncated at 64 bytes; copy disabled.");
 }
 
-static void store_value(uint16_t handle, struct os_mbuf *mbuf, bool notification)
+static bool value_copyable_locked(void)
+{
+    return connected && !stopping && last_value_seen && !last_value_copy_failed &&
+           last_value_length == last_value_total && last_value_length <= BLE_TOOL_VALUE_MAX;
+}
+
+static void update_value_panel(void)
+{
+    if (!value_label || !copy_value_button) return;
+    char value[512];
+    format_value(value, sizeof(value));
+    lv_label_set_text(value_label, value);
+    portENTER_CRITICAL(&tool_lock);
+    bool copyable = value_copyable_locked();
+    portEXIT_CRITICAL(&tool_lock);
+    if (copyable) lv_obj_remove_state(copy_value_button, LV_STATE_DISABLED);
+    else lv_obj_add_state(copy_value_button, LV_STATE_DISABLED);
+}
+
+static void clear_value_locked(void)
+{
+    memset(last_value, 0, sizeof(last_value));
+    last_value_length = last_value_total = 0;
+    last_value_handle = 0;
+    last_value_seen = false;
+    last_value_was_notification = last_value_was_indication = last_value_copy_failed = false;
+    value_dirty = true;
+}
+
+static bool store_value(uint16_t handle, struct os_mbuf *mbuf, bool notification, bool indication)
 {
     size_t total = mbuf ? OS_MBUF_PKTLEN(mbuf) : 0;
     size_t length = total < BLE_TOOL_VALUE_MAX ? total : BLE_TOOL_VALUE_MAX;
-    uint8_t value[BLE_TOOL_VALUE_MAX];
-    if (length && os_mbuf_copydata(mbuf, 0, length, value) != 0) length = 0;
+    uint8_t value[BLE_TOOL_VALUE_MAX] = {0};
+    bool copy_failed = length && os_mbuf_copydata(mbuf, 0, length, value) != 0;
+    if (copy_failed) length = 0;
     portENTER_CRITICAL(&tool_lock);
+    memset(last_value, 0, sizeof(last_value));
     memcpy(last_value, value, length);
     last_value_length = length;
     last_value_total = total;
     last_value_handle = handle;
     last_value_seen = true;
     last_value_was_notification = notification;
+    last_value_was_indication = indication;
+    last_value_copy_failed = copy_failed;
     value_dirty = true;
     portEXIT_CRITICAL(&tool_lock);
+    return !copy_failed;
 }
 
 static bool connection_is_active(uint16_t handle)
@@ -270,10 +318,7 @@ static void reset_connection_data_locked(void)
     selected_characteristic = -1;
     services_truncated = false;
     characteristics_truncated = false;
-    last_value_length = last_value_total = 0;
-    last_value_handle = 0;
-    last_value_seen = false;
-    last_value_was_notification = false;
+    clear_value_locked();
     write_armed = false;
     operation_busy = false;
     subscription_target_handle = subscription_cccd_handle = 0;
@@ -402,10 +447,16 @@ static int read_done(uint16_t conn_handle, const struct ble_gatt_error *error,
     portEXIT_CRITICAL(&tool_lock);
     if (!error->status && attribute) {
         size_t length = attribute->om ? OS_MBUF_PKTLEN(attribute->om) : 0;
-        store_value(attribute->handle, attribute->om, false);
-        set_status("Read %u byte%s from handle 0x%04X",
-                   (unsigned)length, length == 1 ? "" : "s", attribute->handle);
-    } else set_status("Read failed: %u", error->status);
+        if (store_value(attribute->handle, attribute->om, false, false))
+            set_status("Read %u byte%s from handle 0x%04X",
+                       (unsigned)length, length == 1 ? "" : "s", attribute->handle);
+        else set_status("Read buffer copy failed; value unavailable");
+    } else {
+        portENTER_CRITICAL(&tool_lock);
+        clear_value_locked();
+        portEXIT_CRITICAL(&tool_lock);
+        set_status("Read failed: %u", error->status);
+    }
     return 0;
 }
 
@@ -545,7 +596,9 @@ static int generic_gap_event(struct ble_gap_event *event, void *argument)
     }
     if (event->type == BLE_GAP_EVENT_NOTIFY_RX &&
         connection_is_active(event->notify_rx.conn_handle)) {
-        store_value(event->notify_rx.attr_handle, event->notify_rx.om, true);
+        if (!store_value(event->notify_rx.attr_handle, event->notify_rx.om, true,
+                         event->notify_rx.indication))
+            set_status("Received value buffer is unavailable; copy disabled");
         return 0;
     }
     return 0;
@@ -697,6 +750,27 @@ static bool selected_characteristic_snapshot(ble_tool_characteristic_t *output,
     return valid;
 }
 
+static void copy_value_clicked(lv_event_t *event)
+{
+    (void)event;
+    uint8_t value[BLE_TOOL_VALUE_MAX];
+    size_t length;
+    uint16_t handle;
+    portENTER_CRITICAL(&tool_lock);
+    write_armed = false;
+    bool copyable = value_copyable_locked();
+    length = last_value_length;
+    handle = last_value_handle;
+    if (copyable) memcpy(value, last_value, length);
+    portEXIT_CRITICAL(&tool_lock);
+    if (!copyable || !payload_clipboard_store(value, length))
+        set_status("No complete received value to copy; clipboard unchanged");
+    else
+        set_status("Copied %u byte%s from handle 0x%04X. Use Paste hex in Byte Lab.",
+                   (unsigned)length, length == 1 ? "" : "s", handle);
+    update_value_panel();
+}
+
 static void read_clicked(lv_event_t *event)
 {
     (void)event;
@@ -710,6 +784,8 @@ static void read_clicked(lv_event_t *event)
         return;
     }
     operation_busy = true;
+    write_armed = false;
+    clear_value_locked();
     portEXIT_CRITICAL(&tool_lock);
     set_status("Reading handle 0x%04X...", characteristic.val_handle);
     int rc = ble_gattc_read(connection, characteristic.val_handle, read_done, NULL);
@@ -759,6 +835,7 @@ static void write_clicked(lv_event_t *event)
     }
     write_armed = false;
     operation_busy = true;
+    clear_value_locked();
     portEXIT_CRITICAL(&tool_lock);
     int rc;
     if (characteristic.properties & BLE_GATT_CHR_PROP_WRITE)
@@ -851,6 +928,8 @@ static void save_evidence_clicked(lv_event_t *event)
     uint16_t value_handle;
     bool value_seen;
     bool value_was_notification;
+    bool value_was_indication;
+    bool value_copy_failed;
     int peer_index;
     portENTER_CRITICAL(&tool_lock);
     bool ready = connected && !stopping && !discovering && screen_sd_available;
@@ -866,6 +945,8 @@ static void save_evidence_clicked(lv_event_t *event)
     value_handle = last_value_handle;
     value_seen = last_value_seen;
     value_was_notification = last_value_was_notification;
+    value_was_indication = last_value_was_indication;
+    value_copy_failed = last_value_copy_failed;
     memcpy(value_snapshot, last_value, value_length);
     peer_index = selected_device;
     portEXIT_CRITICAL(&tool_lock);
@@ -955,8 +1036,9 @@ static void save_evidence_clicked(lv_event_t *event)
             used += (size_t)snprintf(value_hex + used, sizeof(value_hex) - used,
                                      "%s%02X", i ? " " : "", value_snapshot[i]);
         ok = fprintf(file, "%lld,%s,%s,%s,,,,0x%04X,,%s%s\n", (long long)now,
-                     value_was_notification ? "notification" : "read", peer_address, peer_name,
-                     value_handle, value_hex, value_total > value_length ? " ..." : "") >= 0;
+                     value_was_indication ? "indication" : value_was_notification ? "notification" : "read",
+                     peer_address, peer_name, value_handle, value_hex,
+                     value_copy_failed ? "[unavailable]" : value_total > value_length ? " ..." : "") >= 0;
     }
     if (!ok && !errno) errno = EIO;
     if (storage_commit_new_file(&file, temporary_path, final_path) != 0) {
@@ -1047,10 +1129,16 @@ static void render_characteristic_detail(const ble_tool_characteristic_t *charac
 
     value_label = lv_label_create(screen_parent);
     lv_obj_set_width(value_label, 620);
+    lv_obj_set_style_text_font(value_label, &lv_font_montserrat_14, 0);
     lv_label_set_long_mode(value_label, LV_LABEL_LONG_WRAP);
-    char value[512];
-    format_value(value, sizeof(value));
-    lv_label_set_text(value_label, value);
+    copy_value_button = action_button(screen_parent, "COPY LATEST VALUE", 620, copy_value_clicked, NULL);
+    update_value_panel();
+    lv_obj_t *copy_help = lv_label_create(screen_parent);
+    lv_obj_set_width(copy_help, 620);
+    lv_obj_set_style_text_font(copy_help, &lv_font_montserrat_14, 0);
+    lv_label_set_text(copy_help, "Copy the latest received payload (0-64 bytes); no BLE traffic.\n"
+                                "The handle above identifies its source, even when another is selected.\n"
+                                "READ returns one ATT response; long values are not assembled.");
 
     lv_obj_t *warning = lv_label_create(screen_parent);
     lv_obj_set_width(warning, 620);
@@ -1135,7 +1223,7 @@ static void render(void)
 {
     if (!screen_parent || !screen_active) return;
     lv_obj_clean(screen_parent);
-    status_label = value_label = write_area = NULL;
+    status_label = value_label = copy_value_button = write_area = NULL;
     lv_obj_t *title = lv_label_create(screen_parent);
     lv_label_set_text(title, "BLE GATT Explorer");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
@@ -1193,11 +1281,7 @@ static void tick(lv_timer_t *timer)
         return;
     }
     if (update_status && status_label) lv_label_set_text(status_label, status);
-    if (update_value && value_label) {
-        char value[512];
-        format_value(value, sizeof(value));
-        lv_label_set_text(value_label, value);
-    }
+    if (update_value) update_value_panel();
 }
 
 void ble_tool_show(lv_obj_t *parent, bool available, bool sd_available,
@@ -1247,7 +1331,7 @@ void ble_tool_stop(void)
     if (cancel || terminate) stopping = true;
     else stopping = false;
     portEXIT_CRITICAL(&tool_lock);
-    screen_parent = status_label = value_label = write_area = NULL;
+    screen_parent = status_label = value_label = copy_value_button = write_area = NULL;
     if (cancel) {
         int rc = ble_gap_conn_cancel();
         if (rc) ESP_LOGW(TAG, "Connection cancel failed: %d", rc);
@@ -1304,8 +1388,110 @@ void ble_tool_observe_advertisement(const ble_addr_t *address, int8_t rssi,
     portEXIT_CRITICAL(&tool_lock);
 }
 
+#ifndef NDEBUG
+static void received_value_self_test(void)
+{
+    // Real NimBLE buffer traversal, without a radio, pool allocation or GATT
+    // request. These callbacks run before Bluetooth and LVGL are initialized.
+    struct {
+        struct os_mbuf buffer;
+        struct os_mbuf_pkthdr header;
+    } packet = {0};
+    _Static_assert(offsetof(typeof(packet), header) == sizeof(struct os_mbuf), "mbuf header layout");
+    struct os_mbuf tail = {0};
+    uint8_t bytes[BLE_TOOL_VALUE_MAX + 1];
+    for (size_t i = 0; i < sizeof(bytes); i++) bytes[i] = (uint8_t)(i * 37);
+    packet.buffer.om_data = bytes;
+    packet.buffer.om_pkthdr_len = sizeof(packet.header);
+    SLIST_NEXT(&packet.buffer, om_next) = &tail;
+    struct ble_gatt_attr attribute = {.handle = 0x1234, .om = &packet.buffer};
+    struct ble_gatt_error result = {0};
+    connected = true;
+    connection_handle = 17;
+    char preview[320];
+    const uint8_t previous[] = {0xDE, 0xAD};
+
+    for (size_t length = 0; length <= sizeof(bytes); length++) {
+        packet.header.omp_len = length;
+        packet.buffer.om_len = length < 3 ? length : 3;
+        tail.om_data = bytes + packet.buffer.om_len;
+        tail.om_len = length - packet.buffer.om_len;
+        assert(payload_clipboard_store(previous, sizeof(previous)));
+        operation_busy = write_armed = true;
+        read_done(connection_handle, &result, &attribute, NULL);
+        assert(!operation_busy && last_value_handle == attribute.handle);
+        copy_value_clicked(NULL);
+        assert(!write_armed);
+        const payload_clipboard_t *copied = payload_clipboard_peek();
+        assert(copied);
+        if (length <= BLE_TOOL_VALUE_MAX) {
+            assert(copied->length == length && memcmp(copied->bytes, bytes, length) == 0);
+        } else {
+            assert(copied->length == sizeof(previous) && !memcmp(copied->bytes, previous, sizeof(previous)));
+            format_value(preview, sizeof(preview));
+            assert(strstr(preview, "truncated") && !value_copyable_locked());
+        }
+    }
+
+    packet.header.omp_len = 4;
+    packet.buffer.om_len = 3;
+    tail.om_len = 1;
+    struct ble_gap_event received = {.type = BLE_GAP_EVENT_NOTIFY_RX};
+    received.notify_rx.conn_handle = connection_handle;
+    received.notify_rx.attr_handle = 0x2345;
+    received.notify_rx.om = &packet.buffer;
+    for (int indication = 0; indication <= 1; indication++) {
+        received.notify_rx.indication = indication;
+        generic_gap_event(&received, NULL);
+        copy_value_clicked(NULL);
+        assert(payload_clipboard_peek()->length == 4 && !memcmp(payload_clipboard_peek()->bytes, bytes, 4));
+        format_value(preview, sizeof(preview));
+        assert(strstr(preview, indication ? "indication" : "notification") && strstr(preview, "0x2345"));
+    }
+    // Neither the selected characteristic nor a released receive buffer owns
+    // the copied bytes. A callback from a different connection is ignored.
+    bytes[0] = 0xFF;
+    received.notify_rx.conn_handle++;
+    generic_gap_event(&received, NULL);
+    assert(last_value[0] == 0 && payload_clipboard_peek()->bytes[0] == 0);
+    bytes[0] = 0;
+
+    // A short chain can fail after already writing part of the temporary buffer.
+    packet.header.omp_len = 8;
+    tail.om_len = 0;
+    read_done(connection_handle, &result, &attribute, NULL);
+    assert(last_value_copy_failed && last_value_length == 0 && !value_copyable_locked());
+    for (size_t i = 0; i < sizeof(last_value); i++) assert(last_value[i] == 0);
+    copy_value_clicked(NULL);
+    assert(payload_clipboard_peek()->length == 4);
+    format_value(preview, sizeof(preview));
+    assert(strstr(preview, "unavailable"));
+
+    result.status = BLE_HS_EINVAL;
+    read_done(connection_handle, &result, NULL, NULL);
+    assert(!last_value_seen && !value_copyable_locked());
+    assert(store_value(0x3456, NULL, false, false));
+    stopping = true;
+    write_armed = true;
+    copy_value_clicked(NULL);
+    assert(!write_armed && payload_clipboard_peek()->length == 4);
+    struct ble_gap_event disconnected = {.type = BLE_GAP_EVENT_DISCONNECT};
+    generic_gap_event(&disconnected, NULL);
+    copy_value_clicked(NULL);
+    assert(!ble_tool_busy() && !last_value_seen && payload_clipboard_peek()->length == 4);
+
+    payload_clipboard_clear();
+    snprintf(status_text, sizeof(status_text), "Ready; scanning and connections are opt-in");
+    status_dirty = value_dirty = view_dirty = false;
+    ESP_LOGI(TAG, "Received-value self-test passed: bounded reads, chained buffers, notify/indicate, copy and disconnect");
+}
+#endif
+
 void ble_tool_self_test(void)
 {
+#ifndef NDEBUG
+    received_value_self_test();
+#endif
     uint8_t value[BLE_TOOL_WRITE_MAX];
     size_t length;
     assert(parse_hex("01 af FF", value, &length) && length == 3 &&

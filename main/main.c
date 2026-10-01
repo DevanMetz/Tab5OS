@@ -16,6 +16,9 @@
 #include "storage_io.h"
 #include "capture_viewer.h"
 #include "serial_log_viewer.h"
+#include "i2c_result.h"
+#include "i2c_register.h"
+#include "psram_exec_compat.h"
 #include "ble_tool.h"
 #include "http_tool.h"
 #include "mqtt_tool.h"
@@ -25,12 +28,29 @@
 #include "spi_tool.h"
 #include "uart_tool.h"
 #include "ender3_tool.h"
+#include "electronics_tool.h"
+#include "electronics_math.h"
+#include "byte_tool.h"
+#include "byte_data.h"
+#include "modbus_tool.h"
+#include "modbus_rtu_tool.h"
+#include "modbus_data.h"
+#include "ntp_tool.h"
+#include "ntp_data.h"
+#include "wol_tool.h"
+#include "wol_data.h"
+#include "subnet_tool.h"
+#include "udp_tool.h"
+#include "subnet_data.h"
+#include "resistor_tool.h"
+#include "resistor_data.h"
 #include "esp_app_desc.h"
 #include "esp_cache.h"
 #include "esp_chip_info.h"
 #include "esp_event.h"
 #include "esp_heap_caps.h"
 #include "esp_http_client.h"
+#include "esp_idf_version.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_ota_ops.h"
@@ -458,6 +478,7 @@ static TickType_t i2c_capture_last_flush_tick;
 static uint8_t i2c_selected_address = 0x08;
 static uint8_t i2c_selected_register;
 static uint8_t i2c_write_value;
+static size_t i2c_read_length = 1;
 static uint32_t i2c_bus_speed_hz = I2C_STANDARD_SPEED_HZ;
 static uint32_t i2c_write_armed_at_ms;
 static bool i2c_watch_enabled;
@@ -1642,13 +1663,15 @@ static void servo_set_pulse(uint16_t pulse_us)
 static void servo_stop(void)
 {
     servo_running = false;
-    gpio_set_level(TOY_LED_PIN, 0);
+    /* Home may be retrying a failed external I2C teardown on shared G54. */
+    bool release_led = !i2c_register_busy();
+    if (release_led) gpio_set_level(TOY_LED_PIN, 0);
     if (servo_pwm_ready) {
         ledc_stop(LEDC_LOW_SPEED_MODE, SERVO_LEDC_CHANNEL, 0);
         servo_pwm_ready = false;
     }
     const gpio_config_t released = {
-        .pin_bit_mask = (1ULL << SERVO_PIN) | (1ULL << TOY_LED_PIN),
+        .pin_bit_mask = (1ULL << SERVO_PIN) | (release_led ? 1ULL << TOY_LED_PIN : 0),
         .mode = GPIO_MODE_DISABLE,
         .pull_up_en = GPIO_PULLUP_DISABLE,
         .pull_down_en = GPIO_PULLDOWN_ENABLE,
@@ -2467,13 +2490,23 @@ static void alarm_sound_task(void *argument)
         if (!alarm_speaker) alarm_speaker = bsp_audio_codec_speaker_init();
         esp_codec_dev_sample_info_t format = {.sample_rate = 16000, .channel = 1, .bits_per_sample = 16};
         if (alarm_speaker && esp_codec_dev_open(alarm_speaker, &format) == ESP_CODEC_DEV_OK) {
-            esp_codec_dev_set_out_vol(alarm_speaker, 75);
+            int16_t silence[160] = {0};
+            bool audio_ready = esp_codec_dev_set_out_mute(alarm_speaker, true) == ESP_CODEC_DEV_OK &&
+                               esp_codec_dev_set_out_vol(alarm_speaker, 75) == ESP_CODEC_DEV_OK &&
+                               esp_codec_dev_write(alarm_speaker, silence, sizeof(silence)) == ESP_CODEC_DEV_OK &&
+                               esp_codec_dev_set_out_mute(alarm_speaker, false) == ESP_CODEC_DEV_OK;
+            if (audio_ready) audio_ready = bsp_set_speaker_en(true) == ESP_OK;
+            if (!audio_ready) ESP_LOGE("alarm", "Speaker setup failed; alarm remains visual");
             int16_t tone[160];
             for (size_t i = 0; i < sizeof(tone) / sizeof(tone[0]); i++) tone[i] = (i / 9) & 1 ? 9000 : -9000;
-            while (alarm_active) {
+            while (alarm_active && audio_ready) {
                 for (int i = 0; i < 40 && alarm_active; i++) esp_codec_dev_write(alarm_speaker, tone, sizeof(tone));
                 vTaskDelay(pdMS_TO_TICKS(600));
             }
+            esp_codec_dev_set_out_mute(alarm_speaker, true);
+            esp_err_t speaker_error = bsp_set_speaker_en(false);
+            if (speaker_error != ESP_OK)
+                ESP_LOGE("alarm", "Could not disable speaker amplifier: %s", esp_err_to_name(speaker_error));
             esp_codec_dev_close(alarm_speaker);
         }
     }
@@ -2879,6 +2912,16 @@ static lv_obj_t *button(lv_obj_t *parent, const char *text, lv_event_cb_t callba
     return btn;
 }
 
+static bool shared_i2c_pins_available(void)
+{
+    if (!i2c_register_busy()) return true;
+    lv_obj_t *notice = lv_label_create(content);
+    lv_obj_set_width(notice, 640);
+    lv_label_set_text(notice, "I2C cleanup is still pending.\n"
+                            "Return Home to retry before using G53/G54.");
+    return false;
+}
+
 static void app_icon(lv_obj_t *parent, const char *symbol, const char *name,
                      uint32_t color, lv_event_cb_t callback, void *user_data,
                      int column, int row)
@@ -2901,8 +2944,12 @@ static void app_icon(lv_obj_t *parent, const char *symbol, const char *name,
     lv_obj_center(icon);
 
     lv_obj_t *label = lv_label_create(cell);
+    lv_obj_set_size(label, LV_PCT(100), 56);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
     lv_label_set_text(label, name);
     lv_obj_set_style_text_font(label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_letter_space(label, -1, 0);
+    lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
 }
 
 static esp_err_t chat_http_event(esp_http_client_event_t *event)
@@ -3938,7 +3985,6 @@ static void clear_content(void)
     serial_log_viewer_stop();
     signal_tool_stop();
     spi_tool_stop();
-    uart_tool_stop();
     ender3_tool_stop();
     if (chat_timer) {
         lv_timer_delete(chat_timer);
@@ -3973,6 +4019,10 @@ static void clear_content(void)
     i2c_watch_enabled = false;
     i2c_write_armed = false;
     i2c_write_armed_at_ms = 0;
+    esp_err_t i2c_stop_error = i2c_register_stop();
+    if (i2c_stop_error != ESP_OK)
+        ESP_LOGE("i2c", "External bus cleanup is pending: %s", esp_err_to_name(i2c_stop_error));
+    i2c_result_stop();
     if (scope_timer) {
         lv_timer_delete(scope_timer);
         scope_timer = NULL;
@@ -4662,6 +4712,15 @@ static void wifi_connect_clicked(lv_event_t *event)
     show_settings();
 }
 
+static void wifi_password_visibility_clicked(lv_event_t *event)
+{
+    if (!wifi_password_area) return;
+    bool reveal = lv_textarea_get_password_mode(wifi_password_area);
+    lv_textarea_set_password_mode(wifi_password_area, !reveal);
+    lv_obj_t *toggle = lv_event_get_target(event);
+    lv_label_set_text(lv_obj_get_child(toggle, 0), reveal ? "Hide" : "Show");
+}
+
 static void wifi_network_clicked(lv_event_t *event)
 {
     wifi_ap_record_t *ap = lv_event_get_user_data(event);
@@ -4673,16 +4732,30 @@ static void wifi_network_clicked(lv_event_t *event)
     lv_obj_set_width(title, 640);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
 
-    wifi_password_area = lv_textarea_create(content);
-    lv_obj_set_size(wifi_password_area, 640, 100);
-    lv_textarea_set_placeholder_text(wifi_password_area, "Wi-Fi password (blank for open networks)");
+    lv_obj_t *password_row = lv_obj_create(content);
+    lv_obj_remove_style_all(password_row);
+    lv_obj_set_size(password_row, 640, 76);
+    lv_obj_set_flex_flow(password_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(password_row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                         LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(password_row, LV_OBJ_FLAG_SCROLLABLE);
+    wifi_password_area = lv_textarea_create(password_row);
+    lv_textarea_set_placeholder_text(wifi_password_area, "Wi-Fi password");
     lv_textarea_set_password_mode(wifi_password_area, true);
     lv_textarea_set_max_length(wifi_password_area, 63);
     lv_textarea_set_one_line(wifi_password_area, true);
+    lv_obj_set_size(wifi_password_area, 500, 76);
+    lv_obj_set_style_text_font(wifi_password_area, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_pad_ver(wifi_password_area, 20, 0);
+    lv_obj_t *visibility = button(password_row, "Show", wifi_password_visibility_clicked);
+    lv_obj_set_size(visibility, 128, 76);
+    lv_obj_t *hint = lv_label_create(content);
+    lv_label_set_text(hint, "Leave the password blank for an open network.");
     button(content, "Connect", wifi_connect_clicked);
 
     lv_obj_t *keyboard = lv_keyboard_create(content);
-    lv_obj_set_size(keyboard, 640, 540);
+    lv_obj_set_size(keyboard, 640, 320);
+    lv_obj_set_style_text_font(keyboard, &lv_font_montserrat_28, LV_PART_ITEMS);
     lv_keyboard_set_textarea(keyboard, wifi_password_area);
     active_app_leave = settings_leave;
 }
@@ -4777,6 +4850,7 @@ static void screen_timeout_clicked(lv_event_t *event)
 static void settings_leave(void)
 {
     wifi_forget_armed = false;
+    wifi_password_area = NULL;
     if (wifi_timer) {
         lv_timer_delete(wifi_timer);
         wifi_timer = NULL;
@@ -4789,7 +4863,7 @@ static void network_tools_clicked(lv_event_t *event)
     (void)event;
     clear_content();
     network_tool_show(content, wifi_connected);
-    active_app_leave = settings_leave;
+    active_app_leave = network_tool_stop;
 }
 
 static void show_settings(void)
@@ -5065,6 +5139,7 @@ static const char *restart_blocker(void)
     if (ebook_download_busy) return "Wait for book downloads to finish";
     if (ride_recording || ride_file) return "Stop and save the active ride first";
     if (i2c_capture_file) return "Stop and save the I2C capture first";
+    if (i2c_register_busy()) return "External I2C cleanup is pending; retry Home";
     if (signal_tool_busy()) return "Stop the PWM output first";
     if (spi_tool_busy()) return "Stop the SPI interface first";
     if (uart_tool_busy()) return "Stop and save the serial session first";
@@ -5074,7 +5149,8 @@ static const char *restart_blocker(void)
     if (servo_running) return "Stop the Servo Toy output first";
     if (weather_busy) return "Wait for weather settings to finish saving";
     if (chat_busy || browser_busy || wifi_scan_busy || network_tool_busy() ||
-        http_tool_busy() || mqtt_tool_busy())
+        http_tool_busy() || mqtt_tool_busy() || modbus_tool_busy() ||
+        ntp_tool_busy() || wol_tool_busy() || udp_tool_busy())
         return "Wait for the active network task to finish";
     if (ble_tool_busy()) return "Disconnect the BLE GATT Explorer first";
     if (alarm_active) return "Dismiss the active alarm first";
@@ -5258,8 +5334,15 @@ static void system_clicked(lv_event_t *event)
     esp_chip_info_t chip;
     esp_chip_info(&chip);
     const esp_app_desc_t *app = esp_app_get_description();
+    char elf_hash[13];
+    esp_app_get_elf_sha256(elf_hash, sizeof(elf_hash));
     uint64_t uptime = esp_timer_get_time() / 1000000;
     const esp_partition_t *running = esp_ota_get_running_partition();
+    char running_text[64] = "unavailable";
+    if (running)
+        snprintf(running_text, sizeof(running_text), "%s @ 0x%08lx (%lu KB)",
+                 running->label, (unsigned long)running->address,
+                 (unsigned long)(running->size / 1024));
     esp_ota_img_states_t ota_state = ESP_OTA_IMG_UNDEFINED;
     const char *ota_state_text = esp_ota_get_state_partition(running, &ota_state) == ESP_OK
                                  ? ota_state_name(ota_state) : "not tracked";
@@ -5293,13 +5376,14 @@ static void system_clicked(lv_event_t *event)
     }
     lv_obj_t *info = lv_label_create(content);
     lv_label_set_text_fmt(info,
-        "Tab5 OS %s\nBuilt %s %s with %s\n\n"
+        "Tab5 OS %s\nESP-IDF %d.%d.%d | ELF SHA-256: %s...\n\n"
         "ESP32-P4 rev %d.%d  |  %d cores\nPanel: %s 720 x 1280\n"
         "Reset: %s\nUptime: %lu d %02lu:%02lu\n"
         "Internal heap: %lu KB free / %lu KB minimum\nPSRAM: %lu KB free / %lu KB total\n\n"
         "Settings: %s\nInternal: %s\nSD card: %s\nWi-Fi: %s\n"
-        "OTA image: %s\nLast OTA: %s\nInvalid OTA image: %s",
-        app->version, app->date, app->time, app->idf_ver,
+        "Running app: %s\nOTA image: %s\nLast OTA: %s\nInvalid OTA image: %s",
+        app->version, ESP_IDF_VERSION_MAJOR, ESP_IDF_VERSION_MINOR,
+        ESP_IDF_VERSION_PATCH, elf_hash,
         chip.revision / 100, chip.revision % 100, chip.cores,
         bsp_display_get_panel_ic(), reset_reason_name(esp_reset_reason()),
         (unsigned long)(uptime / 86400), (unsigned long)(uptime / 3600 % 24),
@@ -5311,7 +5395,7 @@ static void system_clicked(lv_event_t *event)
         nvs_init_error == ESP_OK ? "ready" : esp_err_to_name(nvs_init_error),
         internal_text, sd_text,
         wifi_connected ? wifi_ip : wifi_ready ? "disconnected" : "unavailable",
-        ota_state_text, ota_last_result, last_rollback);
+        running_text, ota_state_text, ota_last_result, last_rollback);
     lv_obj_set_style_text_line_space(info, 8, 0);
     storage_format_armed = false;
     if (!internal_ready) {
@@ -5431,6 +5515,7 @@ static void gpio_clicked(lv_event_t *event)
 static void show_gpio(void)
 {
     clear_content();
+    if (!shared_i2c_pins_available()) return;
     lv_obj_t *title = lv_label_create(content);
     lv_label_set_text(title, "GPIO");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
@@ -5511,6 +5596,8 @@ static void i2c_self_test(void)
 
 static void i2c_disarm_write(void)
 {
+    if (i2c_write_armed && i2c_read_result)
+        lv_label_set_text(i2c_read_result, "Write confirmation canceled");
     i2c_write_armed = false;
     i2c_write_armed_at_ms = 0;
 }
@@ -5532,6 +5619,12 @@ static void i2c_update_controls(void)
         lv_label_set_text(i2c_write_label, i2c_write_armed ? "CONFIRM WRITE" : "ARM WRITE BYTE");
     if (i2c_capture_label)
         lv_label_set_text(i2c_capture_label, i2c_capture_file ? "STOP & SAVE CSV" : "START CSV CAPTURE");
+}
+
+static void i2c_result_action(void)
+{
+    i2c_disarm_write();
+    i2c_update_controls();
 }
 
 static bool i2c_capture_stop(void)
@@ -5720,6 +5813,13 @@ static void i2c_speed_clicked(lv_event_t *event)
     i2c_update_controls();
 }
 
+static void i2c_length_changed(lv_event_t *event)
+{
+    i2c_result_action();
+    uint32_t selection = lv_dropdown_get_selected(lv_event_get_target(event));
+    if (selection < I2C_REGISTER_MAX_BYTES) i2c_read_length = selection + 1;
+}
+
 static lv_obj_t *i2c_step_button(lv_obj_t *parent, const char *text, lv_event_cb_t callback, int step)
 {
     lv_obj_t *control = button(parent, text, NULL);
@@ -5745,7 +5845,9 @@ static lv_obj_t *i2c_step_row(lv_event_cb_t callback)
 static void i2c_scan_clicked(lv_event_t *event)
 {
     (void)event;
-    esp_err_t error = bsp_ext_i2c_init();
+    i2c_result_action();
+    esp_err_t error = i2c_register_stop();
+    if (error == ESP_OK) error = bsp_ext_i2c_init();
     if (error != ESP_OK) {
         lv_label_set_text_fmt(i2c_status, "Could not start I2C: %s", esp_err_to_name(error));
         return;
@@ -5770,7 +5872,7 @@ static void i2c_scan_clicked(lv_event_t *event)
                            count ? count % 8 ? "  " : "\n" : "", text);
         count++;
     }
-    esp_err_t deinit_error = bsp_ext_i2c_deinit();
+    esp_err_t deinit_error = i2c_register_stop();
 
     if (deinit_error != ESP_OK) {
         ESP_LOGE("i2c", "Could not release external I2C after scan: %s", esp_err_to_name(deinit_error));
@@ -5790,49 +5892,26 @@ static void i2c_scan_clicked(lv_event_t *event)
     }
 }
 
-static esp_err_t i2c_register_byte_transaction(uint8_t address, uint8_t register_address,
-                                               uint8_t *value, bool write)
-{
-    esp_err_t error = bsp_ext_i2c_init();
-    if (error != ESP_OK) return error;
-
-    i2c_master_dev_handle_t device = NULL;
-    i2c_device_config_t config = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address = address,
-        .scl_speed_hz = i2c_bus_speed_hz,
-    };
-    error = i2c_master_bus_add_device(bsp_ext_i2c_get_handle(), &config, &device);
-    if (error == ESP_OK) {
-        uint8_t data[] = {register_address, *value};
-        error = write ? i2c_master_transmit(device, data, sizeof(data), 50) :
-                        i2c_master_transmit_receive(device, data, 1, value, 1, 50);
-    }
-    esp_err_t device_cleanup_error = device ? i2c_master_bus_rm_device(device) : ESP_OK;
-    esp_err_t bus_cleanup_error = bsp_ext_i2c_deinit();
-    if (device_cleanup_error != ESP_OK)
-        ESP_LOGE("i2c", "Could not remove external I2C device: %s", esp_err_to_name(device_cleanup_error));
-    if (bus_cleanup_error != ESP_OK)
-        ESP_LOGE("i2c", "Could not release external I2C bus: %s", esp_err_to_name(bus_cleanup_error));
-    if (device_cleanup_error != ESP_OK) return device_cleanup_error;
-    if (bus_cleanup_error != ESP_OK) return bus_cleanup_error;
-    return error;
-}
-
 static void i2c_read_once(bool watching)
 {
     if (!i2c_read_result) return;
-    uint8_t value = 0;
-    esp_err_t error = i2c_register_byte_transaction(i2c_selected_address, i2c_selected_register,
-                                                    &value, false);
-    if (watching) i2c_capture_log(error, value);
+    uint8_t bytes[I2C_REGISTER_MAX_BYTES] = {0};
+    size_t length = watching ? 1 : i2c_read_length;
+    esp_err_t error = i2c_register_read(i2c_selected_address, i2c_selected_register,
+                                       i2c_bus_speed_hz, bytes, length);
+    i2c_result_record(error == ESP_OK, i2c_selected_address, i2c_selected_register,
+                       i2c_bus_speed_hz, bytes, length);
+    if (watching) i2c_capture_log(error, bytes[0]);
     if (error == ESP_OK) {
         if (watching)
             lv_label_set_text_fmt(i2c_read_result, "WATCH  0x%02X = 0x%02X  (%u)",
-                                  i2c_selected_register, value, value);
-        else
+                                  i2c_selected_register, bytes[0], bytes[0]);
+        else if (length == 1)
             lv_label_set_text_fmt(i2c_read_result, "0x%02X = 0x%02X  (%u)",
-                                  i2c_selected_register, value, value);
+                                  i2c_selected_register, bytes[0], bytes[0]);
+        else
+            lv_label_set_text_fmt(i2c_read_result, "Read %u bytes after register pointer 0x%02X",
+                                  (unsigned)length, i2c_selected_register);
     }
     else if (error == ESP_ERR_TIMEOUT)
         lv_label_set_text(i2c_read_result, "Read timed out - check wiring and pull-ups");
@@ -5843,6 +5922,12 @@ static void i2c_read_once(bool watching)
 static void i2c_read_clicked(lv_event_t *event)
 {
     (void)event;
+    i2c_result_action();
+    /* Hold the one-shot result instead of replacing it at the next watch tick.
+     * CSV remains the existing one-byte, 1 Hz format. */
+    i2c_watch_enabled = false;
+    if (i2c_capture_file) i2c_capture_stop();
+    i2c_update_controls();
     lv_label_set_text_fmt(i2c_read_result, "Reading 0x%02X register 0x%02X...",
                           i2c_selected_address, i2c_selected_register);
     lv_refr_now(NULL);
@@ -5863,6 +5948,7 @@ static void i2c_watch_clicked(lv_event_t *event)
 static void i2c_capture_clicked(lv_event_t *event)
 {
     (void)event;
+    i2c_result_action();
     if (i2c_capture_file) {
         i2c_capture_stop();
     } else if (i2c_capture_start()) {
@@ -5892,8 +5978,9 @@ static void i2c_write_clicked(lv_event_t *event)
                           i2c_write_value, i2c_selected_register);
     lv_refr_now(NULL);
     uint8_t value = i2c_write_value;
-    esp_err_t error = i2c_register_byte_transaction(i2c_selected_address, i2c_selected_register,
-                                                    &value, true);
+    i2c_result_clear();
+    esp_err_t error = i2c_register_write_byte(i2c_selected_address, i2c_selected_register,
+                                             i2c_bus_speed_hz, value);
     if (error == ESP_OK)
         lv_label_set_text_fmt(i2c_read_result, "Wrote 0x%02X to register 0x%02X",
                               value, i2c_selected_register);
@@ -5933,6 +6020,69 @@ static void ender3_clicked(lv_event_t *event)
     (void)event;
     clear_content();
     ender3_tool_show(content);
+}
+
+static void electronics_clicked(lv_event_t *event)
+{
+    (void)event;
+    clear_content();
+    electronics_tool_show(content);
+}
+
+static void byte_clicked(lv_event_t *event)
+{
+    (void)event;
+    clear_content();
+    byte_tool_show(content);
+}
+
+static void modbus_clicked(lv_event_t *event)
+{
+    (void)event;
+    clear_content();
+    modbus_tool_show(content, wifi_connected);
+}
+
+static void modbus_rtu_clicked(lv_event_t *event)
+{
+    (void)event;
+    clear_content();
+    modbus_rtu_tool_show(content);
+}
+
+static void ntp_clicked(lv_event_t *event)
+{
+    (void)event;
+    clear_content();
+    ntp_tool_show(content, wifi_connected);
+}
+
+static void wol_clicked(lv_event_t *event)
+{
+    (void)event;
+    clear_content();
+    wol_tool_show(content, wifi_connected);
+}
+
+static void subnet_clicked(lv_event_t *event)
+{
+    (void)event;
+    clear_content();
+    subnet_tool_show(content);
+}
+
+static void udp_clicked(lv_event_t *event)
+{
+    (void)event;
+    clear_content();
+    udp_tool_show(content, wifi_connected);
+}
+
+static void resistor_clicked(lv_event_t *event)
+{
+    (void)event;
+    clear_content();
+    resistor_tool_show(content);
 }
 
 static void spi_clicked(lv_event_t *event)
@@ -5981,9 +6131,11 @@ static void show_i2c(void)
     lv_obj_t *help = lv_label_create(content);
     lv_obj_set_width(help, 620);
     lv_obj_set_style_text_align(help, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(help, &lv_font_montserrat_14, 0);
     lv_label_set_text(help, "Grove/EXT: SDA G53, SCL G54; external 5V stays off.\n"
                             "Share ground. Use 3.3V pull-ups or level-shift a 5V bus.\n"
-                            "One-byte reads can have side effects; check the device datasheet.\n"
+                            "Read 1-32 bytes after an 8-bit register pointer.\n"
+                            "Reads can have side effects; check the device's auto-increment rules.\n"
                             "Raw writes can reconfigure hardware; verify the register and value first.");
 
     lv_obj_t *scan = button(content, LV_SYMBOL_REFRESH "  SCAN", i2c_scan_clicked);
@@ -5991,9 +6143,11 @@ static void show_i2c(void)
     i2c_status = lv_label_create(content);
     lv_obj_set_width(i2c_status, 620);
     lv_obj_set_style_text_align(i2c_status, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(i2c_status, "Ready; tap SCAN to probe addresses 0x08-0x77");
     i2c_devices = lv_label_create(content);
     lv_obj_set_width(i2c_devices, 620);
     lv_obj_set_style_text_align(i2c_devices, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(i2c_devices, "No scan performed this visit");
     lv_obj_t *speed = button(content, "", i2c_speed_clicked);
     lv_obj_set_size(speed, 620, 70);
     i2c_speed_label = lv_obj_get_child(speed, 0);
@@ -6003,12 +6157,35 @@ static void show_i2c(void)
     i2c_register_label = lv_label_create(content);
     lv_obj_set_style_text_font(i2c_register_label, &lv_font_montserrat_28, 0);
     i2c_step_row(i2c_register_step_clicked);
+    lv_obj_t *length_row = lv_obj_create(content);
+    lv_obj_remove_style_all(length_row);
+    lv_obj_set_size(length_row, 620, 64);
+    lv_obj_set_flex_flow(length_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(length_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *length_label = lv_label_create(length_row);
+    lv_label_set_text(length_label, "One-shot bytes:");
+    lv_obj_set_style_text_font(length_label, &lv_font_montserrat_28, 0);
+    lv_obj_t *length_select = lv_dropdown_create(length_row);
+    lv_obj_set_size(length_select, 240, 60);
+    lv_obj_set_style_text_font(length_select, &lv_font_montserrat_28, 0);
+    char lengths[96];
+    size_t length_text_used = 0;
+    for (unsigned count = 1; count <= I2C_REGISTER_MAX_BYTES; count++)
+        length_text_used += (size_t)snprintf(lengths + length_text_used, sizeof(lengths) - length_text_used,
+                                             "%s%u", count == 1 ? "" : "\n", count);
+    lv_dropdown_set_options(length_select, lengths);
+    lv_dropdown_set_selected(length_select, (uint32_t)i2c_read_length - 1);
+    lv_obj_add_event_cb(length_select, i2c_length_changed, LV_EVENT_VALUE_CHANGED, NULL);
+    lv_obj_t *read_help = lv_label_create(content);
+    lv_obj_set_width(read_help, 620);
+    lv_obj_set_style_text_font(read_help, &lv_font_montserrat_14, 0);
+    lv_label_set_text(read_help, "Watch/CSV always sample one byte at 1 Hz. READ ONCE stops Watch and saves its CSV.");
     lv_obj_t *read_row = lv_obj_create(content);
     lv_obj_remove_style_all(read_row);
     lv_obj_set_size(read_row, 620, 72);
     lv_obj_set_flex_flow(read_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(read_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_t *read = button(read_row, "READ BYTE", i2c_read_clicked);
+    lv_obj_t *read = button(read_row, "READ ONCE", i2c_read_clicked);
     lv_obj_set_size(read, 300, 70);
     lv_obj_t *watch = button(read_row, "", i2c_watch_clicked);
     lv_obj_set_size(watch, 300, 70);
@@ -6017,6 +6194,7 @@ static void show_i2c(void)
     lv_obj_set_width(i2c_read_result, 620);
     lv_obj_set_style_text_align(i2c_read_result, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(i2c_read_result, "Select an address and register, then read once");
+    i2c_result_show(content, i2c_result_action);
     lv_obj_t *capture = button(content, "", i2c_capture_clicked);
     lv_obj_set_size(capture, 620, 70);
     i2c_capture_label = lv_obj_get_child(capture, 0);
@@ -6032,7 +6210,6 @@ static void show_i2c(void)
     lv_obj_set_size(write, 620, 80);
     i2c_write_label = lv_obj_get_child(write, 0);
     i2c_update_controls();
-    i2c_scan_clicked(NULL);
     i2c_timer = lv_timer_create(i2c_tick, 1000, NULL);
 }
 
@@ -6068,6 +6245,7 @@ static void scope_clicked(lv_event_t *event)
 static void show_scope(void)
 {
     clear_content();
+    if (!shared_i2c_pins_available()) return;
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
     if (!scope_ring) {
         scope_ring = heap_caps_calloc(SCOPE_RING_POINTS, sizeof(*scope_ring), MALLOC_CAP_SPIRAM);
@@ -6273,8 +6451,10 @@ static void ride_load_history(void)
         }
         fclose(file);
     }
-    lv_label_set_text_fmt(ride_history, "History: %d rides  |  %.1f mi  |  %.1f hr  |  best %d W",
-                          rides, total_distance * 0.621371f, total_seconds / 3600.0f, best_power);
+    char history_text[160];
+    snprintf(history_text, sizeof(history_text), "History: %d rides  |  %.1f mi  |  %.1f hr  |  best %d W",
+             rides, total_distance * 0.621371f, total_seconds / 3600.0f, best_power);
+    lv_label_set_text(ride_history, history_text);
 }
 
 static bool ride_append_summary(unsigned duration)
@@ -6515,12 +6695,17 @@ static void cycling_tick(lv_timer_t *timer)
     if (ride_toggle_label)
         lv_label_set_text(ride_toggle_label, enabled ? "Turn KICKR Bluetooth off" : "Turn KICKR Bluetooth on");
     lv_label_set_text_fmt(ride_power_label, data.has_power ? "%d W" : "-- W", data.power_w);
-    lv_label_set_text_fmt(ride_cadence_label, data.has_cadence ? "%.0f RPM" : "-- RPM", data.cadence_rpm);
+    /* LVGL's formatter has float support disabled; libc snprintf supports it. */
+    char cadence_text[32];
+    snprintf(cadence_text, sizeof(cadence_text), data.has_cadence ? "%.0f RPM" : "-- RPM", data.cadence_rpm);
+    lv_label_set_text(ride_cadence_label, cadence_text);
     lv_label_set_text_fmt(ride_hr_label, heart_rate > 0 ? "%d BPM" : "-- BPM", heart_rate);
     unsigned elapsed = ride_recording ? pdTICKS_TO_MS(ticks - ride_started_tick) / 1000 : 0;
-    lv_label_set_text_fmt(ride_stats, "%.1f mph  |  %.2f mi  |  %.1f kJ  |  %02u:%02u:%02u",
-                          data.speed_kmh * 0.621371f, ride_distance_km * 0.621371f, ride_work_kj,
-                          elapsed / 3600, elapsed / 60 % 60, elapsed % 60);
+    char stats_text[160];
+    snprintf(stats_text, sizeof(stats_text), "%.1f mph  |  %.2f mi  |  %.1f kJ  |  %02u:%02u:%02u",
+             data.speed_kmh * 0.621371f, ride_distance_km * 0.621371f, ride_work_kj,
+             elapsed / 3600, elapsed / 60 % 60, elapsed % 60);
+    lv_label_set_text(ride_stats, stats_text);
     lv_label_set_text(ride_button_label, ride_recording ? "Stop & save" : "Start ride");
     if (ride_chart && fresh) {
         lv_chart_set_next_value(ride_chart, ride_power_series, data.has_power ? data.power_w : 0);
@@ -6895,6 +7080,7 @@ static void servo_rate_clicked(lv_event_t *event)
 static void show_servo(void)
 {
     clear_content();
+    if (!shared_i2c_pins_available()) return;
     lv_obj_t *title = lv_label_create(content);
     lv_label_set_text(title, "Servo Toy");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
@@ -7400,13 +7586,23 @@ static const app_definition_t launcher_apps[] = {
     {LV_SYMBOL_PLAY, "Servo Toy", 0xEF6C00, servo_clicked, NULL, 2, 3},
     {LV_SYMBOL_CHARGE, "Cycling", 0x1565C0, cycling_clicked, NULL, 3, 3},
     {LV_SYMBOL_LIST, "I2C Tool", 0x00838F, i2c_clicked, NULL, 0, 4},
-    {LV_SYMBOL_CALL, "Serial", 0x5E35B1, uart_clicked, NULL, 1, 4},
+    {LV_SYMBOL_CALL, "Serial", 0x5E35B1, uart_clicked, uart_tool_stop, 1, 4},
     {LV_SYMBOL_SHUFFLE, "SPI Master", 0xAD4B00, spi_clicked, NULL, 2, 4},
     {LV_SYMBOL_TINT, "Signal Gen", 0xC62828, signal_clicked, NULL, 3, 4},
     {LV_SYMBOL_DOWNLOAD, "HTTP Tool", 0x00695C, http_clicked, http_tool_stop, 0, 5},
     {LV_SYMBOL_WIFI, "MQTT", 0x455A64, mqtt_clicked, mqtt_tool_stop, 1, 5},
     {LV_SYMBOL_BLUETOOTH, "BLE GATT", 0x6A4C93, ble_clicked, ble_tool_stop, 2, 5},
+    {LV_SYMBOL_WIFI, "Network", 0x0277BD, network_tools_clicked, network_tool_stop, 3, 5},
     {LV_SYMBOL_DRIVE, "Ender 3", 0x1B5E20, ender3_clicked, ender3_tool_stop, 0, 6},
+    {LV_SYMBOL_PLUS, "Electronics", 0x006064, electronics_clicked, electronics_tool_stop, 1, 6},
+    {LV_SYMBOL_LIST, "Byte Lab", 0x4527A0, byte_clicked, byte_tool_stop, 2, 6},
+    {LV_SYMBOL_WIFI, "Modbus TCP", 0x1565C0, modbus_clicked, modbus_tool_stop, 3, 6},
+    {LV_SYMBOL_LOOP, "NTP Lab", 0x00695C, ntp_clicked, ntp_tool_stop, 0, 7},
+    {LV_SYMBOL_POWER, "Wake-on-LAN", 0xAD4B00, wol_clicked, wol_tool_stop, 1, 7},
+    {LV_SYMBOL_SHUFFLE, "Subnet Lab", 0x0277BD, subnet_clicked, subnet_tool_stop, 2, 7},
+    {LV_SYMBOL_UPLOAD, "UDP Console", 0x5E35B1, udp_clicked, udp_tool_stop, 3, 7},
+    {LV_SYMBOL_BARS, "Resistor Lab", 0x8D6E34, resistor_clicked, resistor_tool_stop, 0, 8},
+    {LV_SYMBOL_LIST, "RTU Frames", 0x1565C0, modbus_rtu_clicked, modbus_rtu_tool_stop, 1, 8},
 };
 
 static void launcher_app_clicked(lv_event_t *event)
@@ -7421,7 +7617,7 @@ static void show_launcher(void)
     static int32_t columns[] = {
         LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_FR(1), LV_GRID_TEMPLATE_LAST};
     static int32_t rows[] = {
-        215, 215, 215, 215, 215, 215, 215,
+        215, 215, 215, 215, 215, 215, 215, 215, 215,
         LV_GRID_TEMPLATE_LAST};
     clear_content();
     lv_obj_set_grid_dsc_array(content, columns, rows);
@@ -7467,6 +7663,7 @@ static void confirm_running_ota(lv_timer_t *timer)
 
 void app_main(void)
 {
+    psram_exec_self_test();
     scope_self_test();
     i2c_self_test();
     alarm_self_test();
@@ -7481,6 +7678,13 @@ void app_main(void)
     display_self_test();
     uart_tool_self_test();
     ender3_tool_self_test();
+    electronics_math_self_test();
+    byte_data_self_test();
+    modbus_data_self_test();
+    ntp_data_self_test();
+    wol_data_self_test();
+    subnet_data_self_test();
+    resistor_data_self_test();
     spi_tool_self_test();
     signal_tool_self_test();
     network_tool_self_test();
