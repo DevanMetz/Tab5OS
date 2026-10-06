@@ -18,6 +18,15 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "storage_io.h"
+#include "http_transport.h"
+
+#if !CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT
+#error "HTTP Console requires CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT=y"
+#endif
+/* ESP-IDF 5.4.2 assigns custom transports inside its HTTPS configuration block. */
+#if !CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS
+#error "HTTP Console requires CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=y"
+#endif
 
 #define HTTP_URL_MAX 255
 #define HTTP_HEADERS_MAX 511
@@ -25,6 +34,7 @@
 #define HTTP_PREVIEW_MAX 4096
 #define HTTP_HEADER_LIMIT 4
 #define HTTP_CONFIRM_MS 5000U
+#define HTTP_REQUEST_MS 15000U
 #define HTTP_LOG_PATH "/sdcard/HTTP/HTTPLOG.CSV"
 
 typedef struct {
@@ -42,6 +52,10 @@ typedef struct {
     size_t preview_length;
     bool truncated;
     bool incomplete;
+    bool cancelled;
+    bool deadline_expired;
+    bool invalid_headers;
+    int64_t started_us;
     char content_type[96];
     char location[160];
     char preview[HTTP_PREVIEW_MAX + 1];
@@ -54,9 +68,8 @@ static const char *const method_names[] = {"GET", "POST", "PUT", "DELETE"};
 
 static portMUX_TYPE http_lock = portMUX_INITIALIZER_UNLOCKED;
 static volatile bool request_busy;
-static http_job_t *pending_job;
+static bool cancel_requested;
 static http_job_t *completed_job;
-static TaskHandle_t worker_handle;
 static lv_timer_t *ui_timer;
 static lv_obj_t *url_area;
 static lv_obj_t *headers_area;
@@ -65,6 +78,8 @@ static lv_obj_t *keyboard;
 static lv_obj_t *method_label;
 static lv_obj_t *log_label;
 static lv_obj_t *send_label;
+static lv_obj_t *cancel_button;
+static lv_obj_t *request_label;
 static lv_obj_t *status_label;
 static lv_obj_t *response_area;
 static unsigned method_index;
@@ -120,6 +135,13 @@ static void safe_log_url(const char *url, char output[HTTP_URL_MAX + 1])
     if (length > HTTP_URL_MAX) length = HTTP_URL_MAX;
     memcpy(output, url, length);
     output[length] = '\0';
+}
+
+static const char *method_name(esp_http_client_method_t method)
+{
+    return method_names[method == HTTP_METHOD_GET ? 0 :
+                        method == HTTP_METHOD_POST ? 1 :
+                        method == HTTP_METHOD_PUT ? 2 : 3];
 }
 
 static bool header_name_character(unsigned char value)
@@ -316,13 +338,14 @@ static int append_log(const http_job_t *job)
 
     char safe_url[HTTP_URL_MAX + 1];
     safe_log_url(job->url, safe_url);
-    const char *outcome = job->incomplete ? "incomplete_response" :
+    const char *outcome = job->cancelled ? "cancelled" :
+                          job->deadline_expired ? "request_deadline" :
+                          job->invalid_headers ? "invalid_response_headers" :
+                          job->incomplete ? "incomplete_response" :
                           job->error != ESP_OK ? esp_err_to_name(job->error) :
                           job->truncated ? "preview_truncated" : "complete";
     if (!first_error && (fprintf(file, "%lld,%s,", (long long)time(NULL),
-                                 method_names[job->method == HTTP_METHOD_GET ? 0 :
-                                              job->method == HTTP_METHOD_POST ? 1 :
-                                              job->method == HTTP_METHOD_PUT ? 2 : 3]) < 0 ||
+                                 method_name(job->method)) < 0 ||
                          csv_field(file, safe_url) != 0 ||
                          fprintf(file, ",%d,%u,%lu,%s\n", job->status,
                                  (unsigned)job->response_bytes,
@@ -333,9 +356,20 @@ static int append_log(const http_job_t *job)
     return first_error;
 }
 
+static bool request_cancelled(void *context)
+{
+    (void)context;
+    portENTER_CRITICAL(&http_lock);
+    bool cancelled = cancel_requested;
+    portEXIT_CRITICAL(&http_lock);
+    return cancelled;
+}
+
 static void perform_request(http_job_t *job)
 {
-    int64_t started_us = esp_timer_get_time();
+    bool secure = prefix_equal(job->url, "https://");
+    esp_transport_handle_t transport = http_transport_init(secure,
+        job->started_us + (int64_t)HTTP_REQUEST_MS * 1000, request_cancelled, NULL);
     esp_http_client_config_t config = {
         .url = job->url,
         .method = job->method,
@@ -348,8 +382,9 @@ static void perform_request(http_job_t *job)
         .buffer_size_tx = 1024,
         .user_agent = "Tab5OS/1.0",
         .crt_bundle_attach = esp_crt_bundle_attach,
+        .transport = transport,
     };
-    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_http_client_handle_t client = transport ? esp_http_client_init(&config) : NULL;
     if (!client) {
         job->error = ESP_ERR_NO_MEM;
     } else {
@@ -368,34 +403,42 @@ static void perform_request(http_job_t *job)
                 esp_http_client_set_post_field(client, job->body, (int)strlen(job->body));
             job->error = esp_http_client_perform(client);
             job->status = esp_http_client_get_status_code(client);
-            job->socket_error = esp_http_client_get_errno(client);
-            if (job->error == ESP_OK && !esp_http_client_is_complete_data_received(client)) {
+            job->socket_error = http_transport_get_errno(transport);
+            http_transport_stop_t stopped = http_transport_stop_reason(transport);
+            job->cancelled = stopped == HTTP_TRANSPORT_CANCELLED;
+            job->deadline_expired = stopped == HTTP_TRANSPORT_DEADLINE;
+            job->invalid_headers = stopped == HTTP_TRANSPORT_INVALID_HEADERS;
+            if (job->cancelled) job->error = ESP_ERR_INVALID_STATE;
+            else if (job->deadline_expired) job->error = ESP_ERR_TIMEOUT;
+            else if (job->invalid_headers) job->error = ESP_ERR_INVALID_RESPONSE;
+            else if (stopped == HTTP_TRANSPORT_INVALID_BODY) {
+                job->incomplete = true;
+                job->error = ESP_ERR_INVALID_RESPONSE;
+            }
+            else if (job->error == ESP_OK &&
+                     (!http_transport_response_complete(transport) ||
+                      (job->status != 304 && !esp_http_client_is_complete_data_received(client)))) {
                 job->incomplete = true;
                 job->error = ESP_ERR_INVALID_RESPONSE;
             }
         }
         esp_http_client_cleanup(client);
     }
-    job->duration_ms = (uint32_t)((esp_timer_get_time() - started_us) / 1000);
+    /* The SDK closes but does not destroy an injected custom transport. */
+    if (transport) esp_transport_destroy(transport);
+    job->duration_ms = (uint32_t)((esp_timer_get_time() - job->started_us) / 1000);
     if (job->log_enabled) job->log_error = append_log(job);
 }
 
 static void http_worker(void *argument)
 {
-    (void)argument;
-    for (;;) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-        portENTER_CRITICAL(&http_lock);
-        http_job_t *job = pending_job;
-        pending_job = NULL;
-        portEXIT_CRITICAL(&http_lock);
-        if (!job) continue;
-        perform_request(job);
-        portENTER_CRITICAL(&http_lock);
-        completed_job = job;
-        request_busy = false;
-        portEXIT_CRITICAL(&http_lock);
-    }
+    http_job_t *job = argument;
+    perform_request(job);
+    portENTER_CRITICAL(&http_lock);
+    completed_job = job;
+    request_busy = false;
+    portEXIT_CRITICAL(&http_lock);
+    vTaskDeleteWithCaps(NULL);
 }
 
 static void set_status(const char *text)
@@ -403,11 +446,106 @@ static void set_status(const char *text)
     if (status_label) lv_label_set_text(status_label, text);
 }
 
+static void show_request(const http_job_t *job)
+{
+    if (!request_label) return;
+    if (!job) {
+        lv_label_set_text(request_label, "");
+        lv_obj_add_flag(request_label, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    char endpoint[HTTP_URL_MAX + 1];
+    safe_log_url(job->url, endpoint);
+    lv_label_set_text_fmt(request_label, "Request: %s %s%s", method_name(job->method), endpoint,
+                          strpbrk(job->url, "?#") ? "\nQuery/fragment omitted" : "");
+    lv_obj_remove_flag(request_label, LV_OBJ_FLAG_HIDDEN);
+}
+
 static void update_controls(void)
 {
+    bool busy = http_tool_busy();
     if (method_label) lv_label_set_text_fmt(method_label, "METHOD\n%s", method_names[method_index]);
     if (log_label) lv_label_set_text(log_label, logging_enabled ? "SD LOG\nON" : "SD LOG\nOFF");
-    if (send_label) lv_label_set_text(send_label, request_busy ? "WORKING" : "SEND");
+    if (send_label) lv_label_set_text(send_label, busy ? "WORKING" : "SEND");
+    if (cancel_button) {
+        if (busy || cleartext_armed) lv_obj_remove_state(cancel_button, LV_STATE_DISABLED);
+        else lv_obj_add_state(cancel_button, LV_STATE_DISABLED);
+    }
+}
+
+static void report_log_error(int error)
+{
+    if (!error) return;
+    logging_enabled = false;
+    screen_sd_available = false;
+    if (storage_error_cb) storage_error_cb(error);
+}
+
+static http_job_t *take_completed_job(void)
+{
+    portENTER_CRITICAL(&http_lock);
+    http_job_t *job = completed_job;
+    completed_job = NULL;
+    portEXIT_CRITICAL(&http_lock);
+    return job;
+}
+
+static void append_log_status(char *message, size_t capacity, const http_job_t *job)
+{
+    size_t used = strlen(message);
+    if (job->log_error)
+        snprintf(message + used, capacity - used,
+                 "\nSD log failed: %s; metadata was not confirmed saved. SD LOG is now OFF.",
+                 strerror(job->log_error));
+    else if (job->log_enabled)
+        snprintf(message + used, capacity - used, "\nMetadata appended to /HTTP/HTTPLOG.CSV");
+    else
+        snprintf(message + used, capacity - used, "\nSD LOG was OFF for this request.");
+}
+
+static void show_result(http_job_t *job)
+{
+    show_request(job);
+    if (response_area)
+        lv_textarea_set_text(response_area, job->preview_length ? job->preview : "(empty response body)");
+    if (status_label) {
+        char message[640];
+        if (job->cancelled || job->deadline_expired) {
+            snprintf(message, sizeof(message),
+                                  "%s after %lu ms; %u body bytes received. Partial preview retained.\n"
+                                  "The connection is closed; a sent request may already have taken effect.",
+                                  job->cancelled ? "Cancelled" : "15-second request deadline reached",
+                                  (unsigned long)job->duration_ms, (unsigned)job->response_bytes);
+        } else if (job->invalid_headers) {
+            snprintf(message, sizeof(message),
+                                  "Response headers/trailers invalid, unsupported or exceed the 8 KiB limit after %lu ms",
+                                  (unsigned long)job->duration_ms);
+        } else if (job->incomplete) {
+            snprintf(message, sizeof(message),
+                                  "Incomplete HTTP %d response after %lu ms: %u body bytes received",
+                                  job->status, (unsigned long)job->duration_ms,
+                                  (unsigned)job->response_bytes);
+        } else if (job->error != ESP_OK) {
+            snprintf(message, sizeof(message), "Request failed after %lu ms: %s%s%s",
+                                  (unsigned long)job->duration_ms, esp_err_to_name(job->error),
+                                  job->socket_error ? " / " : "",
+                                  job->socket_error ? strerror(job->socket_error) : "");
+        } else {
+            snprintf(message, sizeof(message),
+                                  "HTTP %d | %u bytes | %lu ms%s%s%s%s%s",
+                                  job->status, (unsigned)job->response_bytes,
+                                  (unsigned long)job->duration_ms,
+                                  job->truncated ? " | preview capped" : "",
+                                  job->content_type[0] ? "\nType: " : "",
+                                  job->content_type,
+                                  job->location[0] ? "\nRedirect target (not followed): " : "",
+                                  job->location);
+        }
+        append_log_status(message, sizeof(message), job);
+        lv_label_set_text(status_label, message);
+    }
+    report_log_error(job->log_error);
+    heap_caps_free(job);
 }
 
 static void http_tick(lv_timer_t *timer)
@@ -418,44 +556,8 @@ static void http_tick(lv_timer_t *timer)
         cleartext_armed = false;
         set_status("Plain HTTP confirmation expired");
     }
-
-    portENTER_CRITICAL(&http_lock);
-    http_job_t *job = completed_job;
-    completed_job = NULL;
-    portEXIT_CRITICAL(&http_lock);
-    if (!job) {
-        update_controls();
-        return;
-    }
-    if (response_area)
-        lv_textarea_set_text(response_area, job->preview_length ? job->preview : "(empty response body)");
-    if (status_label) {
-        if (job->incomplete) {
-            lv_label_set_text_fmt(status_label,
-                                  "Incomplete HTTP %d response after %lu ms: %u body bytes received",
-                                  job->status, (unsigned long)job->duration_ms,
-                                  (unsigned)job->response_bytes);
-        } else if (job->error != ESP_OK) {
-            lv_label_set_text_fmt(status_label, "Request failed after %lu ms: %s%s%s",
-                                  (unsigned long)job->duration_ms, esp_err_to_name(job->error),
-                                  job->socket_error ? " / " : "",
-                                  job->socket_error ? strerror(job->socket_error) : "");
-        } else {
-            lv_label_set_text_fmt(status_label,
-                                  "HTTP %d | %u bytes | %lu ms%s%s%s%s%s%s%s",
-                                  job->status, (unsigned)job->response_bytes,
-                                  (unsigned long)job->duration_ms,
-                                  job->truncated ? " | preview capped" : "",
-                                  job->content_type[0] ? "\nType: " : "",
-                                  job->content_type,
-                                  job->location[0] ? "\nRedirect target (not followed): " : "",
-                                  job->location,
-                                  job->log_error ? "\nSD log failed" : "",
-                                  job->log_enabled && !job->log_error ? "\nMetadata appended to /HTTP/HTTPLOG.CSV" : "");
-        }
-    }
-    if (job->log_error && storage_error_cb) storage_error_cb(job->log_error);
-    heap_caps_free(job);
+    http_job_t *job = take_completed_job();
+    if (job) show_result(job);
     update_controls();
 }
 
@@ -527,8 +629,36 @@ static void log_clicked(lv_event_t *event)
 static void clear_clicked(lv_event_t *event)
 {
     (void)event;
+    cleartext_armed = false;
+    bool busy = http_tool_busy();
     if (response_area) lv_textarea_set_text(response_area, "");
-    set_status("Cleared; ready for another request");
+    if (busy) set_status("Preview cleared; request is still in progress.");
+    else {
+        http_job_t *job = take_completed_job();
+        char message[256] = "Cleared; ready for another request";
+        if (job) {
+            if (job->log_error) append_log_status(message, sizeof(message), job);
+            report_log_error(job->log_error);
+            heap_caps_free(job);
+        }
+        show_request(NULL);
+        set_status(message);
+    }
+    update_controls();
+}
+
+static void cancel_clicked(lv_event_t *event)
+{
+    (void)event;
+    bool armed = cleartext_armed;
+    cleartext_armed = false;
+    portENTER_CRITICAL(&http_lock);
+    bool busy = request_busy;
+    if (busy) cancel_requested = true;
+    portEXIT_CRITICAL(&http_lock);
+    if (busy) set_status("Cancellation requested; waiting for connection cleanup...");
+    else if (armed) set_status("Plain HTTP confirmation cancelled");
+    update_controls();
 }
 
 static void send_clicked(lv_event_t *event)
@@ -539,6 +669,23 @@ static void send_clicked(lv_event_t *event)
         return;
     }
     if (http_tool_busy()) return;
+    http_job_t *pending = take_completed_job();
+    if (pending) {
+        cleartext_armed = false;
+        show_result(pending);
+        update_controls();
+        return;
+    }
+    const char *header_text = lv_textarea_get_text(headers_area);
+    const char *body_text = lv_textarea_get_text(body_area);
+    if (strlen(header_text) > HTTP_HEADERS_MAX) {
+        set_status("Custom headers exceed the 511-byte limit");
+        return;
+    }
+    if (strlen(body_text) > HTTP_BODY_MAX) {
+        set_status("Body exceeds the 1023-byte limit");
+        return;
+    }
     http_job_t *job = heap_caps_calloc(1, sizeof(*job), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!job) {
         set_status("Request allocation failed");
@@ -546,8 +693,8 @@ static void send_clicked(lv_event_t *event)
     }
     job->method = methods[method_index];
     job->log_enabled = logging_enabled && screen_sd_available;
-    snprintf(job->headers, sizeof(job->headers), "%s", lv_textarea_get_text(headers_area));
-    snprintf(job->body, sizeof(job->body), "%s", lv_textarea_get_text(body_area));
+    snprintf(job->headers, sizeof(job->headers), "%s", header_text);
+    snprintf(job->body, sizeof(job->body), "%s", body_text);
     bool secure;
     if (!normalize_url(lv_textarea_get_text(url_area), job->url, &secure)) {
         heap_caps_free(job);
@@ -574,26 +721,28 @@ static void send_clicked(lv_event_t *event)
         cleartext_armed_at = now;
         heap_caps_free(job);
         set_status("Plain HTTP exposes headers and body. Tap SEND again within 5 seconds for this exact request.");
+        update_controls();
         return;
     }
     cleartext_armed = false;
+    job->started_us = esp_timer_get_time();
     portENTER_CRITICAL(&http_lock);
+    cancel_requested = false;
     request_busy = true;
-    pending_job = job;
     portEXIT_CRITICAL(&http_lock);
-    set_status("Request in progress; automatic redirects are disabled...");
-    if (!worker_handle &&
-        xTaskCreateWithCaps(http_worker, "http-console", 12288, NULL, 4,
-                            &worker_handle, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+    show_request(job);
+    if (response_area) lv_textarea_set_text(response_area, "");
+    set_status("Request in progress (15-second deadline); automatic redirects are disabled...");
+    if (xTaskCreateWithCaps(http_worker, "http-console", 12288, job, 4,
+                            NULL, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
         portENTER_CRITICAL(&http_lock);
-        pending_job = NULL;
         request_busy = false;
         portEXIT_CRITICAL(&http_lock);
         heap_caps_free(job);
         set_status("Could not start HTTP worker");
+        update_controls();
         return;
     }
-    xTaskNotifyGive(worker_handle);
     update_controls();
 }
 
@@ -607,6 +756,7 @@ bool http_tool_busy(void)
 
 void http_tool_stop(void)
 {
+    cancel_clicked(NULL);
     if (ui_timer) {
         lv_timer_delete(ui_timer);
         ui_timer = NULL;
@@ -620,6 +770,8 @@ void http_tool_stop(void)
     method_label = NULL;
     log_label = NULL;
     send_label = NULL;
+    cancel_button = NULL;
+    request_label = NULL;
     status_label = NULL;
     response_area = NULL;
     storage_error_cb = NULL;
@@ -641,14 +793,16 @@ void http_tool_show(lv_obj_t *parent, bool connected, bool sd_available,
     lv_obj_set_width(help, 640);
     lv_obj_set_style_text_align(help, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(help, "HTTPS certificates are verified; redirects are shown but not followed.\n"
-                            "Responses are capped at a 4 KiB text preview. Four custom headers maximum.\n"
+                            "4 KiB body preview; 8 KiB response headers; four custom headers maximum.\n"
+                            "15-second request budget; Cancel/Home stops cooperatively, including DNS waits.\n"
                             "SD logs are opt-in metadata only: no headers, bodies, queries, or response content.");
 
     lv_obj_t *controls = row(parent);
-    action_button(controls, "", 138, method_clicked, &method_label);
-    action_button(controls, "", 138, log_clicked, &log_label);
-    action_button(controls, "CLEAR", 138, clear_clicked, NULL);
-    lv_obj_t *send = action_button(controls, "", 138, send_clicked, &send_label);
+    action_button(controls, "", 110, method_clicked, &method_label);
+    action_button(controls, "", 110, log_clicked, &log_label);
+    action_button(controls, "CLEAR", 110, clear_clicked, NULL);
+    cancel_button = action_button(controls, "CANCEL", 110, cancel_clicked, NULL);
+    lv_obj_t *send = action_button(controls, "", 110, send_clicked, &send_label);
     if (!connected) lv_obj_add_state(send, LV_STATE_DISABLED);
 
     url_area = lv_textarea_create(parent);
@@ -668,11 +822,18 @@ void http_tool_show(lv_obj_t *parent, bool connected, bool sd_available,
     lv_textarea_set_max_length(body_area, HTTP_BODY_MAX);
     lv_textarea_set_placeholder_text(body_area, "POST/PUT body (default Content-Type: application/json)");
 
+    request_label = lv_label_create(parent);
+    lv_obj_set_width(request_label, 640);
+    lv_label_set_long_mode(request_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(request_label, LV_TEXT_ALIGN_CENTER, 0);
+    show_request(NULL);
+
     status_label = lv_label_create(parent);
     lv_obj_set_width(status_label, 640);
     lv_label_set_long_mode(status_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(status_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(status_label, connected ? "Ready" : "Connect to Wi-Fi first");
+    lv_label_set_text(status_label, http_tool_busy() ? "Finishing the previous request..." :
+                                    connected ? "Ready" : "Connect to Wi-Fi first");
 
     response_area = lv_textarea_create(parent);
     lv_obj_set_size(response_area, 640, 300);

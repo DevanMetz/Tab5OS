@@ -25,6 +25,18 @@ def exchange(mode):
             payload = b"\x00A\xff"
             client.request("PUT", "/?fixture=discarded#test", payload,
                            {"Content-Type": "application/octet-stream", "X-Tab5-Test": "fixture"})
+            if mode == "informational":
+                wire = bytearray()
+                while part := client.sock.recv(4096):
+                    wire.extend(part)
+                first, rest = bytes(wire).split(b"\r\n\r\n", 1)
+                assert first == b"HTTP/1.1 103 Early Hints\r\nLink: </fixture>"
+                second, rest = rest.split(b"\r\n\r\n", 1)
+                assert second == b"HTTP/1.1 100 Continue"
+                final, body = rest.split(b"\r\n\r\n", 1)
+                assert final.startswith(b"HTTP/1.1 200 OK\r\n") and b"Content-Length: 2\r\n" in final
+                assert body == b"OK"
+                return
             if mode == "silent":
                 try:
                     client.getresponse()
@@ -64,6 +76,9 @@ def exchange(mode):
                 assert response.getheader("Transfer-Encoding") == "chunked"
                 assert len(body) >= 5 and len(body) % 5 == 0
                 assert body == b"drip\n" * (len(body) // 5)
+            elif mode == "trailers":
+                assert response.status == 200 and response.getheader("Transfer-Encoding") == "chunked"
+                assert body == b"OK"
         finally:
             client.close()
             worker.join(timeout=3)
@@ -72,6 +87,6 @@ def exchange(mode):
 
 
 if __name__ == "__main__":
-    for case in ("echo", "large", "redirect", "short", "silent", "slow-headers", "stream"):
+    for case in ("echo", "large", "redirect", "short", "silent", "slow-headers", "stream", "informational", "trailers"):
         exchange(case)
-    print("HTTP fixture: seven real-socket framing checks passed")
+    print("HTTP fixture: nine real-socket framing checks passed")

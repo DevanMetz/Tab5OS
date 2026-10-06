@@ -48,6 +48,14 @@ jobs:
           python3 tools/modbus_test_server.py --self-test
           python3 tools/udp_device_fixture.py --self-test
           python3 tests/http_fixture_test.py
+          python3 tests/dns_fixture_test.py
+          python3 tests/board_config_test.py
+      - name: Test bounded ping worker
+        run: |
+          for ipv6 in 0 1; do
+            cc -std=c11 -Wall -Wextra -Werror -pedantic -DLWIP_IPV6=$ipv6 -I tests/network_ping_host/stubs -I main main/network_ping.c tests/network_ping_host/ping_test.c -o "$RUNNER_TEMP/network_ping_test"
+            "$RUNNER_TEMP/network_ping_test"
+          done
       - name: Test app calculations and protocol parsing
         run: |
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/payload_clipboard.c tests/payload_clipboard_test.c -o "$RUNNER_TEMP/payload_clipboard_test"
@@ -138,6 +146,15 @@ jobs:
           fi
       - shell: bash
         run: test -s build/tab5_os.bin
+      - name: Package native UI source dependencies
+        shell: bash
+        run: python3 tools/package_native_ui_sources.py --idf-path "$IDF_PATH"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-ui-sources
+          path: build/native-ui-sources.tar.gz
+          if-no-files-found: error
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         if: startsWith(github.ref, 'refs/tags/v')
         with:
@@ -154,9 +171,44 @@ jobs:
             build/LVGL_COPYRIGHTS.md
           if-no-files-found: error
 
+  native-ui:
+    needs: firmware
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-ui-sources
+          path: build
+      - name: Extract pinned source dependencies
+        shell: pwsh
+        run: |
+          tar -xzf build/native-ui-sources.tar.gz
+          if ($LASTEXITCODE) { throw 'Native UI source extraction failed.' }
+          Get-Content build/native-ui-sources.json
+      - name: Test offline apps and MQTT
+        shell: pwsh
+        run: ./tools/test_native_ui_ci.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-ui-logs
+          path: |
+            build/offline-ui/ci.log
+            build/mqtt-ui/*.log
+            build/mqtt-ui/wire-fixtures/
+            build/mqtt-network/*.log
+            build/mqtt-network/*-wire.json
+            build/mqtt-network/client-checks.json
+            build/mqtt-network/storage-app-*/MQTTLOG.CSV
+            build/native-ui-sources.json
+          if-no-files-found: warn
+          retention-days: 14
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [checks, firmware]
+    needs: [checks, firmware, native-ui]
     runs-on: ubuntu-latest
     permissions:
       contents: write

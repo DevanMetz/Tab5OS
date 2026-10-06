@@ -73,23 +73,36 @@ class FixtureHandler(BaseHTTPRequestHandler):
                 self.wfile.write(b"short")
             elif options.mode == "silent":
                 time.sleep(options.seconds)
+            elif options.mode == "informational":
+                self.connection.sendall(b"HTTP/1.1 103 Early Hints\r\nLink: </fixture>\r\n\r\n")
+                time.sleep(options.seconds)
+                self.connection.sendall(b"HTTP/1.1 100 Continue\r\n\r\n")
+                self.reply(200, b"OK")
             elif options.mode == "slow-headers":
                 self.connection.sendall(b"HTTP/1.1 200 OK\r\nX-Drip: ")
                 while time.monotonic() - started < options.seconds:
                     self.connection.sendall(b"x")
                     time.sleep(options.interval)
                 self.connection.sendall(b"\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
-            elif options.mode == "stream":
+            elif options.mode in ("stream", "trailers"):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain")
                 self.send_header("Transfer-Encoding", "chunked")
                 self.send_header("Connection", "close")
                 self.end_headers()
-                while time.monotonic() - started < options.seconds:
-                    self.wfile.write(b"5\r\ndrip\n\r\n")
-                    self.wfile.flush()
-                    time.sleep(options.interval)
-                self.wfile.write(b"0\r\n\r\n")
+                if options.mode == "trailers":
+                    self.wfile.write(b"2\r\nOK\r\n0\r\nX-Drip: ")
+                    while time.monotonic() - started < options.seconds:
+                        self.wfile.write(b"x")
+                        self.wfile.flush()
+                        time.sleep(options.interval)
+                    self.wfile.write(b"\r\n\r\n")
+                else:
+                    while time.monotonic() - started < options.seconds:
+                        self.wfile.write(b"5\r\ndrip\n\r\n")
+                        self.wfile.flush()
+                        time.sleep(options.interval)
+                    self.wfile.write(b"0\r\n\r\n")
             print(f"Response finished after {round((time.monotonic() - started) * 1000)} ms", flush=True)
         except (OSError, ValueError) as error:
             print(f"Connection ended after {round((time.monotonic() - started) * 1000)} ms "
@@ -106,7 +119,7 @@ def main():
     parser.add_argument("--bind", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=18080)
     parser.add_argument("--mode", choices=("echo", "large", "redirect", "short", "silent",
-                                          "slow-headers", "stream"), default="echo")
+                                          "slow-headers", "stream", "informational", "trailers"), default="echo")
     parser.add_argument("--reply-bytes", type=int, default=8192)
     parser.add_argument("--seconds", type=float, default=15)
     parser.add_argument("--interval", type=float, default=0.2)

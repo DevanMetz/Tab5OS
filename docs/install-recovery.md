@@ -26,9 +26,12 @@ Do not use the app-only wrapper to migrate a legacy layout: writing `0x20000` up
 
 ## App-only update
 
-Use this only when the installed device already has Tab5 OS's current partition table. It preserves NVS settings and internal storage.
+Use this only when the installed device already has Tab5 OS's current partition table and System reports active `ota_0` at `0x20000`. It preserves NVS settings and internal storage.
+
+The wrapper always writes `0x20000`; it does not read the installed table or select the active slot. If System reports another app address, including current-layout `ota_1` at `0x620000` or legacy `ota_0` at `0x420000`, the wrapper updates a different slot. Other USB app offsets require an explicitly verified installed address, slot capacity and backup plan; do not guess an offset from another tablet.
 
 ```powershell
+# Confirm the current partition table and active ota_0 at 0x20000 first.
 .\tools\flash_idf.ps1 -Port COM7
 ```
 

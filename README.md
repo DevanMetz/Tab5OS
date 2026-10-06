@@ -4,7 +4,19 @@
 
 Tab5 OS is an open ESP-IDF/LVGL environment for the M5Stack Tab5. It combines a file browser with wired, BLE, and Wi-Fi tools for inspecting devices and saving field captures.
 
-As of 2026-09-23, the latest published release is [v0.6.0](https://github.com/DevanMetz/Tab5OS/releases/tag/v0.6.0). `main` also contains a UART/RS-485 log viewer that has not been tagged. This is a field beta: the ST7121 tablet has passed the checks recorded in the [hardware smoke checklist](docs/hardware-smoke-checklist.md), while the other display family, electrical measurements, and several recovery/fault tests remain open.
+**Published field beta:** [v0.6.0](https://github.com/DevanMetz/Tab5OS/releases/tag/v0.6.0).
+
+**Unreleased development, 2026-09-30:** `main` adds nine apps: [Electronics and Byte Lab](docs/offline-tools.md), [Subnet Lab](docs/offline-tools.md#subnet-lab), [Resistor Lab](docs/resistor-lab.md), [Modbus TCP](docs/modbus-tcp.md), [RTU Frames](docs/modbus-rtu.md), [NTP Lab and Wake-on-LAN](docs/device-network-tools.md), and [UDP Console](docs/udp-console.md). It also adds a Network launcher tile, a shared byte clipboard, saved serial log inspection, and peripheral, Wi-Fi input and runtime fixes. These additions are not included in v0.6.0.
+
+Hardware coverage is recorded per feature and firmware image in the [smoke checklist](docs/hardware-smoke-checklist.md). The second display family, electrical/recovery/fault checks, and the recent USB brownout follow-up remain open.
+
+## Screenshots
+
+| Launcher | Byte Lab: encode Float32 | RTU Frames: decode a reply |
+| --- | --- | --- |
+| [<img src="docs/images/launcher.png" width="220" alt="Tab5 OS launcher with Files, Notes and device tools">](docs/images/launcher.png) | [<img src="docs/images/byte-lab.png" width="220" alt="Byte Lab encoding Float32 1.5 as little-endian bytes 00 00 C0 3F">](docs/images/byte-lab.png) | [<img src="docs/images/rtu-frames.png" width="220" alt="RTU Frames validating a built-in example reply and decoding Float32 1.5">](docs/images/rtu-frames.png) |
+
+Development captures from 2026-09-29 use sample data and contain no credentials, private file contents or network/device identities. Launcher and RTU Frames are ST7121 USB captures; Byte Lab is a native LVGL host render. Click a screenshot for full size. See [capture details](docs/screenshots.md).
 
 ## Project map
 
@@ -34,17 +46,26 @@ M5Stack recommends ESP-IDF v5.4.2 for Tab5. Install that exact release using Esp
 ```powershell
 idf.py set-target esp32p4
 idf.py build
-idf.py -p <PORT> flash monitor
 ```
 
-For faster Windows iteration, put the ESP-IDF directory in `.idf-path`, then use the persistent Ninja build and app-only flash wrappers:
+Building does not require a connected tablet. For faster Windows rebuilds, put the ESP-IDF directory in `.idf-path` and use the persistent Ninja build wrapper:
 
 ```powershell
 .\tools\build_idf.ps1
+```
+
+Before flashing, [read the installed partition table](docs/install-recovery.md#check-the-installed-partition-table) and check the active partition/address in System. Replace `COM7` with your device's port.
+
+> **The app-only wrapper always writes `0x20000`; it does not detect the installed layout or active slot.** Use the command below only with the current partition table and active `ota_0` at `0x20000`. A legacy tablet may instead have a factory app at `0x20000` and active `ota_0` at `0x420000` with a 4 MiB capacity; the wrapper would update its factory slot. Do not assume `0x420000` applies to another tablet.
+
+```powershell
+# Confirm the current partition table and active ota_0 at 0x20000 first.
 .\tools\flash_idf.ps1 -Port COM7
 ```
 
-Use `-Full` after bootloader or partition-table changes, after reviewing the layout and data-migration guidance in [Install and recovery](docs/install-recovery.md). Normal source edits retain the build tree, use project-local ccache with four jobs, and flash only the app partition.
+Complete source flashes (`idf.py flash` or the wrapper's `-Full`) also rewrite the bootloader, partition table and initial OTA metadata. A layout change does not migrate internal files. Follow [Install and recovery](docs/install-recovery.md) with a verified backup and migration plan before choosing that path.
+
+Normal wrapper builds retain the build tree and use project-local ccache with four jobs. In a configured ESP-IDF shell, `ninja -C build -j 1 app` limits an incremental app build to one job when memory is tight. For a short build/test setup, see [Contributing quickstart](CONTRIBUTING.md#quickstart-windows-powershell).
 
 See [Install and recovery](docs/install-recovery.md) before a clean erase or when recovering a device that no longer boots. A clean factory recovery erases credentials, settings, both OTA slots, and internal SPIFFS data.
 
@@ -109,13 +130,13 @@ These features are implemented on `main`; a checked item does not mean that ever
 - [x] Persistent brightness, dimmed idle screen, and configurable timed screen-off
 - [x] Recoverable notes plus durable ride, summary, ebook, and heart-rate storage paths
 - [x] Wi-Fi settings with channel/RSSI scan, password Show/Hide and a compact keyboard, plus a Network launcher app for address details, DNS lookup, four-probe ping, and mDNS service discovery
-- [x] HTTP request console with verified HTTPS, gated cleartext, capped previews, and opt-in redacted SD metadata logs
+- [x] [HTTP request console](docs/http-console.md) with verified HTTPS, gated cleartext, cooperative Cancel/Home, a 15-second transport budget, bounded response headers/previews, and opt-in redacted SD metadata logs
 - [x] [Modbus TCP inspector](docs/modbus-tcp.md) with bounded register/coil reads, signed/unsigned/Float32 views and byte-order selection, TCP testing, exception reporting, and cancellation
 - [x] [RTU Frames](docs/modbus-rtu.md) for offline Modbus read-frame construction, CRC validation, reply decoding, and request copy to Serial; native checks, firmware build, and ST7121 example/clipboard handoff pass, with wired-fixture and broader panel checks pending
 - [x] [NTP Lab and Wake-on-LAN](docs/device-network-tools.md) for time-server measurements and explicitly confirmed device wake packets
 - [x] [UDP Console](docs/udp-console.md) for confirmed hex/ASCII datagrams, bounded reply previews, source-port selection, and cancellation
-- [x] [Shared byte clipboard](docs/offline-tools.md#move-bytes-between-apps) for preparing Byte Lab/RTU payloads in Serial, UDP or SPI and inspecting complete captured replies without retyping
-- [x] MQTT 3.1.1 publish/subscribe console with verified TLS, explicit device-local TLS profiles, QoS/retain visibility, bounded history, and opt-in payload-free SD metadata logs
+- [x] [Shared byte clipboard](docs/offline-tools.md#move-bytes-between-apps) for preparing Byte Lab/RTU payloads in Serial, UDP, SPI or MQTT and inspecting complete captured replies without retyping
+- [x] MQTT 3.1.1 publish/subscribe console with verified TLS, explicit device-local TLS profiles, QoS/retain visibility, bounded history, and opt-in payload-free SD metadata logs; COPY RX shares complete 0-128-byte binary receives with Byte Lab, and PASTE BYTES prepares an exact byte publish for explicit review/send
 - [x] Opt-in generic BLE advertisement scanner and GATT explorer with explicit connections, bounded discovery, reads, notifications/indications, complete received-value copy into Byte Lab, gated raw writes, and atomic evidence snapshots
 - [x] AI chat client through an authenticated HTTPS relay
 - [x] Start/stop microphone transcription with a live waveform
