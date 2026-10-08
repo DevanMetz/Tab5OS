@@ -4633,7 +4633,16 @@ static void show_ebooks(void)
         return;
     }
 
+    errno = 0;
     bool created = mkdir(SD_PATH "/BOOKS", 0775) == 0;
+    if (!created && errno != EEXIST) {
+        int error = errno ? errno : EIO;
+        sd_record_error(error);
+        char message[96];
+        snprintf(message, sizeof(message), "Could not prepare /sdcard/BOOKS: %s", strerror(error));
+        lv_list_add_text(list, message);
+        return;
+    }
     if (created) {
         const char *temporary = SD_PATH "/BOOKS/WELCOME.TMP";
         const char *final = SD_PATH "/BOOKS/WELCOME.TXT";
@@ -4651,13 +4660,25 @@ static void show_ebooks(void)
             sd_record_error(errno ? errno : EIO);
         }
     }
+    errno = 0;
     DIR *dir = opendir(SD_PATH "/BOOKS");
     if (!dir) {
-        lv_list_add_text(list, "Could not open /sdcard/BOOKS");
+        int error = errno ? errno : EIO;
+        sd_record_error(error);
+        char message[96];
+        snprintf(message, sizeof(message), "Could not open /sdcard/BOOKS: %s", strerror(error));
+        lv_list_add_text(list, message);
         return;
     }
-    struct dirent *entry;
-    while (file_path_count < 64 && (entry = readdir(dir))) {
+    int error = 0;
+    size_t skipped = 0;
+    while (file_path_count < sizeof(file_paths) / sizeof(file_paths[0])) {
+        errno = 0;
+        struct dirent *entry = readdir(dir);
+        if (!entry) {
+            if (!error) error = errno;
+            break;
+        }
         if (!ebook_supported(entry->d_name)) continue;
         char *full = file_paths[file_path_count++];
         const char *books = SD_PATH "/BOOKS/";
@@ -4665,15 +4686,41 @@ static void show_ebooks(void)
         size_t name_length = strlen(entry->d_name);
         if (books_length + name_length >= sizeof(file_paths[0])) {
             file_path_count--;
+            skipped++;
             continue;
         }
         memcpy(full, books, books_length);
         memcpy(full + books_length, entry->d_name, name_length + 1);
+        struct stat info;
+        errno = 0;
+        if (stat(full, &info) != 0) {
+            if (!error) error = errno ? errno : EIO;
+            file_path_count--;
+            continue;
+        }
+        if (!S_ISREG(info.st_mode)) {
+            file_path_count--;
+            continue;
+        }
         lv_obj_t *item = lv_list_add_button(list, LV_SYMBOL_FILE, entry->d_name);
         lv_obj_add_event_cb(item, ebook_open_clicked, LV_EVENT_CLICKED, full);
     }
-    closedir(dir);
-    if (!file_path_count) lv_list_add_text(list, "Copy .txt books into /sdcard/BOOKS");
+    errno = 0;
+    if (closedir(dir) != 0 && !error) error = errno ? errno : EIO;
+    if (error) {
+        sd_record_error(error);
+        char message[96];
+        snprintf(message, sizeof(message), "Book listing incomplete: %s", strerror(error));
+        lv_list_add_text(list, message);
+    }
+    if (file_path_count == sizeof(file_paths) / sizeof(file_paths[0]))
+        lv_list_add_text(list, "Book entry limit reached");
+    if (skipped) {
+        char message[96];
+        snprintf(message, sizeof(message), "Skipped %u book paths that exceed the path limit", (unsigned)skipped);
+        lv_list_add_text(list, message);
+    }
+    if (!file_path_count && !error && !skipped) lv_list_add_text(list, "Copy .txt books into /sdcard/BOOKS");
     if (ebook_download_busy) {
         lv_list_add_text(list, "Downloading free classics...");
     } else if (ebook_defaults_missing()) {

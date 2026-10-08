@@ -39,6 +39,8 @@ jobs:
         run: python3 tools/test_ring_history.py --compiler cc
       - name: Test ebook pages
         run: python3 tools/test_ebook_pages.py --compiler cc
+      - name: Test ebook library
+        run: python3 tools/test_ebook_library.py --compiler cc
       - name: Test Files text previews
         run: python3 tools/test_file_preview.py --compiler cc
       - name: Test Files directories
@@ -181,6 +183,20 @@ jobs:
             build/ebook-pages/ebook_pages.inc
             build/ebook-pages/ebook_config.inc
             build/ebook-pages/reader_initialization.inc
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Retain ebook library evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ebook-library-logs
+          path: |
+            build/ebook-library/compile.log
+            build/ebook-library/result.log
+            build/ebook-library/source.json
+            build/ebook-library/ebook_library.inc
+            build/ebook-library/ebook_library_config.inc
           if-no-files-found: warn
           retention-days: 14
 

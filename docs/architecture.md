@@ -97,6 +97,8 @@ Files dispatches supported CSVs to those viewers before its text fallback. The f
 
 Files directory browsing resets errno before each directory read so per-entry `stat` errors cannot masquerade as an enumeration error at EOF. A failed read or close keeps the visited entries visible with an explicit incomplete-list warning, preserving the first error. Entry capacity and skipped long paths are disclosed. The existing 64 path slots include a parent-navigation slot when needed, and each path remains bounded to 256 bytes. SD root and descendant errors reach the shared callback. Native directory/file checks verify these transitions and callback path ownership; UI, mount paths and error injection are controlled.
 
+The ebook library verifies regular-file metadata before offering a `.txt` entry, excluding matching directories and unconfirmed paths. Directory setup/open failures show their cause; read/stat/close failures keep confirmed rows visible with an incomplete-list warning. Fresh errno checks preserve the first failure, and failed or skipped listings cannot claim the library is empty. The existing 64-entry and 256-byte path bounds are disclosed. Native checks use an existing BOOKS directory with controlled UI, timer, SD, download and fault boundaries; welcome creation and physical storage remain separate checks.
+
 See [Storage and compatibility contract](compatibility.md) and [Data formats](data-formats.md).
 
 ## Network and radio

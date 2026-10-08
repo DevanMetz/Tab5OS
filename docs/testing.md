@@ -15,6 +15,7 @@ Python 3 and Node.js are needed for the quick checks. The configuration checks a
 | Ride history loading or summary appends | [Ride history storage](#ride-history-storage) and a firmware build. |
 | Ring heart-rate logging, saved timestamps or queue processing | [Ring history storage](#ring-history-storage) and a firmware build. |
 | Ebook page loading or navigation | [Ebook pages](#ebook-pages) and a firmware build. |
+| Ebook library enumeration | [Ebook library](#ebook-library) and a firmware build. |
 | Scope/I2C capture or saved serial CSV viewers | [CSV viewer storage and UI](#csv-viewer-storage-and-ui), existing serial-copy checks and a firmware build. |
 | Files fallback text previews | [Files text previews](#files-text-previews) and a firmware build. |
 | Files directory browsing | [Files directories](#files-directories) and a firmware build. |
@@ -152,6 +153,18 @@ This portable runner compiles the three actual ebook load/Prev/Next callbacks ex
 Retry cases use the actual navigation callbacks after storage availability is restored. Disabled clicks and invalid next positions perform no new reads. Twenty-five forward/back cycles keep one reused 8,193-byte buffer with every file handle closed; process teardown frees the fixture's buffer. Every executed case independently checks the original file bytes. UI, heap and SD APIs and I/O errors are controlled; no real LVGL or physical card is used. The tests do not establish rendering, PSRAM allocation, device timing or physical removal behavior. A short error-free EOF remains a valid final page; the fixture does not claim to detect concurrent file changes that supply no I/O error.
 
 Reader initialization is retained and checked as source, including zero offsets and initially disabled controls; it is not compiled into the native fixture. The firmware build checks its real UI declarations. Full main/function/initialization/test hashes, generated callback/config/initialization source and compile/result logs stay under `build/ebook-pages/`. Linux CI retains these files as `ebook-pages-logs`, including compiler/test failures. These 44 cases are separate from the Windows native total.
+
+## Ebook library
+
+```powershell
+python tools/test_ebook_library.py --compiler 'C:/path/to/clang.exe'
+```
+
+The portable runner compiles the actual `show_ebooks`, `ebook_supported` and `browser_prefix` functions. Its 28 cases check an existing native BOOKS directory: empty/unsupported contents, case-insensitive extensions, `.txt` directory exclusion, entry/path limits, SD availability, mkdir/open/read/stat/close failures, missing/stale errno, first-error preservation, callback path ownership, download-status messages, reopening and 25 success/error/success cycles. The previous callback fails 18 controls. Every case verifies unchanged staged file bytes and closed native directory handles; cleanup leaves no modeled timers.
+
+Windows Find APIs and POSIX directory APIs supply the entries; native dot entries are normalized. The overlong name and operation failures are injected. UI, timers, logical mount paths, download helpers and the SD error callback are controlled. Reopen cases restore modeled SD availability and check that a successful listing clears its warning without erasing earlier error reports. The unchanged welcome-writing branch is excluded by using an existing directory and rejecting any welcome I/O. Actual LVGL cleanup, timer ticks, downloads, SDK mounts, SD callback filtering, physical SD/panel, latency and power-loss behavior remain outside this fixture. A null directory read with zero errno remains EOF.
+
+The library retains 64 stored paths of 256 bytes. The entry-limit message means those slots filled; no extra read proves that more entries exist. Generated callback/config source, full main/function/test hashes and compile/result logs stay under `build/ebook-library/`. Linux CI retains `ebook-library-logs`, including available failure diagnostics. These 28 checks are separate from the Windows native total.
 
 ## CSV viewer storage and UI
 
