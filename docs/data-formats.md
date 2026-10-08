@@ -7,7 +7,7 @@ Tab5 OS keeps user-owned documents and logs on the removable microSD card. Built
 | Data | Path | Publication rule |
 | --- | --- | --- |
 | Note | `/DOCS/NOTE.TXT` | Written through `NOTE.TMP`; the previous complete note is retained as `NOTE.BAK`. |
-| Ride samples | `/RIDES/YYMMDD/HHMMSSNN.CSV` | Recorded as `.TMP` and renamed to `.CSV` only after flush, media sync, and close succeed. `NN` is `00`-`99` for same-second collisions. |
+| Ride samples | `/RIDES/YYMMDD/HHMMSSNN.CSV` | Recorded as `.TMP`, synced every ten seconds, and renamed to `.CSV` only after flush, media sync, and close succeed. `NN` is `00`-`99` for same-second collisions. |
 | Ride index | `/RIDES/SUMMARY.CSV` | Rebuilt through `SUMMARY.TMP`; the previous index is `SUMMARY.BAK`. The individual ride CSV is authoritative. |
 | Heart rate | `/HEALTH/HR.CSV` | Append-only rows; an incomplete final row is discarded before later data is read or appended. |
 | I2C watch | `/I2C/YYMMDD/HHMMSSNN.CSV` | Logged at 1 Hz as `.TMP`, synced every ten seconds, and renamed only when capture stops successfully. |
@@ -20,6 +20,8 @@ Tab5 OS keeps user-owned documents and logs on the removable microSD card. Built
 | Ebooks | `/BOOKS/*.TXT` | User-supplied or downloaded text files. |
 
 Files ending in `.TMP` are unpublished: they may be incomplete after power loss, or fully synced but retained because publication failed. They must not be reported as finished captures without validation. A `.BAK` file is the previous complete generation and can be used for recovery when its corresponding final file is absent.
+
+Ride Start stops on directory/stat/open/stream-creation errors and retries only occupied CSV/TMP names; exhausting all 100 names reports `EEXIST`. Failed stream creation attempts to remove its newly created empty TMP. Rejected headers/rows, periodic sync failures and known SD loss close recording ownership and retain the named TMP without a publication retry. The first error survives cleanup; absent errno falls back to `EIO`. Restart skips retained files. A healthy Stop publishes the ride CSV before updating its index, so an index-update failure does not invalidate the saved CSV. Native byte/fault checks do not prove physical SD durability or power-loss recovery.
 
 Notes edits complete text files of at most 65,535 bytes. A missing note starts an empty draft; a missing final note can be restored from `NOTE.BAK`. Recovery, open, read or close failures disable editing and Save until a successful reopen. Oversized files and files containing NUL bytes also disable Save and keep their original bytes. Save checks the draft's byte length before changing any path, including for UTF-8 text whose character count is smaller than its byte count. Notes loads the complete text in bulk before applying the editor's character limit. Leaving Notes clears its editor pointer and Save permission. Native files and LVGL checks verify these boundaries; physical SD removal, full-card and power-loss behavior remain hardware gates.
 

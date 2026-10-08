@@ -13,6 +13,7 @@ Python 3 and Node.js are needed for the quick checks. The configuration checks a
 | Storage writes or incomplete CSV rows | [Core command reference](#core-command-reference), [CSV tail recovery](#csv-tail-recovery) and a firmware build. |
 | Notes loading, saving or lifecycle | [Notes storage and UI](#notes-storage-and-ui) and a firmware build. |
 | Ride history loading or summary appends | [Ride history storage](#ride-history-storage) and a firmware build. |
+| Ride Start, periodic recording or Stop | [Ride recording](#ride-recording) and a firmware build. |
 | Ring heart-rate logging, saved timestamps or queue processing | [Ring history storage](#ring-history-storage) and a firmware build. |
 | Ebook page loading or navigation | [Ebook pages](#ebook-pages) and a firmware build. |
 | Ebook library enumeration | [Ebook library](#ebook-library) and a firmware build. |
@@ -131,6 +132,20 @@ This portable fixture compiles the two actual ride-history callbacks extracted f
 The preceding callbacks fail 24 controls, including misleading totals after recovery/read/close errors, ignored SD/preparation errors and lost first errors during cleanup. Compounded read/copy/open failures retain their original error when later closes or removal fail. Missing read/write errno falls back to `EIO`; a successful earlier history read cannot supply a stale errno for a later failure. Multi-block and full-count read-error cases reject the failed chunk before copying. Cleanup failure can retain an unpublished partial temporary file, and publication/rollback failures can retain recovery generations. These checks do not validate every CSV field or prove physical FAT/SD latency, removal, power cuts or panel rendering.
 
 Generated callbacks/storage source, full main/function/storage/header/test hashes and compile/result logs stay under `build/ride-history/`. Linux CI runs the fixture and retains these files as `ride-history-logs`, including diagnostics when compilation or execution fails. Its 50 cases are separate from the Windows native total.
+
+## Ride recording
+
+```powershell
+python tools/test_ride_recording.py --compiler 'C:/path/to/clang.exe'
+```
+
+This portable fixture compiles eight actual recording, button, tick and history functions from `main/main.c` with the complete `storage_io.c`. Its 39 cases use native files, directories and descriptors to check exact ride CSV, summary and backup bytes, creation errors, header/row failures, periodic flush/sync, Stop failures, known SD loss, mixed collisions, all 100 occupied names, tick wrap, admission gates and restart after a rejected header. The 25-pair recovery case preserves both generations within each pair and checks closed streams and descriptors before removing owned files between pairs.
+
+The preceding source fails 27 controls: ignored root-directory errors, stale or missing error causes, retry after a stream-creation failure, deleted partial headers and continued recording/publication after known SD loss. Failed writes retain a named TMP and preserve their first cause through close and SD error reporting. A later Stop cannot publish an aborted recording. A successful CSV remains authoritative when updating its history index fails; that failure is reported separately.
+
+UI labels, BLE sensor caches, clocks/ticks, logical paths, SD admission/error reporting and I/O faults are controlled. The fixture seeds the ride root and an existing summary before each case; the real Start creates the date directory on its first successful run. UTC fixes filenames, and Windows descriptors use binary mode for SDK LF bytes. These checks do not execute BLE, real LVGL, SDK mount/error filtering, physical FAT/SD, the panel or power cuts. A retained TMP can contain partial or complete-looking bytes without confirmed physical durability.
+
+Full main/function/storage/header/test hashes, generated function/config/storage source and compile/result logs stay under `build/ride-recording/`. Linux CI retains `ride-recording-logs`, including available failure diagnostics. These 39 cases are separate from the Windows native total and the 50 ride-history cases.
 
 ## Ring history storage
 

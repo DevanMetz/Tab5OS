@@ -6824,37 +6824,37 @@ static void ride_clear_paths(void)
     ride_final_path[0] = '\0';
 }
 
-static void ride_abort(const char *message, bool retain_temporary)
+static void ride_abort(const char *message, int error)
 {
+    if (!error) error = EIO;
     ride_recording = false;
     if (ride_file) {
         fclose(ride_file);
         ride_file = NULL;
     }
+    sd_record_error(error);
     const char *name = strrchr(ride_temporary_path, '/');
-    if (retain_temporary && ride_temporary_path[0])
-        snprintf(ride_notice, sizeof(ride_notice), "%s; %s retained", message, name ? name + 1 : "TMP");
-    else {
-        if (ride_temporary_path[0]) remove(ride_temporary_path);
-        snprintf(ride_notice, sizeof(ride_notice), "%s", message);
-    }
+    snprintf(ride_notice, sizeof(ride_notice), "%s; %s retained (%s)",
+             message, name ? name + 1 : "TMP", strerror(error));
     ride_clear_paths();
 }
 
 static bool ride_stop(void)
 {
     if (!ride_recording) return false;
-    ride_recording = false;
-    unsigned duration = pdTICKS_TO_MS(xTaskGetTickCount() - ride_started_tick) / 1000;
-    if (storage_commit_new_file(&ride_file, ride_temporary_path, ride_final_path) != 0) {
-        int save_error = errno;
-        sd_record_error(save_error);
-        const char *name = strrchr(ride_temporary_path, '/');
-        snprintf(ride_notice, sizeof(ride_notice), "Ride not published; %s retained (%s)",
-                 name ? name + 1 : "TMP", strerror(save_error));
-        ride_clear_paths();
+    if (!sd_ready) {
+        int error = sd_error_snapshot();
+        ride_abort("SD card unavailable", error ? error : ENODEV);
         return false;
     }
+    ride_recording = false;
+    unsigned duration = pdTICKS_TO_MS(xTaskGetTickCount() - ride_started_tick) / 1000;
+    errno = 0;
+    if (storage_commit_new_file(&ride_file, ride_temporary_path, ride_final_path) != 0) {
+        ride_abort("Ride not published", errno ? errno : EIO);
+        return false;
+    }
+    errno = 0;
     bool summary_ok = ride_append_summary(duration);
     if (!summary_ok) sd_record_error(errno ? errno : EIO);
     snprintf(ride_notice, sizeof(ride_notice), "%s",
@@ -6871,7 +6871,13 @@ static bool ride_start(void)
     bool subscribed = kickr_subscribed;
     portEXIT_CRITICAL(&kickr_lock);
     if (!sd_ready || !subscribed) return false;
-    mkdir(SD_PATH "/RIDES", 0775);
+    errno = 0;
+    if (mkdir(SD_PATH "/RIDES", 0775) != 0 && errno != EEXIST) {
+        int error = errno ? errno : EIO;
+        sd_record_error(error);
+        snprintf(ride_notice, sizeof(ride_notice), "Could not create ride folder: %s", strerror(error));
+        return false;
+    }
     time_t now = time(NULL);
     struct tm local;
     char date[7], clock[7], directory[64];
@@ -6879,41 +6885,52 @@ static bool ride_start(void)
     strftime(date, sizeof(date), "%y%m%d", &local);
     strftime(clock, sizeof(clock), "%H%M%S", &local);
     snprintf(directory, sizeof(directory), SD_PATH "/RIDES/%s", date);
+    errno = 0;
     if (mkdir(directory, 0775) != 0 && errno != EEXIST) {
         int error = errno ? errno : EIO;
         sd_record_error(error);
         snprintf(ride_notice, sizeof(ride_notice), "Could not create ride folder: %s", strerror(error));
         return false;
     }
+    int create_error = EEXIST;
     for (unsigned suffix = 0; suffix < 100 && !ride_file; suffix++) {
         char stem[9];
         snprintf(stem, sizeof(stem), "%s%02u", clock, suffix);
         snprintf(ride_temporary_path, sizeof(ride_temporary_path), "%s/%s.TMP", directory, stem);
         snprintf(ride_final_path, sizeof(ride_final_path), "%s/%s.CSV", directory, stem);
         struct stat info;
+        errno = 0;
         if (stat(ride_final_path, &info) == 0) continue;
-        if (errno != ENOENT) break;
+        if (errno != ENOENT) {
+            create_error = errno ? errno : EIO;
+            break;
+        }
+        errno = 0;
         int descriptor = open(ride_temporary_path, O_WRONLY | O_CREAT | O_EXCL, 0664);
         if (descriptor < 0) {
             if (errno == EEXIST) continue;
+            create_error = errno ? errno : EIO;
             break;
         }
+        errno = 0;
         ride_file = fdopen(descriptor, "wb");
         if (!ride_file) {
+            create_error = errno ? errno : EIO;
             close(descriptor);
             remove(ride_temporary_path);
+            break;
         }
     }
     if (!ride_file) {
-        sd_record_error(errno ? errno : EIO);
+        sd_record_error(create_error);
         ride_clear_paths();
-        snprintf(ride_notice, sizeof(ride_notice), "Could not create a new ride file");
+        snprintf(ride_notice, sizeof(ride_notice), "Could not create a new ride file: %s", strerror(create_error));
         return false;
     }
+    errno = 0;
     if (fputs("unix_time,elapsed_s,power_w,cadence_rpm,speed_kmh,heart_rate,resistance,distance_km,work_kj\n",
               ride_file) < 0) {
-        sd_record_error(errno ? errno : EIO);
-        ride_abort("Could not write the ride header", false);
+        ride_abort("Could not write the ride header", errno ? errno : EIO);
         return false;
     }
     ride_started_at = now;
@@ -6964,6 +6981,10 @@ static void cycling_tick(lv_timer_t *timer)
     if (!fresh_hr) heart_rate = -1;
 
     TickType_t ticks = xTaskGetTickCount();
+    if (ride_recording && !sd_ready) {
+        int error = sd_error_snapshot();
+        ride_abort("SD card unavailable", error ? error : ENODEV);
+    }
     if (ride_recording && (ride_next_hr_measure == 0 || (int32_t)(ticks - ride_next_hr_measure) >= 0) &&
         ring_hr_begin())
         ride_next_hr_measure = ticks + pdMS_TO_TICKS(60000);
@@ -6984,18 +7005,18 @@ static void cycling_tick(lv_timer_t *timer)
             ride_hr_samples_count++;
             if (heart_rate > ride_max_hr) ride_max_hr = heart_rate;
         }
+        errno = 0;
         bool write_failed = !ride_file || fprintf(ride_file, "%lld,%lld,%d,%.1f,%.2f,%d,%d,%.3f,%.1f\n",
                 (long long)now, (long long)elapsed, data.has_power ? data.power_w : 0,
                 data.has_cadence ? data.cadence_rpm : 0, data.has_speed ? data.speed_kmh : 0,
                 heart_rate, data.has_resistance ? data.resistance : 0, ride_distance_km, ride_work_kj) < 0;
         if (!write_failed && ticks - ride_last_flush_tick >= pdMS_TO_TICKS(RIDE_FLUSH_MS)) {
+            errno = 0;
             write_failed = storage_sync_file(ride_file) != 0;
             if (!write_failed) ride_last_flush_tick = ticks;
         }
         if (write_failed) {
-            int error = errno ? errno : EIO;
-            sd_record_error(error);
-            ride_abort("SD write failed", true);
+            ride_abort("SD write failed", errno ? errno : EIO);
         }
     }
 
