@@ -93,6 +93,8 @@ Ebooks reads up to 8 KiB into its existing cached PSRAM buffer. Page text, curre
 
 The Scope/I2C capture and saved serial CSV viewers require a successful close before constructing their graph or row-copy controls. A read or close failure after format recognition shows an error and releases the viewer buffers immediately. Empty recognized captures also release their row buffer. Real LVGL checks cover error/reopen transitions and stable memory in the unchanged 96 KiB pool; filesystem faults and PSRAM allocation are controlled host boundaries, with physical SD and panel checks still open.
 
+Files dispatches supported CSVs to those viewers before its text fallback. The fallback reads at most 4,095 bytes into its existing static buffer and publishes them only after checking the stream and closing successfully. Failed open/read/close operations display the first error; missing errno becomes EIO. Error reporting to the shared SD callback is scoped to the exact `/sdcard/` prefix. Native files and controlled UI/probe/path boundaries check this callback; physical storage and panel behavior remain open.
+
 See [Storage and compatibility contract](compatibility.md) and [Data formats](data-formats.md).
 
 ## Network and radio

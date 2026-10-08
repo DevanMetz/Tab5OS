@@ -4233,11 +4233,23 @@ static void open_file(const char *path)
     lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
 
     static char text[4096];
+    errno = 0;
     FILE *file = fopen(path, "rb");
-    size_t read = file ? fread(text, 1, sizeof(text) - 1, file) : 0;
-    if (file) fclose(file);
-    text[read] = '\0';
-    if (!file) snprintf(text, sizeof(text), "Could not open this file.");
+    int error = file ? 0 : (errno ? errno : EIO);
+    size_t read = 0;
+    if (file) {
+        errno = 0;
+        read = fread(text, 1, sizeof(text) - 1, file);
+        if (ferror(file)) error = errno ? errno : EIO;
+        errno = 0;
+        if (fclose(file) != 0 && !error) error = errno ? errno : EIO;
+    }
+    if (error) {
+        if (!strncmp(path, SD_PATH "/", sizeof(SD_PATH))) sd_record_error(error);
+        snprintf(text, sizeof(text), "Could not read this file: %s", strerror(error));
+    } else {
+        text[read] = '\0';
+    }
 
     lv_obj_t *viewer = lv_textarea_create(content);
     lv_obj_set_size(viewer, 640, 900);

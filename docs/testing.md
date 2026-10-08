@@ -16,6 +16,7 @@ Python 3 and Node.js are needed for the quick checks. The configuration checks a
 | Ring heart-rate logging, saved timestamps or queue processing | [Ring history storage](#ring-history-storage) and a firmware build. |
 | Ebook page loading or navigation | [Ebook pages](#ebook-pages) and a firmware build. |
 | Scope/I2C capture or saved serial CSV viewers | [CSV viewer storage and UI](#csv-viewer-storage-and-ui), existing serial-copy checks and a firmware build. |
+| Files fallback text previews | [Files text previews](#files-text-previews) and a firmware build. |
 | Offline apps, SPI or I2C editor/result flows | [Offline and peripheral UI](#offline-and-peripheral-ui). |
 | Serial, saved serial logs or RTU Frames | [Serial and RTU UI](#serial-and-rtu-ui). |
 | Modbus TCP, NTP, Wake-on-LAN, UDP or HTTP fixtures | [Network fixtures and UI](#network-fixtures-and-ui). |
@@ -162,6 +163,18 @@ This Windows runner reuses the cached Debug LVGL library and compiles both compl
 Every case checks the original file fingerprint and retained clipboard bytes. Failed loads must release external row/text allocations before teardown. Both viewers also run 25 success/error/success cycles (75 opens/closes each) with unchanged LVGL free bytes and allocation counts in the existing 96 KiB pool. Heap and I/O failures are controlled; widgets, parsers, graph arrays and UI cleanup use real LVGL. Open/probe fallback retains its existing API contract; the new failure rule applies after header recognition. These checks do not establish physical SD, PSRAM, panel, latency or power-loss behavior.
 
 Complete viewer/parser/clipboard snapshots, their source/header hashes, the I/O adapter/test hashes and compiler/runtime logs are retained under `build/csv-viewer/`. Windows CI runs these 36 checks after the original 820 native checks and retains `csv-viewer-logs`; this is separate from the Linux fixtures. Use `tools/test_serial_log_ui.ps1` for the existing row-copy/filter/page/inspector checks.
+
+## Files text previews
+
+```powershell
+python tools/test_file_preview.py --compiler 'C:/path/to/clang.exe'
+```
+
+This portable runner compiles the actual `open_file` callback from `main/main.c`. Its 36 native-file cases check empty/small/exact/capped previews, missing files, open/read/close errors, zero-byte/full-count error reads, missing/stale errno, first-error preservation, SD prefix boundaries, reopen recovery, modeled CSV routing and 25 success/error/success cycles. Every case independently checks unchanged file bytes and closed handles. The preceding callback fails 29 controls; 23 reproduce ignored read/close errors or their retry cycles, while six check added details/reporting on existing open-error screens.
+
+UI, CSV viewer probes and the SD error callback are controlled. Logical internal/SD paths map to one owned native fixture file. These checks verify callback dispatch, exact preview/error text and SD callback arguments; they do not run the shared SD callback's filtering, actual LVGL, mount handling or physical storage/panel behavior. The real CSV viewer checks above cover the delegated viewers separately. The 4,095-byte cap and existing NUL/text behavior remain in place.
+
+Generated callback/config source, full main/function/test hashes and compile/runtime logs stay under `build/file-preview/`. Linux CI retains `file-preview-logs`, including available compiler/test failure diagnostics. These 36 cases are separate from the Windows native total.
 
 ## OTA manifests
 
