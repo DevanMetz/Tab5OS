@@ -45,7 +45,9 @@ Published logs open in Files with a selector for each page's records. **COPY ROW
 
 **STOP** and Home publish an active log and drain pending transmission before releasing the interface. The drain timeout is calculated from a 256-byte message at the selected baud/framing plus a small scheduling margin, up to 340 ms at 9600 baud with parity and two stop bits. A drain failure is reported, and the last message may be incomplete. Driver acceptance or a completed drain does not establish that a peer received or acted on a message.
 
-**START LOG** remains an explicit SD action while the interface is running. It records the actual RX/TX byte values, including line endings, using the existing [serial CSV format](data-formats.md). Saved logs open in Files. These input changes do not alter the file format or the existing SD publication/recovery behavior.
+**START LOG** remains an explicit SD action while the interface is running. It records the actual RX/TX byte values, including line endings, using the existing [serial CSV format](data-formats.md). Saved logs open in Files.
+
+Creation skips existing CSV/TMP names and reports other storage errors immediately. Each link has ten names per second; occupied names report a collision without overwriting them. A rejected header/row or failed periodic sync ends that log, reports its first cause and names the retained TMP. Inspect that unpublished file before recovery; starting another log skips its name. Serial traffic can continue while logging is stopped.
 
 ## Validation
 

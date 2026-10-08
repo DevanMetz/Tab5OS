@@ -328,19 +328,28 @@ static void format_bytes(const uint8_t *bytes, size_t length, bool hex, char *te
 static void log_bytes(const char *direction, const uint8_t *bytes, size_t length)
 {
     if (!log_file) return;
-    bool failed = fprintf(log_file, "%lld,%s,", (long long)time(NULL), direction) < 0;
-    for (size_t i = 0; i < length && !failed; i++)
-        failed = fprintf(log_file, "%s%02X", i ? " " : "", bytes[i]) < 0;
-    if (!failed) failed = fputc('\n', log_file) == EOF;
+    int error = 0;
+    errno = 0;
+    if (fprintf(log_file, "%lld,%s,", (long long)time(NULL), direction) < 0)
+        error = errno ? errno : EIO;
+    for (size_t i = 0; i < length && !error; i++) {
+        errno = 0;
+        if (fprintf(log_file, "%s%02X", i ? " " : "", bytes[i]) < 0)
+            error = errno ? errno : EIO;
+    }
+    if (!error) {
+        errno = 0;
+        if (fputc('\n', log_file) == EOF) error = errno ? errno : EIO;
+    }
 
     TickType_t now = xTaskGetTickCount();
-    if (!failed && now - log_last_flush_tick >= pdMS_TO_TICKS(UART_TOOL_FLUSH_MS)) {
-        failed = storage_sync_file(log_file) != 0;
-        if (!failed) log_last_flush_tick = now;
+    if (!error && now - log_last_flush_tick >= pdMS_TO_TICKS(UART_TOOL_FLUSH_MS)) {
+        errno = 0;
+        if (storage_sync_file(log_file) != 0) error = errno ? errno : EIO;
+        else log_last_flush_tick = now;
     }
-    if (!failed) return;
+    if (!error) return;
 
-    int error = errno ? errno : EIO;
     fclose(log_file);
     log_file = NULL;
     if (storage_error_cb) storage_error_cb(error);
@@ -438,6 +447,7 @@ static void update_controls(void)
 static bool stop_log(void)
 {
     if (!log_file) return true;
+    errno = 0;
     int result = storage_commit_new_file(&log_file, log_temporary_path, log_final_path);
     int error = errno;
     const char *name = strrchr(result == 0 ? log_final_path : log_temporary_path, '/');
@@ -464,14 +474,20 @@ static bool start_log(void)
     char directory[64];
     snprintf(directory, sizeof(directory), "%s/%02d%02d%02d", root,
              (local.tm_year + 1900) % 100, local.tm_mon + 1, local.tm_mday);
-    if ((mkdir(root, 0775) != 0 && errno != EEXIST) ||
-        (mkdir(directory, 0775) != 0 && errno != EEXIST)) {
-        int error = errno;
+    int error = 0;
+    errno = 0;
+    if (mkdir(root, 0775) != 0 && errno != EEXIST) error = errno ? errno : EIO;
+    if (!error) {
+        errno = 0;
+        if (mkdir(directory, 0775) != 0 && errno != EEXIST) error = errno ? errno : EIO;
+    }
+    if (error) {
         if (storage_error_cb) storage_error_cb(error);
         set_status("Could not create log folder: %s", strerror(error));
         return false;
     }
 
+    error = EEXIST;
     for (unsigned suffix = 0; suffix < 10 && !log_file; suffix++) {
         char stem[9];
         snprintf(stem, sizeof(stem), "%c%02d%02d%02d%u", rs485_interface ? 'R' : 'U',
@@ -480,30 +496,38 @@ static bool start_log(void)
         snprintf(log_temporary_path, sizeof(log_temporary_path), "%s/%s.TMP", directory, stem);
         snprintf(log_final_path, sizeof(log_final_path), "%s/%s.CSV", directory, stem);
         struct stat info;
-        if (stat(log_final_path, &info) == 0 || errno != ENOENT) continue;
+        errno = 0;
+        if (stat(log_final_path, &info) == 0) continue;
+        if (errno != ENOENT) { error = errno ? errno : EIO; break; }
+        errno = 0;
         int descriptor = open(log_temporary_path, O_WRONLY | O_CREAT | O_EXCL, 0664);
-        if (descriptor < 0) continue;
+        if (descriptor < 0) {
+            error = errno ? errno : EIO;
+            if (error == EEXIST) continue;
+            break;
+        }
+        errno = 0;
         log_file = fdopen(descriptor, "wb");
         if (!log_file) {
-            int error = errno;
+            error = errno ? errno : EIO;
             close(descriptor);
             unlink(log_temporary_path);
-            errno = error;
+            break;
         }
     }
     if (!log_file) {
-        int error = errno ? errno : EEXIST;
         if (storage_error_cb) storage_error_cb(error);
         set_status("Could not start log: %s", strerror(error));
         return false;
     }
+    errno = 0;
     if (fputs("unix_time,direction,data_hex\n", log_file) < 0) {
-        int error = errno ? errno : EIO;
+        error = errno ? errno : EIO;
         fclose(log_file);
         log_file = NULL;
-        unlink(log_temporary_path);
         if (storage_error_cb) storage_error_cb(error);
-        set_status("Could not write log header: %s", strerror(error));
+        const char *name = strrchr(log_temporary_path, '/');
+        set_status("Log header error: %s; retained %s", strerror(error), name ? name + 1 : log_temporary_path);
         return false;
     }
     log_last_flush_tick = xTaskGetTickCount();

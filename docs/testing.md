@@ -22,6 +22,7 @@ Python 3 and Node.js are needed for the quick checks. The configuration checks a
 | Files directory browsing | [Files directories](#files-directories) and a firmware build. |
 | Offline apps, SPI or I2C editor/result flows | [Offline and peripheral UI](#offline-and-peripheral-ui). |
 | Serial, saved serial logs or RTU Frames | [Serial and RTU UI](#serial-and-rtu-ui). |
+| UART or RS-485 SD log writes | [Serial log writers](#serial-log-writers) and a firmware build. |
 | Modbus TCP, NTP, Wake-on-LAN, UDP or HTTP fixtures | [Network fixtures and UI](#network-fixtures-and-ui). |
 | MQTT app, packet codec or client protocol | [Lifecycle/storage](#mqtt-lifecycle-and-storage) and [client/broker fixture](#mqtt-client-and-broker-fixture). |
 | OTA manifest parsing and update eligibility | [OTA manifests](#ota-manifests) plus a firmware build. |
@@ -178,6 +179,20 @@ The portable runner compiles the actual Scope save callback and I2C log/finish/S
 Rejected writes and I2C flush/sync failures close the stream without retrying publication. A complete-looking TMP can remain after a failed flush/sync/close; these checks do not establish physical durability or rollback. UI, clocks/ticks, channel/sample/calibration data, directory preparation, logical mount paths, SD error reporting and I/O faults are controlled. UTC supplies deterministic filenames. Windows descriptor creation adds binary mode so CSV bytes match the SDK's LF output. The I2C start constructor, drivers, ADC acquisition, real LVGL, SDK mount/error filtering, physical SD/panel and power cuts are not executed. The cycle fixture removes its owned prior files between independent sessions; it does not prove retained-TMP collision recovery in the I2C constructor.
 
 Full main/function/storage/header/test hashes, generated callback/config/storage source and compile/result logs stay under `build/capture-write/`. Linux CI retains `capture-write-logs`, including available failure diagnostics. These 35 cases are separate from the Windows native total.
+
+## Serial log writers
+
+```powershell
+python tools/test_serial_log_write.py --compiler 'C:/path/to/clang.exe'
+```
+
+The portable runner compiles the three actual serial log start/write/Stop functions from `main/uart_tool.c` and complete `storage_io.c`. All 82 native-file cases pass across UART and RS-485; the previous functions fail 42 controls. Checks cover exact headers, RX and all 256 TX byte values, directory/stat/open/fdopen errors, missing or stale errno, partial headers/row prefixes/byte fields/newlines, first-error preservation through tick and close calls, one-shot flush/sync failures, preexisting stream errors, close/publication failures, the ten-name collision bound, the ten-second flush threshold and tick wrap. Failed logs close their native stream/descriptor ownership, report once, and cannot publish through a later Stop.
+
+The actual start constructor creates native directories and files behind bounded logical-path adapters. Header and row recovery checks preserve the old TMP's bytes while restarting in the same second under the next filename. Each link also completes 25 row-failure/restart pairs with both generations checked and closed; the fixture removes its owned files between pairs. Existing CSV and TMP collisions remain unchanged, and all occupied names report `EEXIST` regardless of leftover errno. A failed `fdopen` closes its descriptor and attempts to remove its newly created empty TMP; rejected headers retain their partial bytes and show the TMP name.
+
+UI status/control callbacks, clocks/ticks, SD admission and I/O failures are controlled. UTC supplies deterministic filenames; Windows descriptor creation adds binary mode to match SDK LF bytes. The fixtures do not execute serial drivers, real LVGL, SDK mount/error filtering, physical SD/panel, electrical timing or power cuts. The separate Serial UI runner checks the complete app against cached real LVGL and UART adapters.
+
+Full serial/function/storage/header/test hashes, generated function/config/storage source and compile/result logs stay under `build/serial-log-write/`. Linux CI retains `serial-log-write-logs`, including available failure diagnostics. These 82 cases are separate from the Windows native total.
 
 ## CSV viewer storage and UI
 
