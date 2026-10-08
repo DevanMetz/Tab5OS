@@ -41,6 +41,8 @@ jobs:
         run: python3 tools/test_ebook_pages.py --compiler cc
       - name: Test ebook library
         run: python3 tools/test_ebook_library.py --compiler cc
+      - name: Test capture writers
+        run: python3 tools/test_capture_write.py --compiler cc
       - name: Test Files text previews
         run: python3 tools/test_file_preview.py --compiler cc
       - name: Test Files directories
@@ -197,6 +199,21 @@ jobs:
             build/ebook-library/source.json
             build/ebook-library/ebook_library.inc
             build/ebook-library/ebook_library_config.inc
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Retain capture writer evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: capture-write-logs
+          path: |
+            build/capture-write/compile.log
+            build/capture-write/result.log
+            build/capture-write/source.json
+            build/capture-write/capture_write.inc
+            build/capture-write/capture_write_config.inc
+            build/capture-write/storage_source.inc
           if-no-files-found: warn
           retention-days: 14
 

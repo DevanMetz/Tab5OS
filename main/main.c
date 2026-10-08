@@ -2273,26 +2273,33 @@ static void scope_capture_clicked(lv_event_t *event)
     gain_permille = scope_gains_permille[channel_index];
     portEXIT_CRITICAL(&scope_lock);
     uint32_t rate = scope_sample_rates[rate_index];
-    bool write_ok = fputs("unix_time,elapsed_us,gpio,millivolts,sample_rate_hz,offset_mv,scale_permille\n", file) >= 0;
-    for (size_t i = 0; write_ok && i < SCOPE_CHART_POINTS; i++) {
+    errno = 0;
+    int error = fputs("unix_time,elapsed_us,gpio,millivolts,sample_rate_hz,offset_mv,scale_permille\n", file) < 0
+                    ? (errno ? errno : EIO) : 0;
+    for (size_t i = 0; !error && i < SCOPE_CHART_POINTS; i++) {
         uint32_t elapsed_us = (uint32_t)((uint64_t)i * 1000000U / rate);
-        write_ok = fprintf(file, "%lld,%lu,%d,%ld,%lu,%d,%u\n",
-                           (long long)captured_at, (unsigned long)elapsed_us,
-                           (int)scope_channels[channel_index].pin, (long)scope_chart_points[i],
-                           (unsigned long)rate, (int)offset_mv, (unsigned)gain_permille) >= 0;
+        errno = 0;
+        if (fprintf(file, "%lld,%lu,%d,%ld,%lu,%d,%u\n",
+                    (long long)captured_at, (unsigned long)elapsed_us,
+                    (int)scope_channels[channel_index].pin, (long)scope_chart_points[i],
+                    (unsigned long)rate, (int)offset_mv, (unsigned)gain_permille) < 0)
+            error = errno ? errno : EIO;
     }
 
-    bool saved = write_ok && storage_commit_new_file(&file, temporary_path, final_path) == 0;
-    if (!saved && file) {
-        errno = errno ? errno : EIO;
-        storage_commit_new_file(&file, temporary_path, final_path);
+    bool saved = false;
+    if (!error) {
+        errno = 0;
+        saved = storage_commit_new_file(&file, temporary_path, final_path) == 0;
+        if (!saved) error = errno ? errno : EIO;
+    } else {
+        fclose(file);
+        file = NULL;
     }
     if (saved) {
         const char *name = strrchr(final_path, '/');
         snprintf(scope_capture_notice, sizeof(scope_capture_notice), "Saved %s",
                  name ? name + 1 : "Scope CSV");
     } else {
-        int error = errno ? errno : EIO;
         sd_record_error(error);
         struct stat info;
         bool retained = stat(temporary_path, &info) == 0;
@@ -5876,29 +5883,45 @@ static void i2c_result_action(void)
     i2c_update_controls();
 }
 
-static bool i2c_capture_stop(void)
+static bool i2c_capture_finish(int error)
 {
-    if (!i2c_capture_file) return true;
+    if (!i2c_capture_file) return error == 0;
+    if (!error && !sd_ready) {
+        error = sd_error_snapshot();
+        if (!error) error = ENODEV;
+    }
 
     const char *temporary_name = strrchr(i2c_capture_temporary_path, '/');
     const char *final_name = strrchr(i2c_capture_final_path, '/');
-    bool saved = storage_commit_new_file(&i2c_capture_file, i2c_capture_temporary_path,
-                                         i2c_capture_final_path) == 0;
+    bool saved = false;
+    if (!error) {
+        errno = 0;
+        saved = storage_commit_new_file(&i2c_capture_file, i2c_capture_temporary_path,
+                                       i2c_capture_final_path) == 0;
+        if (!saved) error = errno ? errno : EIO;
+    } else {
+        fclose(i2c_capture_file);
+        i2c_capture_file = NULL;
+    }
     if (saved) {
         snprintf(i2c_capture_notice, sizeof(i2c_capture_notice), "Saved %s",
                  final_name ? final_name + 1 : "I2C CSV");
     } else {
-        int save_error = errno ? errno : EIO;
-        sd_record_error(save_error);
+        sd_record_error(error);
         snprintf(i2c_capture_notice, sizeof(i2c_capture_notice),
-                 "Capture not published; %s retained (%s)",
-                 temporary_name ? temporary_name + 1 : "TMP", strerror(save_error));
+                 "Capture not published; check %s (%s)",
+                 temporary_name ? temporary_name + 1 : "TMP", strerror(error));
     }
     i2c_capture_temporary_path[0] = '\0';
     i2c_capture_final_path[0] = '\0';
     i2c_update_controls();
     if (i2c_capture_status) lv_label_set_text(i2c_capture_status, i2c_capture_notice);
     return saved;
+}
+
+static bool i2c_capture_stop(void)
+{
+    return i2c_capture_finish(0);
 }
 
 static bool i2c_capture_start(void)
@@ -6010,24 +6033,26 @@ static bool i2c_capture_start(void)
 static void i2c_capture_log(esp_err_t transaction_error, uint8_t value)
 {
     if (!i2c_capture_file) return;
+    if (!sd_ready) {
+        int error = sd_error_snapshot();
+        i2c_capture_finish(error ? error : ENODEV);
+        return;
+    }
 
     char value_text[5] = "";
     if (transaction_error == ESP_OK) snprintf(value_text, sizeof(value_text), "0x%02X", value);
-    bool failed = fprintf(i2c_capture_file, "%lld,0x%02X,0x%02X,%s,%s,%lu\n",
-                          (long long)time(NULL), i2c_selected_address, i2c_selected_register,
-                          value_text, esp_err_to_name(transaction_error),
-                          (unsigned long)(i2c_bus_speed_hz / 1000)) < 0;
+    errno = 0;
+    int error = fprintf(i2c_capture_file, "%lld,0x%02X,0x%02X,%s,%s,%lu\n",
+                        (long long)time(NULL), i2c_selected_address, i2c_selected_register,
+                        value_text, esp_err_to_name(transaction_error),
+                        (unsigned long)(i2c_bus_speed_hz / 1000)) < 0 ? (errno ? errno : EIO) : 0;
     TickType_t now = xTaskGetTickCount();
-    if (!failed && now - i2c_capture_last_flush_tick >= pdMS_TO_TICKS(I2C_CAPTURE_FLUSH_MS)) {
-        failed = storage_sync_file(i2c_capture_file) != 0;
-        if (!failed) i2c_capture_last_flush_tick = now;
+    if (!error && now - i2c_capture_last_flush_tick >= pdMS_TO_TICKS(I2C_CAPTURE_FLUSH_MS)) {
+        errno = 0;
+        if (storage_sync_file(i2c_capture_file) != 0) error = errno ? errno : EIO;
+        else i2c_capture_last_flush_tick = now;
     }
-    if (failed) {
-        int error = errno ? errno : EIO;
-        sd_record_error(error);
-        errno = error;
-        i2c_capture_stop();
-    }
+    if (error) i2c_capture_finish(error);
 }
 
 static void i2c_address_step_clicked(lv_event_t *event)

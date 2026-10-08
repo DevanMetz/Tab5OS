@@ -16,6 +16,7 @@ Python 3 and Node.js are needed for the quick checks. The configuration checks a
 | Ring heart-rate logging, saved timestamps or queue processing | [Ring history storage](#ring-history-storage) and a firmware build. |
 | Ebook page loading or navigation | [Ebook pages](#ebook-pages) and a firmware build. |
 | Ebook library enumeration | [Ebook library](#ebook-library) and a firmware build. |
+| Scope/I2C CSV writes or publication | [Capture writers](#capture-writers) and a firmware build. |
 | Scope/I2C capture or saved serial CSV viewers | [CSV viewer storage and UI](#csv-viewer-storage-and-ui), existing serial-copy checks and a firmware build. |
 | Files fallback text previews | [Files text previews](#files-text-previews) and a firmware build. |
 | Files directory browsing | [Files directories](#files-directories) and a firmware build. |
@@ -165,6 +166,18 @@ The portable runner compiles the actual `show_ebooks`, `ebook_supported` and `br
 Windows Find APIs and POSIX directory APIs supply the entries; native dot entries are normalized. The overlong name and operation failures are injected. UI, timers, logical mount paths, download helpers and the SD error callback are controlled. Reopen cases restore modeled SD availability and check that a successful listing clears its warning without erasing earlier error reports. The unchanged welcome-writing branch is excluded by using an existing directory and rejecting any welcome I/O. Actual LVGL cleanup, timer ticks, downloads, SDK mounts, SD callback filtering, physical SD/panel, latency and power-loss behavior remain outside this fixture. A null directory read with zero errno remains EOF.
 
 The library retains 64 stored paths of 256 bytes. The entry-limit message means those slots filled; no extra read proves that more entries exist. Generated callback/config source, full main/function/test hashes and compile/result logs stay under `build/ebook-library/`. Linux CI retains `ebook-library-logs`, including available failure diagnostics. These 28 checks are separate from the Windows native total.
+
+## Capture writers
+
+```powershell
+python tools/test_capture_write.py --compiler 'C:/path/to/clang.exe'
+```
+
+The portable runner compiles the actual Scope save callback and I2C log/finish/Stop callbacks together with complete `storage_io.c`. Its 35 cases verify exact native CSV/TMP bytes, the 300-row Scope format, I2C success/transaction-error rows, header/row failures with and without a stream error flag, missing errno, tick-clobbered errno, first-error preservation through close, one-shot flush/sync failures, failed publication, known SD unavailability during logging or Stop, pre-flush timing, a preexisting Scope filename and 25 independent failure/success cycles per writer. The previous callbacks fail 16 controls, including publishing rejected data during cleanup and replacing the first error. All current cases finish with closed native file/descriptor handles and one SD report per I/O failure.
+
+Rejected writes and I2C flush/sync failures close the stream without retrying publication. A complete-looking TMP can remain after a failed flush/sync/close; these checks do not establish physical durability or rollback. UI, clocks/ticks, channel/sample/calibration data, directory preparation, logical mount paths, SD error reporting and I/O faults are controlled. UTC supplies deterministic filenames. Windows descriptor creation adds binary mode so CSV bytes match the SDK's LF output. The I2C start constructor, drivers, ADC acquisition, real LVGL, SDK mount/error filtering, physical SD/panel and power cuts are not executed. The cycle fixture removes its owned prior files between independent sessions; it does not prove retained-TMP collision recovery in the I2C constructor.
+
+Full main/function/storage/header/test hashes, generated callback/config/storage source and compile/result logs stay under `build/capture-write/`. Linux CI retains `capture-write-logs`, including available failure diagnostics. These 35 cases are separate from the Windows native total.
 
 ## CSV viewer storage and UI
 

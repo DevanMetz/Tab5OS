@@ -99,6 +99,8 @@ Files directory browsing resets errno before each directory read so per-entry `s
 
 The ebook library verifies regular-file metadata before offering a `.txt` entry, excluding matching directories and unconfirmed paths. Directory setup/open failures show their cause; read/stat/close failures keep confirmed rows visible with an incomplete-list warning. Fresh errno checks preserve the first failure, and failed or skipped listings cannot claim the library is empty. The existing 64-entry and 256-byte path bounds are disclosed. Native checks use an existing BOOKS directory with controlled UI, timer, SD, download and fault boundaries; welcome creation and physical storage remain separate checks.
 
+Scope captures the first rejected header/row write before cleanup and closes an invalid temporary stream without attempting publication. I2C uses a shared finish path for explicit Stop and error cleanup: known row/flush/sync/SD failures close and release recording ownership, preserve the first cause, and report once; only a healthy Stop attempts publication. This prevents a successful retry during cleanup from turning an earlier failure into a Saved result. Native bytes and closed handles are checked with controlled UI/data/time/fault boundaries; sampling, drivers and physical SD behavior remain separate gates.
+
 See [Storage and compatibility contract](compatibility.md) and [Data formats](data-formats.md).
 
 ## Network and radio
