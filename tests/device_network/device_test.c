@@ -16,6 +16,7 @@ static lv_obj_t *content;
 static bool ntp;
 static bool udp;
 static const char *output_directory;
+static unsigned queued_failures;
 static uint32_t ticks(void) { return (uint32_t)GetTickCount64(); }
 static void flush(lv_display_t *display, const lv_area_t *area, uint8_t *pixels)
 {
@@ -606,6 +607,138 @@ static void udp_case(const char *scenario, const char *port)
         assert(payload_clipboard_peek()->length == 2 && !memcmp(payload_clipboard_peek()->bytes, sentinel, 2));
     }
 }
+static void queued_check(bool condition, const char *message)
+{
+    if (!condition) {
+        fprintf(stderr, "FAIL queued worker: %s\n", message);
+        queued_failures++;
+    }
+}
+static void launch_job(void)
+{
+    if (ntp) click("SAMPLE 4");
+    else if (udp) start_udp();
+    else start_wol();
+}
+static void force_launch(void)
+{
+    lv_obj_t *label = find_text(content, ntp ? "SAMPLE 4" : "SEND", true);
+    assert(label);
+    lv_obj_send_event(lv_obj_get_parent(label), LV_EVENT_CLICKED, NULL);
+}
+static void hold_job(void)
+{
+    LONG sockets = host_sockets_opened;
+    InterlockedExchange(&host_hold_task_start, 1);
+    launch_job();
+    DWORD until = GetTickCount() + 2000;
+    while (!InterlockedCompareExchange(&host_task_start_waiters, 0, 0)) {
+        assert((LONG)(until - GetTickCount()) > 0);
+        pump();
+    }
+    assert(busy() && host_active_tasks == 1 && host_sockets_opened == sockets);
+    LONG tasks = host_tasks_started;
+    force_launch();
+    assert(busy() && host_tasks_started == tasks && host_sockets_opened == sockets);
+}
+static void release_job(unsigned elapsed_ms)
+{
+    InterlockedExchangeAdd64(&host_monotonic_offset_us, (int64_t)elapsed_ms * 1000);
+    InterlockedExchange(&host_hold_task_start, 0);
+    finish();
+    assert(!busy() && host_active_tasks == 0 && host_task_start_waiters == 0);
+}
+static unsigned displayed_duration(void)
+{
+    lv_obj_t *label = find_text(content, ntp ? "Results for" : "Result for", false);
+    assert(label);
+    const char *text = lv_label_get_text(label);
+    const char *value = ntp ? strstr(text, " | ") : udp ? strstr(text, "| total ") : strrchr(text, '|');
+    assert(value);
+    value += ntp ? 3 : udp ? 8 : 1;
+    unsigned duration = 0;
+    assert(sscanf(value, " %u ms", &duration) == 1);
+    return duration;
+}
+static bool timed_out(void)
+{
+    return find_text(content, ntp ? "Session deadline reached" : udp ? "Send deadline reached" :
+                     "Send timed out after 2 seconds", false) != NULL;
+}
+static void fresh_success(void)
+{
+    launch_job(); finish();
+    expect(ntp ? "KoD RATE" : udp ? "Received 4-byte datagram" : "102-byte packet handed to the network.");
+    queued_check(displayed_duration() < 1500, "fresh retry inherited its predecessor's deadline");
+}
+static void queued_case(const char *scenario, const char *port)
+{
+    if (ntp) { input(0, "127.0.0.1"); input(1, port); }
+    else if (udp) { input(0, "127.0.0.1"); input(1, port); input(2, "0"); input(3, "00 01 02 03"); }
+    else { input(0, "02:11:22:33:44:55"); input(1, "127.0.0.1"); input(2, port); }
+    unsigned expired_ms = ntp ? 11000 : udp ? 4000 : 3000;
+    if (strstr(scenario, "-retry")) {
+        fresh_success(); clean_app(); pump_for(25);
+        DWORD handles_before, handles_after;
+        lv_mem_monitor_t before, after;
+        GetProcessHandleCount(GetCurrentProcess(), &handles_before); lv_mem_monitor(&before);
+        for (unsigned i = 0; i < 25; i++) {
+            open_app();
+            LONG sockets = host_sockets_opened;
+            hold_job(); release_job(expired_ms);
+            queued_check(host_sockets_opened == sockets, "expired retry created a socket");
+            queued_check(timed_out(), "expired retry did not report timeout");
+            queued_check(displayed_duration() >= expired_ms, "retry omitted scheduling time");
+            fresh_success(); clean_app(); pump_for(25);
+        }
+        GetProcessHandleCount(GetCurrentProcess(), &handles_after); lv_mem_monitor(&after);
+        assert(handles_before == handles_after && before.free_size == after.free_size && before.used_cnt == after.used_cnt);
+        printf("queued_pairs=25 heap_free=%zu->%zu heap_used=%u->%u handles=%lu->%lu ",
+               before.free_size, after.free_size, (unsigned)before.used_cnt, (unsigned)after.used_cnt,
+               (unsigned long)handles_before, (unsigned long)handles_after);
+        return;
+    }
+    bool ready = strstr(scenario, "-ready") != NULL;
+    bool remaining = strstr(scenario, "-remaining") != NULL;
+    bool cancel = strstr(scenario, "-cancel") != NULL;
+    bool home = strstr(scenario, "-home") != NULL;
+    LONG sockets = host_sockets_opened;
+    hold_job();
+    if (cancel) click(ntp ? "STOP" : "CANCEL");
+    if (home) {
+        clean_app(); open_app();
+        assert(busy());
+        LONG tasks = host_tasks_started;
+        force_launch();
+        assert(busy() && host_tasks_started == tasks && host_sockets_opened == sockets);
+    }
+    unsigned delay_ms = ready ? 1000 : remaining ? (ntp ? 9000 : 2000) : expired_ms;
+    ULONGLONG released_at = GetTickCount64();
+    release_job(delay_ms);
+    unsigned real_wait_ms = (unsigned)(GetTickCount64() - released_at);
+    unsigned duration = displayed_duration();
+    queued_check(duration + 300 >= delay_ms + real_wait_ms, "duration omitted scheduling time");
+    if (ready) {
+        expect(ntp ? "4 valid | 0 failed/missing | 0 not sampled" : udp ?
+               "Received 4-byte datagram" : "102-byte packet handed to the network.");
+        queued_check(host_sockets_opened == sockets + 1, "ready request did not own one socket");
+    } else {
+        queued_check(find_text(content, cancel || home ? (ntp ? "Cancelled; UDP socket closed" :
+                               udp ? "Cancelled before sending" : "Cancelled before the packet") :
+                               remaining && udp ? "No reply within the 3-second deadline" :
+                               ntp ? "Session deadline reached" : udp ? "Send deadline reached" :
+                               "Send timed out after 2 seconds", false) != NULL,
+                     "queued request lost its timeout/cancellation result");
+        queued_check(host_sockets_opened == sockets + (remaining ? 1 : 0),
+                     "expired or cancelled worker created a socket");
+        if (remaining) {
+            queued_check(real_wait_ms >= 600 && real_wait_ms < 2500, "worker renewed its original budget");
+            if (ntp) queued_check(find_text(content, "0 valid | 1 failed/missing | 3 not sampled", false) != NULL,
+                                  "remaining session allowed later NTP samples");
+        } else queued_check(real_wait_ms < 1500, "expired or cancelled worker did not promptly finish");
+    }
+    printf("queued_duration_ms=%u remaining_wait_ms=%u ", duration, real_wait_ms);
+}
 int main(int argc, char **argv)
 {
     assert(argc == 4);
@@ -616,9 +749,10 @@ int main(int argc, char **argv)
     WSADATA data; assert(!WSAStartup(MAKEWORD(2, 2), &data));
     setup_screen(); open_app();
     int64_t began = esp_timer_get_time();
-    if (udp) udp_case(scenario, argv[1]); else if (ntp) ntp_case(scenario, argv[1]); else wol_case(scenario, argv[1]);
+    if (strstr(scenario, "-queued-")) queued_case(scenario, argv[1]);
+    else if (udp) udp_case(scenario, argv[1]); else if (ntp) ntp_case(scenario, argv[1]); else wol_case(scenario, argv[1]);
     assert(host_open_sockets == 0 && host_active_tasks == 0);
-    printf("%s PASS elapsed_ms=%lld tasks=%ld sockets=%ld\n", scenario,
-           (long long)((esp_timer_get_time() - began) / 1000), host_tasks_started, host_sockets_opened);
-    clean_app(); lv_deinit(); WSACleanup(); return 0;
+    printf("%s %s elapsed_ms=%lld tasks=%ld sockets=%ld failures=%u\n", scenario, queued_failures ? "FAIL" : "PASS",
+           (long long)((esp_timer_get_time() - began) / 1000), host_tasks_started, host_sockets_opened, queued_failures);
+    clean_app(); lv_deinit(); WSACleanup(); return queued_failures ? 1 : 0;
 }

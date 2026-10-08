@@ -462,7 +462,7 @@ jobs:
   native-ui:
     needs: firmware
     runs-on: windows-2025
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -487,6 +487,22 @@ jobs:
       - name: Test Modbus TCP with loopback peers
         shell: pwsh
         run: ./tools/test_modbus_network.ps1
+      - name: Test UDP tools with loopback peers
+        shell: pwsh
+        run: ./tools/test_device_network.ps1
+      - name: Retain UDP tool evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: device-network-logs
+          path: |
+            build/device-network/compile.log
+            build/device-network/result.log
+            build/device-network/source.json
+            build/device-network/*-wire.json
+            build/device-network/sources/
+          if-no-files-found: warn
+          retention-days: 14
       - name: Retain Modbus TCP evidence
         uses: actions/upload-artifact@v4
         if: always()

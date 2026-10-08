@@ -25,6 +25,7 @@ typedef struct {
     uint16_t port;
     bool present;
     bool sent;
+    int64_t accepted_us;
     uint32_t duration_ms;
     char status[192];
 } wol_job_t;
@@ -121,7 +122,7 @@ static void wol_worker(void *argument)
     portENTER_CRITICAL(&job_lock);
     job = published;
     portEXIT_CRITICAL(&job_lock);
-    int64_t started = esp_timer_get_time();
+    int64_t started = job.accepted_us;
     int64_t deadline = started + WOL_DEADLINE_US;
     int error = operation_error(deadline);
     int fd = -1;
@@ -271,6 +272,7 @@ static void send_clicked(lv_event_t *event)
     lv_obj_add_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
     snprintf(job.status, sizeof(job.status), "Sending one 102-byte packet...");
     portENTER_CRITICAL(&job_lock);
+    job.accepted_us = esp_timer_get_time();
     published = job;
     job_cancelled = false;
     job_busy = true;

@@ -33,6 +33,7 @@ typedef struct {
     char host[16];
     uint16_t port;
     int64_t clock_unix_us;
+    int64_t accepted_us;
     uint32_t duration_ms;
     bool present;
     sample_t samples[NTP_SAMPLE_COUNT];
@@ -178,7 +179,8 @@ static void ntp_worker(void *argument)
     portENTER_CRITICAL(&job_lock);
     job = published;
     portEXIT_CRITICAL(&job_lock);
-    int64_t started = esp_timer_get_time();
+    int64_t started = job.accepted_us;
+    int64_t clock_started = esp_timer_get_time();
     job.clock_unix_us = unix_now();
     int64_t deadline = started + NTP_SESSION_US;
     int error = operation_error(deadline);
@@ -203,7 +205,7 @@ static void ntp_worker(void *argument)
         if (error || (error = operation_error(deadline))) break;
         int64_t sample_started = esp_timer_get_time();
         int64_t sample_clock = unix_now();
-        int64_t clock_drift = sample_clock - job.clock_unix_us - (sample_started - started);
+        int64_t clock_drift = sample_clock - job.clock_unix_us - (sample_started - clock_started);
         if (!ntp_clock_sane(sample_clock) || clock_drift < -5000 || clock_drift > 5000) {
             snprintf(job.status, sizeof(job.status), "Tablet clock changed between samples; burst stopped. UDP socket closed.");
             stop_burst = true;
@@ -360,6 +362,7 @@ static void start_clicked(lv_event_t *event)
     lv_keyboard_set_textarea(keyboard, NULL);
     lv_obj_add_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
     portENTER_CRITICAL(&job_lock);
+    job.accepted_us = esp_timer_get_time();
     published = job;
     job_busy = true;
     job_cancelled = false;

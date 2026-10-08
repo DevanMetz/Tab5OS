@@ -5,6 +5,7 @@ forwarded, no physical wake is attempted, and no tablet clock is changed.
 """
 import argparse
 import importlib.util
+import json
 import pathlib
 import re
 import socket
@@ -71,7 +72,7 @@ def run_case(executable, output, mode):
                         if stop.wait(0.15):  # Leave time to inspect controls while busy.
                             break
                     assert request == expected_request, (request, expected_request)
-                    if mode in ("udp-timeout", "udp-offline") or (
+                    if mode in ("udp-timeout", "udp-offline", "udp-queued-remaining") or (
                         mode in ("udp-stop", "udp-home") and len(requests) == 1
                     ):
                         continue
@@ -93,13 +94,13 @@ def run_case(executable, output, mode):
                 assert request[1] == 0 and request[24:40] == bytes(16)
                 assert request[40:48] != bytes(8)
                 number = len(requests)
-                if mode == "ntp-timeout" or (mode in ("ntp-stop", "ntp-home") and number == 1):
+                if mode in ("ntp-timeout", "ntp-queued-remaining") or (mode in ("ntp-stop", "ntp-home") and number == 1):
                     continue
                 received = time.time() + 0.1
                 if mode == "ntp-clockstep" and stop.wait(0.4):
                     break
                 outcome = "ok"
-                if mode == "ntp-kod" or (mode in ("ntp-stop", "ntp-home") and number == 2):
+                if mode in ("ntp-kod", "ntp-queued-expired", "ntp-queued-retry") or (mode in ("ntp-stop", "ntp-home") and number == 2):
                     outcome = "kod"
                 if mode == "ntp-invalid":
                     outcome = ["mismatch", "unsynced", "short", "ok"][number - 1]
@@ -125,13 +126,21 @@ def run_case(executable, output, mode):
         worker.join(1)
         peer.close()
         assert not worker.is_alive()
+    evidence = {"scenario": mode, "exitCode": result.returncode, "requests": [request.hex() for request in requests],
+                "requestGapsSeconds": [b - a for a, b in zip(times, times[1:])], "serverErrors": errors,
+                "stdout": result.stdout, "stderr": result.stderr, "loopbackOnly": True,
+                "workerStartAndMonotonicClockControlled": "-queued-" in mode,
+                "actualSdkSchedulerOrPhysicalWifiVerified": False}
+    (output / f"{mode}-wire.json").write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
     print(result.stdout, end="", flush=True)
     if result.stderr:
         print(result.stderr, end="", flush=True)
     assert result.returncode == 0, (mode, result.returncode)
     assert not errors, (mode, errors)
     expected = 1
-    if mode.endswith("-ui") or mode in ("ntp-gates", "ntp-inputs", "wol-invalid", "udp-gates", "udp-invalid", "udp-bind"):
+    if "-queued-" in mode:
+        expected = 26 if mode.endswith("-retry") else (4 if mode.startswith("ntp-") else 1) if mode.endswith("-ready") else 1 if mode.endswith("-remaining") else 0
+    elif mode.endswith("-ui") or mode in ("ntp-gates", "ntp-inputs", "wol-invalid", "udp-gates", "udp-invalid", "udp-bind"):
         expected = 0
     elif mode.endswith("-repeated"):
         expected = 25
@@ -143,7 +152,7 @@ def run_case(executable, output, mode):
     if mode == "udp-source":
         fixed_port = int(re.search(r"fixed_port=(\d+)", result.stdout).group(1))
         assert sources[0][1] == fixed_port, (sources, fixed_port)
-    if mode in ("ntp-valid", "ntp-unmatched", "ntp-invalid", "ntp-timeout"):
+    if mode in ("ntp-valid", "ntp-unmatched", "ntp-invalid", "ntp-timeout", "ntp-queued-ready"):
         gaps = [b - a for a, b in zip(times, times[1:])]
         assert all(gap >= 1.99 for gap in gaps), gaps  # 10ms scheduler/capture tolerance.
         assert len(set(sources)) == 1, "One socket should serve the four-sample burst"
@@ -168,6 +177,10 @@ if __name__ == "__main__":
         "udp-ui", "udp-invalid", "udp-gates", "udp-echo", "udp-clipboard", "udp-ascii", "udp-empty", "udp-max",
         "udp-over-limit", "udp-truncated", "udp-wrong-peer", "udp-wrong-only", "udp-timeout",
         "udp-stop", "udp-home", "udp-offline", "udp-bind", "udp-source", "udp-task-failure", "udp-repeated"]
+    if not args.modes:
+        modes += [f"{app}-queued-{action}" for app in ("ntp", "wol", "udp")
+                  for action in ("expired", "ready", "cancel", "home", "retry")]
+        modes += ["ntp-queued-remaining", "udp-queued-remaining"]
     log = "".join(run_case(args.executable, args.output, mode) for mode in modes)
     for path in args.output.glob("*.ppm"):
         png_from_ppm(path)

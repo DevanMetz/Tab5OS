@@ -39,6 +39,7 @@ typedef struct {
     bool truncated;
     size_t reply_length;
     uint8_t reply[UDP_REPLY_MAX];
+    int64_t accepted_us;
     uint32_t duration_ms;
     uint32_t reply_ms;
     char status[192];
@@ -154,7 +155,7 @@ static void udp_worker(void *argument)
     portENTER_CRITICAL(&job_lock);
     job = published;
     portEXIT_CRITICAL(&job_lock);
-    int64_t started = esp_timer_get_time();
+    int64_t started = job.accepted_us;
     int64_t deadline = started + UDP_DEADLINE_US;
     int64_t sent_at = 0;
     int error = operation_error(deadline);
@@ -407,6 +408,7 @@ static void send_clicked(lv_event_t *event)
     lv_keyboard_set_textarea(keyboard, NULL);
     portENTER_CRITICAL(&job_lock);
     memset(&published, 0, sizeof(published));
+    published.accepted_us = esp_timer_get_time();
     published.request = request;
     published.present = true;
     strcpy(published.status, "Starting one UDP exchange...");
