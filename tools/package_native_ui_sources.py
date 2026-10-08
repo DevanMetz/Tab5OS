@@ -39,6 +39,9 @@ SDK_FILES = (
     "components/esp_http_client/lib/include/http_header.h",
     "components/esp_http_client/lib/include/http_utils.h",
     "components/esp_http_client/lib/include/http_auth.h",
+    "components/json/cJSON/cJSON.c",
+    "components/json/cJSON/cJSON.h",
+    "components/json/cJSON/LICENSE",
 )
 LVGL_INPUTS = (
     "src", "lvgl.h", "lvgl_private.h", "lv_version.h", ".component_hash",

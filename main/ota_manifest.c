@@ -72,22 +72,59 @@ static bool decode_sha256(const char *text, uint8_t output[32])
     return true;
 }
 
-static bool parse_manifest(const char *json, ota_manifest_t *manifest)
+static bool manifest_json_bounded(const char *json, size_t length)
+{
+    if (!length || length > OTA_MANIFEST_JSON_MAX) return false;
+    bool string = false, escaped = false;
+    unsigned depth = 0;
+    for (size_t i = 0; i < length; i++) {
+        unsigned char byte = (unsigned char)json[i];
+        if (byte < 0x20 && (string || (byte != '\t' && byte != '\r' && byte != '\n')))
+            return false;
+        if (string) {
+            if (escaped) {
+                /* cJSON decodes U+0000 into a C-string terminator. */
+                if (byte == 'u' && length - i > 4 && !memcmp(json + i + 1, "0000", 4))
+                    return false;
+                escaped = false;
+            } else if (byte == '\\') {
+                escaped = true;
+            } else if (byte == '"') {
+                string = false;
+            }
+        } else if (byte == '"') {
+            string = true;
+        } else if (byte == '[' || byte == ']') {
+            return false;
+        } else if (byte == '{') {
+            /* Schema 1 is flat; reject nesting before the recursive parser. */
+            if (depth++) return false;
+        } else if (byte == '}') {
+            if (!depth) return false;
+            depth--;
+        }
+    }
+    return !string && !depth;
+}
+
+static bool parse_manifest(const char *json, size_t length, ota_manifest_t *manifest)
 {
     memset(manifest, 0, sizeof(*manifest));
+    if (!manifest_json_bounded(json, length)) return false;
     const char *end = NULL;
-    cJSON *root = cJSON_ParseWithOpts(json, &end, true);
+    cJSON *root = cJSON_ParseWithLengthOpts(json, length + 1, &end, true);
     cJSON *schema = root ? cJSON_GetObjectItemCaseSensitive(root, "schema") : NULL;
     cJSON *hardware = root ? cJSON_GetObjectItemCaseSensitive(root, "hardware") : NULL;
     cJSON *channel = root ? cJSON_GetObjectItemCaseSensitive(root, "channel") : NULL;
     cJSON *size = root ? cJSON_GetObjectItemCaseSensitive(root, "size") : NULL;
     cJSON *sha256 = root ? cJSON_GetObjectItemCaseSensitive(root, "sha256") : NULL;
-    bool valid = cJSON_IsObject(root) && end && *end == '\0' &&
+    /* All eight required fields plus this count exclude duplicates/extra keys. */
+    bool valid = cJSON_IsObject(root) && cJSON_GetArraySize(root) == 8 && end == json + length &&
                  cJSON_IsNumber(schema) && schema->valuedouble == OTA_MANIFEST_SCHEMA &&
                  cJSON_IsString(hardware) && !strcmp(hardware->valuestring, OTA_HARDWARE) &&
                  cJSON_IsString(channel) && !strcmp(channel->valuestring, OTA_CHANNEL) &&
                  cJSON_IsNumber(size) && isfinite(size->valuedouble) && size->valuedouble > 0 &&
-                 size->valuedouble <= SIZE_MAX &&
+                 size->valuedouble <= UINT32_MAX &&
                  (double)(size_t)size->valuedouble == size->valuedouble &&
                  copy_ascii(root, "version", manifest->version, sizeof(manifest->version)) &&
                  copy_ascii(root, "url", manifest->url, sizeof(manifest->url)) &&
@@ -95,6 +132,7 @@ static bool parse_manifest(const char *json, ota_manifest_t *manifest)
                             sizeof(manifest->minimum_predecessor)) &&
                  cJSON_IsString(sha256) && decode_sha256(sha256->valuestring, manifest->sha256);
     if (valid) manifest->size = (size_t)size->valuedouble;
+    else memset(manifest, 0, sizeof(*manifest));
     cJSON_Delete(root);
     return valid;
 }
@@ -192,7 +230,7 @@ esp_err_t ota_manifest_fetch(const char *manifest_url, ota_manifest_t *manifest,
         set_message(message, message_size, response->overflow ? "Manifest exceeds 1536 bytes" :
                                                                "Manifest response was empty");
         error = ESP_ERR_INVALID_SIZE;
-    } else if (error == ESP_OK && !parse_manifest(response->body, manifest)) {
+    } else if (error == ESP_OK && !parse_manifest(response->body, response->length, manifest)) {
         set_message(message, message_size, "Manifest is malformed or incompatible");
         error = ESP_ERR_INVALID_RESPONSE;
     } else if (error != ESP_OK) {
@@ -328,7 +366,7 @@ void ota_manifest_self_test(void)
         "\"url\":\"https://github.com/DevanMetz/Tab5OS/releases/download/v0.6.0/tab5_os.bin\","
         "\"channel\":\"stable\",\"minimum_predecessor\":\"v0.5.1\"}";
     ota_manifest_t manifest;
-    assert(parse_manifest(valid_json, &manifest));
+    assert(parse_manifest(valid_json, sizeof(valid_json) - 1, &manifest));
     assert(manifest.size == 2085280 && manifest.sha256[0] == 0x01 && manifest.sha256[31] == 0xef);
     char message[96];
     assert(ota_manifest_check(&manifest, "v0.5.1-dirty", message, sizeof(message)) == ESP_OK);
@@ -340,6 +378,6 @@ void ota_manifest_self_test(void)
              "https://github.com/DevanMetz/Tab5OS/releases/download/v0.6.0/tab5_os.bin");
     snprintf(manifest.version, sizeof(manifest.version), "v0.5.1");
     assert(ota_manifest_check(&manifest, "v0.5.1-dirty", message, sizeof(message)) == ESP_ERR_INVALID_VERSION);
-    assert(!parse_manifest("{\"schema\":1}", &manifest));
-    assert(!parse_manifest("{\"schema\":1} trailing", &manifest));
+    assert(!parse_manifest("{\"schema\":1}", sizeof("{\"schema\":1}") - 1, &manifest));
+    assert(!parse_manifest("{\"schema\":1} trailing", sizeof("{\"schema\":1} trailing") - 1, &manifest));
 }
