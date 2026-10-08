@@ -314,27 +314,43 @@ static esp_err_t http_event(esp_http_client_event_t *event)
 
 static int csv_field(FILE *file, const char *text)
 {
-    if (fputc('"', file) == EOF) return -1;
+    errno = 0;
+    if (fputc('"', file) == EOF || ferror(file)) return -1;
     while (*text) {
-        if (*text == '"' && fputc('"', file) == EOF) return -1;
-        if (fputc(*text++, file) == EOF) return -1;
+        if (*text == '"') {
+            errno = 0;
+            if (fputc('"', file) == EOF || ferror(file)) return -1;
+        }
+        errno = 0;
+        if (fputc(*text++, file) == EOF || ferror(file)) return -1;
     }
-    return fputc('"', file) == EOF ? -1 : 0;
+    errno = 0;
+    return fputc('"', file) == EOF || ferror(file) ? -1 : 0;
 }
 
 static int append_log(const http_job_t *job)
 {
+    errno = 0;
     if (mkdir("/sdcard/HTTP", 0775) != 0 && errno != EEXIST) return errno ? errno : EIO;
+    errno = 0;
     if (storage_repair_csv_tail(HTTP_LOG_PATH) != 0) return errno ? errno : EIO;
+    errno = 0;
     FILE *file = fopen(HTTP_LOG_PATH, "a+");
     if (!file) return errno ? errno : EIO;
     int first_error = 0;
+    errno = 0;
     if (fseek(file, 0, SEEK_END) != 0) first_error = errno ? errno : EIO;
-    long length = first_error ? -1 : ftell(file);
-    if (length < 0 && !first_error) first_error = errno ? errno : EIO;
-    if (!first_error && length == 0 &&
-        fputs("unix_time,method,url,status,response_bytes,duration_ms,outcome\n", file) < 0)
-        first_error = errno ? errno : EIO;
+    long length = -1;
+    if (!first_error) {
+        errno = 0;
+        length = ftell(file);
+        if (length < 0) first_error = errno ? errno : EIO;
+    }
+    if (!first_error && length == 0) {
+        errno = 0;
+        if (fputs("unix_time,method,url,status,response_bytes,duration_ms,outcome\n", file) < 0 || ferror(file))
+            first_error = errno ? errno : EIO;
+    }
 
     char safe_url[HTTP_URL_MAX + 1];
     safe_log_url(job->url, safe_url);
@@ -344,14 +360,22 @@ static int append_log(const http_job_t *job)
                           job->incomplete ? "incomplete_response" :
                           job->error != ESP_OK ? esp_err_to_name(job->error) :
                           job->truncated ? "preview_truncated" : "complete";
-    if (!first_error && (fprintf(file, "%lld,%s,", (long long)time(NULL),
-                                 method_name(job->method)) < 0 ||
-                         csv_field(file, safe_url) != 0 ||
-                         fprintf(file, ",%d,%u,%lu,%s\n", job->status,
-                                 (unsigned)job->response_bytes,
-                                 (unsigned long)job->duration_ms, outcome) < 0))
+    if (!first_error) {
+        time_t timestamp = time(NULL);
+        errno = 0;
+        if (fprintf(file, "%lld,%s,", (long long)timestamp, method_name(job->method)) < 0 || ferror(file))
+            first_error = errno ? errno : EIO;
+    }
+    if (!first_error && csv_field(file, safe_url) != 0)
         first_error = errno ? errno : EIO;
+    if (!first_error) {
+        errno = 0;
+        if (fprintf(file, ",%d,%u,%lu,%s\n", job->status, (unsigned)job->response_bytes,
+                    (unsigned long)job->duration_ms, outcome) < 0 || ferror(file))
+            first_error = errno ? errno : EIO;
+    }
     if (!first_error && storage_sync_file(file) != 0) first_error = errno ? errno : EIO;
+    errno = 0;
     if (fclose(file) != 0 && !first_error) first_error = errno ? errno : EIO;
     return first_error;
 }

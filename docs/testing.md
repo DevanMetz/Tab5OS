@@ -27,6 +27,7 @@ Python 3 and Node.js are needed for the quick checks. The configuration checks a
 | BLE evidence export | [BLE evidence storage](#ble-evidence-storage) and a firmware build. |
 | Modbus TCP, NTP, Wake-on-LAN, UDP or HTTP fixtures | [Network fixtures and UI](#network-fixtures-and-ui). |
 | MQTT app, packet codec or client protocol | [Lifecycle/storage](#mqtt-lifecycle-and-storage) and [client/broker fixture](#mqtt-client-and-broker-fixture). |
+| HTTP/MQTT metadata appends or CSV quoting | [Metadata writes](#httpmqtt-metadata-writes), existing console storage/UI scenarios and a firmware build. |
 | OTA manifest parsing and update eligibility | [OTA manifests](#ota-manifests) plus a firmware build. |
 | OTA downloads, redirects or image verification | [OTA images](#ota-images) plus a firmware build. |
 | OTA results, pending metadata, worker handoff or health callbacks | [OTA results](#ota-results) plus a firmware build. |
@@ -95,6 +96,18 @@ python tests\http_fixture_test.py
 git diff --check
 .\tools\build_idf.ps1
 ```
+
+## HTTP/MQTT metadata writes
+
+```powershell
+python tools/test_metadata_log.py --compiler 'C:/path/to/clang.exe'
+```
+
+This portable fixture compiles the actual HTTP/MQTT appenders and formatting helpers, both metadata typedefs and the complete shared storage helper. Its 116 HTTP and 76 MQTT cases use native files/directories and controlled clock, SDK type/error naming and I/O boundaries. Host append streams use binary mode to preserve ESP/POSIX LF bytes on Windows. Independent literal byte checks cover all HTTP methods/outcomes, URL query/fragment redaction, CSV quotes/commas, MQTT direction/QoS/retain/preview fields, empty/maximum formatting fields, existing complete rows, partial-header/row repair and 25 failure/repair/retry pairs per app.
+
+Each directory/repair/open/seek/size/header/prefix/quoted-byte/suffix/flush/sync/close boundary can fail with or without errno while successful calls leave stale errno. Positive-count writes can carry a stream error; writes must stop immediately, skip explicit sync and preserve the first cause through a failing close. Directory failures must stop before repair/open. The preceding appenders fail 49 HTTP and 31 MQTT controls; all 192 cases now pass with closed handles. This fixture calls the synchronous appenders directly; the existing real LVGL, SDK client and loopback suites verify worker/UI behavior separately. Physical SD, TLS and device scheduling remain hardware checks.
+
+Generated function/type/config/storage sources, full input and executable hashes, and both compile/result logs stay under `build/metadata-log/`. Linux CI retains them as `metadata-log-logs`. Input acceptance is covered by the console suites; empty or maximum formatting fields here do not establish which requests the UI accepts.
 
 ## Storage failure boundaries
 

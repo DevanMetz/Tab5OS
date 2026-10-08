@@ -115,6 +115,8 @@ unix_time,method,url,status,response_bytes,duration_ms,outcome
 
 `duration_ms` ends after network/connection cleanup, before writing metadata. The app repairs an incomplete final row before appending and reports success only after flush, durable sync and close succeed. A storage failure does not alter the exchange's `outcome`; it appears alongside the network result and disables logging until the next explicit opt-in on an available card. Bytes can remain after a failed sync or close, so failure means persistence was not confirmed. Previous complete rows survive partial-row repair.
 
+Both HTTP and MQTT stop metadata writes at the first preparation, positioning, header, field or close failure. Each boundary captures a fresh cause, uses `EIO` when errno is absent and rejects a positive-count write with a stream error. Failed writes skip remaining fields and explicit sync; close cannot replace the first error. The next append repairs an unfinished suffix while retaining preceding complete rows. These checks preserve the existing schemas and redaction rules; native bytes do not establish physical SD durability.
+
 MQTT metadata header:
 
 ```text

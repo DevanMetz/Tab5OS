@@ -605,37 +605,61 @@ static void mqtt_event(void *argument, esp_event_base_t base, int32_t event_id, 
 
 static int csv_field(FILE *file, const char *text)
 {
-    if (fputc('"', file) == EOF) return -1;
+    errno = 0;
+    if (fputc('"', file) == EOF || ferror(file)) return -1;
     while (*text) {
-        if (*text == '"' && fputc('"', file) == EOF) return -1;
-        if (fputc(*text++, file) == EOF) return -1;
+        if (*text == '"') {
+            errno = 0;
+            if (fputc('"', file) == EOF || ferror(file)) return -1;
+        }
+        errno = 0;
+        if (fputc(*text++, file) == EOF || ferror(file)) return -1;
     }
-    return fputc('"', file) == EOF ? -1 : 0;
+    errno = 0;
+    return fputc('"', file) == EOF || ferror(file) ? -1 : 0;
 }
 
 static int append_log(const mqtt_log_entry_t *message)
 {
+    errno = 0;
     if (mkdir("/sdcard/MQTT", 0775) != 0 && errno != EEXIST) return errno ? errno : EIO;
+    errno = 0;
     if (storage_repair_csv_tail(MQTT_LOG_PATH) != 0) return errno ? errno : EIO;
+    errno = 0;
     FILE *file = fopen(MQTT_LOG_PATH, "a+");
     if (!file) return errno ? errno : EIO;
     int first_error = 0;
+    errno = 0;
     if (fseek(file, 0, SEEK_END) != 0) first_error = errno ? errno : EIO;
-    long length = first_error ? -1 : ftell(file);
-    if (length < 0 && !first_error) first_error = errno ? errno : EIO;
-    if (!first_error && length == 0 &&
-        fputs("unix_time,direction,topic,qos,retained,payload_bytes,outcome\n", file) < 0)
+    long length = -1;
+    if (!first_error) {
+        errno = 0;
+        length = ftell(file);
+        if (length < 0) first_error = errno ? errno : EIO;
+    }
+    if (!first_error && length == 0) {
+        errno = 0;
+        if (fputs("unix_time,direction,topic,qos,retained,payload_bytes,outcome\n", file) < 0 || ferror(file))
+            first_error = errno ? errno : EIO;
+    }
+    if (!first_error) {
+        errno = 0;
+        if (fprintf(file, "%lld,%s,", (long long)message->timestamp,
+                    message->received ? "RX" : "TX") < 0 || ferror(file))
+            first_error = errno ? errno : EIO;
+    }
+    if (!first_error && csv_field(file, message->topic) != 0)
         first_error = errno ? errno : EIO;
-    if (!first_error && (fprintf(file, "%lld,%s,", (long long)message->timestamp,
-                                 message->received ? "RX" : "TX") < 0 ||
-                         csv_field(file, message->topic) != 0 ||
-                         fprintf(file, ",%u,%u,%u,%s\n", message->qos,
-                                 message->retained ? 1U : 0U,
-                                 (unsigned)message->payload_bytes,
-                                 message->truncated || message->topic_preview ? "preview_truncated" :
-                                 message->received ? "received" : "queued") < 0))
-        first_error = errno ? errno : EIO;
+    if (!first_error) {
+        errno = 0;
+        if (fprintf(file, ",%u,%u,%u,%s\n", message->qos, message->retained ? 1U : 0U,
+                    (unsigned)message->payload_bytes,
+                    message->truncated || message->topic_preview ? "preview_truncated" :
+                    message->received ? "received" : "queued") < 0 || ferror(file))
+            first_error = errno ? errno : EIO;
+    }
     if (!first_error && storage_sync_file(file) != 0) first_error = errno ? errno : EIO;
+    errno = 0;
     if (fclose(file) != 0 && !first_error) first_error = errno ? errno : EIO;
     return first_error;
 }
