@@ -5208,10 +5208,7 @@ static void ota_update_task(void *argument)
         ota_done = true;
         if (!success) ota_busy = false;
         if (success) {
-            const esp_partition_t *installed = esp_ota_get_boot_partition();
-            esp_app_desc_t installed_description;
-            if (installed && esp_ota_get_partition_description(installed, &installed_description) == ESP_OK)
-                ota_record_pending(installed_description.version);
+            ota_record_pending(manifest.version);
             ESP_LOGI("tab5-os", "OTA update installed; restarting");
             vTaskDelay(pdMS_TO_TICKS(2000));
             esp_restart();

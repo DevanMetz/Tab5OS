@@ -59,6 +59,10 @@ static unsigned health_timer_period, timer_period_changes;
 static jmp_buf worker_exit;
 static const esp_partition_t installed_partition = {3};
 static esp_app_desc_t installed_description;
+static bool boot_partition_missing;
+static esp_err_t boot_description_error;
+static const char *boot_version_override;
+static unsigned boot_partition_reads, boot_description_reads;
 static void ota_update_task(void *argument);
 static void ota_clicked(lv_event_t *event);
 static void confirm_running_ota(lv_timer_t *timer);
@@ -152,8 +156,15 @@ static const esp_partition_t *esp_ota_get_last_invalid_partition(void)
 static esp_err_t esp_ota_get_partition_description(const esp_partition_t *partition, esp_app_desc_t *description)
 {
     assert(partition == &invalid_partition || partition == &installed_partition);
+    if (partition == &installed_partition) {
+        boot_description_reads++;
+        if (boot_description_error) return boot_description_error;
+        *description = installed_description;
+        if (boot_version_override) strcpy(description->version, boot_version_override);
+        return ESP_OK;
+    }
     if (description_error) return description_error;
-    *description = partition == &installed_partition ? installed_description : invalid_description;
+    *description = invalid_description;
     return ESP_OK;
 }
 static esp_err_t esp_ota_mark_app_valid_cancel_rollback(void)
@@ -174,7 +185,11 @@ static void lv_timer_set_period(lv_timer_t *timer, uint32_t period)
     health_timer_period = period;
     timer_period_changes++;
 }
-static const esp_partition_t *esp_ota_get_boot_partition(void) { return &installed_partition; }
+const esp_partition_t *esp_ota_get_boot_partition(void)
+{
+    boot_partition_reads++;
+    return boot_partition_missing ? NULL : &installed_partition;
+}
 static esp_err_t ota_manifest_fetch(const char *url, ota_manifest_t *manifest, char *error, size_t size)
 {
     assert(!strcmp(url, OTA_MANIFEST_URL) && ota_busy && !done_storage);
@@ -251,6 +266,8 @@ static void reset(void)
     click_at_publication = health_during_fetch = health_during_delay = false;
     health_writes_during_worker = 0;
     health_timer_period = 30000; timer_period_changes = 0;
+    boot_partition_missing = false; boot_description_error = ESP_OK; boot_version_override = NULL;
+    boot_partition_reads = boot_description_reads = 0;
     ota_task_handle = NULL; ota_error[0] = '\0'; blocker_text = NULL;
     wifi_connected = true; create_result = pdPASS; fetch_error = check_error = install_error = ESP_OK;
     fetch_error_text = true;
@@ -303,12 +320,13 @@ static void worker_case(const char *name, bool pass)
 {
     assert(!handles);
     cases++; failures += !pass;
-    printf("%s %s busy=%u done=%u ok=%u publish_busy=%u notifications=%u fetch=%u check=%u install=%u delay=%u restart=%u wait=%u health_writes=%u pending=%u writes=%u handles=%u state_reads=%u validations=%u timer_deletes=%u timer_period=%u period_changes=%u button_disabled=%u pending_version=\"%s\" result=\"%s\" status=\"%s\"\n",
+    printf("%s %s busy=%u done=%u ok=%u publish_busy=%u notifications=%u fetch=%u check=%u install=%u delay=%u restart=%u wait=%u health_writes=%u pending=%u writes=%u handles=%u state_reads=%u validations=%u timer_deletes=%u timer_period=%u period_changes=%u button_disabled=%u boot_reads=%u boot_desc_reads=%u pending_version=\"%s\" result=\"%s\" status=\"%s\"\n",
            pass ? "PASS" : "FAIL", name, (unsigned)ota_busy, (unsigned)done_storage, (unsigned)ota_ok,
            (unsigned)publication_busy, notify_calls, fetch_calls, check_calls, install_calls, delay_calls,
            restart_calls, wait_calls, health_writes_during_worker, (unsigned)has_pending, write_opens, handles,
            state_reads, validation_calls, timer_deletes, health_timer_period, timer_period_changes,
            (unsigned)(ota_button && (ota_button->states & LV_STATE_DISABLED)),
+           boot_partition_reads, boot_description_reads,
            saved_pending, ota_last_result, status_object.text);
 }
 
@@ -528,6 +546,45 @@ int main(void)
     reset(); blocker_text = "Controlled active session"; ota_clicked(NULL);
     worker_case("worker-restart-blocker", !ota_busy && !done_storage && !create_calls && !notify_calls && !activity_calls &&
         !strcmp(status_object.text, blocker_text));
+    const char *metadata_names[] = {"worker-missing-boot-metadata", "worker-description-read-error",
+        "worker-description-drift", "worker-missing-boot-empty-store"};
+    for (unsigned i = 0; i < 4; i++) {
+        reset();
+        if (i == 1) boot_description_error = ESP_FAIL;
+        else if (i == 2) boot_version_override = "v0.8.0-stale";
+        else boot_partition_missing = true;
+        if (i == 3) { has_pending = false; saved_pending[0] = '\0'; }
+        ota_clicked(NULL); run_worker();
+        worker_case(metadata_names[i], ota_busy && done_storage && ota_ok && publication_busy &&
+            has_pending && !strcmp(saved_pending, installed_description.version) && write_opens == 1 && sets == 1 && commits == 1 &&
+            !erases && !warnings && delay_calls == 1 && restart_calls == 1 && !wait_calls);
+    }
+    reset(); strcpy(installed_description.version, "v0.8.0-123456789012345678901234");
+    ota_clicked(NULL); run_worker();
+    worker_case("worker-maximum-manifest-version", ota_busy && done_storage && ota_ok && strlen(saved_pending) == 31 &&
+        !strcmp(saved_pending, installed_description.version) && write_opens == 1 && sets == 1 && commits == 1 && !erases &&
+        delay_calls == 1 && restart_calls == 1);
+    const char *pending_error_names[] = {"worker-pending-nvs-unavailable", "worker-pending-open-error",
+        "worker-pending-set-error", "worker-pending-commit-error"};
+    for (unsigned i = 0; i < 4; i++) {
+        reset();
+        if (i == 0) nvs_init_error = ESP_FAIL;
+        else if (i == 1) open_error = ESP_FAIL;
+        else if (i == 2) set_error = ESP_FAIL;
+        else commit_error = ESP_FAIL;
+        ota_clicked(NULL); run_worker();
+        worker_case(pending_error_names[i], ota_busy && done_storage && ota_ok && publication_busy &&
+            has_pending && !strcmp(saved_pending, i == 3 ? installed_description.version : "v0.7.0-12345678") &&
+            write_opens == (unsigned)(i != 0) && sets == (unsigned)(i >= 2) && commits == (unsigned)(i == 3) &&
+            !erases && warnings == (unsigned)(i != 0) && delay_calls == 1 && restart_calls == 1 && !wait_calls);
+    }
+    reset(); ota_clicked(NULL); run_worker();
+    ota_busy = done_storage = false;
+    strcpy(running_description.version, installed_description.version); running_state = ESP_OTA_IMG_PENDING_VERIFY;
+    ota_load_result(); confirm_running_ota(&health_timer);
+    worker_case("worker-pending-reboot-reconciliation", !ota_busy && !done_storage && !has_pending &&
+        !strcmp(ota_last_result, "Installed v0.8.0-87654321") && !strcmp(saved_result, ota_last_result) &&
+        write_opens == 2 && sets == 2 && erases == 1 && commits == 2 && state_reads == 2 && validation_calls == 1 && timer_deletes == 1);
     printf("%s %u OTA result cases failures=%u handles=%u (controlled NVS/state APIs)\n",
            failures ? "FAIL" : "PASS", cases, failures, handles);
     return failures ? 1 : 0;
