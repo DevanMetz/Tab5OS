@@ -1,4 +1,4 @@
-"""Compile the actual OTA result functions with controlled NVS/state APIs."""
+"""Compile the actual OTA result/health functions with controlled native APIs."""
 import argparse
 import hashlib
 import json
@@ -22,6 +22,11 @@ def main():
     assert code.count("static void ota_") == 3
     assert "static void ota_record_result(const char *result)" in code
     assert "static void ota_load_result(void)" in code
+    health_start = source.index("static void validate_running_ota(void)\n{")
+    health = source[health_start:source.index("void app_main(void)", health_start)]
+    assert health.count("static void ") == 2
+    assert "static void confirm_running_ota(lv_timer_t *timer)" in health
+    code += health
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "ota_result.inc").write_text(code, encoding="utf-8")
     executable = args.output.resolve() / ("ota_result_test.exe" if os.name == "nt" else "ota_result_test")
@@ -45,6 +50,7 @@ def main():
         "functionSourceSha256": hashlib.sha256(code.encode()).hexdigest(),
         "executableSha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
         "exitCode": result.returncode, "nvsAndOtaStateApisControlled": True,
+        "validationAndTimerApisControlled": True, "actualFunctionsCompiled": 5,
         "physicalFlashVerified": False,
     }, indent=2) + "\n")
     print(log, end="", flush=True)

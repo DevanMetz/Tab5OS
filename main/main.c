@@ -7644,7 +7644,12 @@ static void validate_running_ota(void)
 {
     const esp_partition_t *running = esp_ota_get_running_partition();
     esp_ota_img_states_t state;
-    if (esp_ota_get_state_partition(running, &state) != ESP_OK || state != ESP_OTA_IMG_PENDING_VERIFY) return;
+    if (esp_ota_get_state_partition(running, &state) != ESP_OK) return;
+    if (state == ESP_OTA_IMG_VALID) {
+        ota_load_result();
+        return;
+    }
+    if (state != ESP_OTA_IMG_PENDING_VERIFY) return;
     if (nvs_init_error != ESP_OK) {
         ESP_LOGE("tab5-os", "OTA image not validated because NVS failed: %s", esp_err_to_name(nvs_init_error));
         return;
