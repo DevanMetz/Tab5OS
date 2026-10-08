@@ -9,6 +9,7 @@
 static uint16_t framebuffer[720 * 1280];
 static lv_obj_t *content;
 static const char *output_directory;
+static unsigned queued_failures;
 static uint32_t ticks(void) { return (uint32_t)GetTickCount64(); }
 static void flush(lv_display_t *display, const lv_area_t *area, uint8_t *pixels)
 {
@@ -60,6 +61,8 @@ static void expect(const char *text)
 {
     if (!find_text(content, text, false)) {
         fprintf(stderr, "Missing UI text: %s\n", text);
+        lv_obj_t *failure = find_text(content, "failed", false);
+        if (failure) fprintf(stderr, "UI failure: %s\n", lv_label_get_text(failure));
         assert(0);
     }
 }
@@ -110,6 +113,119 @@ static void clean_app(void)
     modbus_tool_stop();
     lv_obj_clean(content);
     lv_obj_scroll_to_y(content, 0, LV_ANIM_OFF);
+}
+static void queued_check(bool condition, const char *message)
+{
+    if (!condition) {
+        fprintf(stderr, "FAIL queued worker: %s\n", message);
+        queued_failures++;
+    }
+}
+static unsigned displayed_duration(void)
+{
+    lv_obj_t *label = find_text(content, "Connection closed", false);
+    assert(label);
+    const char *text = lv_label_get_text(label);
+    const char *value = strrchr(text, '|');
+    if (!value) value = strrchr(text, ',');
+    unsigned duration = 0;
+    assert(value && sscanf(value + 1, " %u ms", &duration) == 1);
+    return duration;
+}
+static void hold_read(bool probe)
+{
+    InterlockedExchange(&host_hold_task_start, 1);
+    LONG sockets = host_sockets_opened;
+    if (probe) click("TEST TCP");
+    else start_read();
+    DWORD until = GetTickCount() + 2000;
+    while (!InterlockedCompareExchange(&host_task_start_waiters, 0, 0)) {
+        assert((LONG)(until - GetTickCount()) > 0);
+        pump();
+    }
+    assert(modbus_tool_busy() && host_active_tasks == 1 && host_sockets_opened == sockets);
+    /* A stale event cannot admit a second owner while the worker is held. */
+    LONG tasks = host_tasks_started;
+    click("TEST TCP");
+    assert(modbus_tool_busy() && host_tasks_started == tasks);
+}
+static void release_read(int64_t elapsed_us)
+{
+    InterlockedExchangeAdd64(&host_monotonic_offset_us, elapsed_us);
+    InterlockedExchange(&host_hold_task_start, 0);
+    finish();
+    assert(host_task_start_waiters == 0 && host_active_tasks == 0 && !modbus_tool_busy());
+}
+static void queued_case(const char *scenario)
+{
+    if (!strcmp(scenario, "queued-retry")) {
+        /* Warm the socket provider and compare identical, closed UI states. */
+        start_read(); finish(); expect("Read completed: 16 values.");
+        clean_app(); pump_for(25);
+        DWORD before, after;
+        GetProcessHandleCount(GetCurrentProcess(), &before);
+        lv_mem_monitor_t heap_before, heap_after;
+        lv_mem_monitor(&heap_before);
+        for (unsigned i = 0; i < 25; i++) {
+            open_app();
+            LONG sockets = host_sockets_opened;
+            hold_read(false);
+            release_read(6000000);
+            queued_check(host_sockets_opened == sockets, "expired retry opened a socket");
+            queued_check(find_text(content, "5-second exchange timed out", false) != NULL,
+                         "expired retry was not reported as timed out");
+            queued_check(displayed_duration() >= 6000, "retry omitted scheduling time");
+            start_read(); finish(); expect("Read completed: 16 values.");
+            queued_check(displayed_duration() < 1500, "fresh retry inherited the previous deadline");
+            clean_app(); pump_for(25);
+        }
+        GetProcessHandleCount(GetCurrentProcess(), &after);
+        lv_mem_monitor(&heap_after);
+        assert(before == after && heap_before.free_size == heap_after.free_size &&
+               heap_before.used_cnt == heap_after.used_cnt);
+        printf("queued_pairs=25 heap_free=%u->%u heap_used=%u->%u handles=%lu->%lu ",
+               (unsigned)heap_before.free_size, (unsigned)heap_after.free_size,
+               (unsigned)heap_before.used_cnt, (unsigned)heap_after.used_cnt,
+               (unsigned long)before, (unsigned long)after);
+        return;
+    }
+    bool probe = !strcmp(scenario, "queued-probe-expired");
+    bool ready = !strcmp(scenario, "queued-read-ready");
+    bool remaining = !strcmp(scenario, "queued-read-remaining");
+    bool stop = !strcmp(scenario, "queued-read-stop");
+    bool home = !strcmp(scenario, "queued-read-home");
+    LONG sockets = host_sockets_opened;
+    hold_read(probe);
+    if (stop) click("STOP");
+    if (home) {
+        clean_app(); open_app();
+        assert(modbus_tool_busy());
+        LONG tasks = host_tasks_started;
+        click("TEST TCP");
+        assert(host_tasks_started == tasks && host_sockets_opened == sockets);
+    }
+    ULONGLONG released_at = GetTickCount64();
+    release_read(ready || remaining ? 4000000 : 6000000);
+    ULONGLONG real_wait_ms = GetTickCount64() - released_at;
+    unsigned duration = displayed_duration();
+    queued_check(duration >= (ready || remaining ? 4000U : 6000U), "duration omitted scheduling time");
+    if (ready) {
+        expect("Read completed: 16 values.");
+        queued_check(duration < 5000 && host_sockets_opened == sockets + 1,
+                     "request with remaining time did not complete once");
+    } else {
+        queued_check(find_text(content, stop || home ? "Cancelled; connection closed." :
+                               "5-second exchange timed out", false) != NULL,
+                     "queued request did not retain its cancellation/deadline result");
+        queued_check(find_text(content, "No values returned.", false) != NULL,
+                     "queued failure exposed response values");
+        queued_check(host_sockets_opened == sockets + (remaining ? 1 : 0),
+                     "cancelled or expired request opened a socket");
+        if (remaining) queued_check(real_wait_ms >= 600 && real_wait_ms < 2200 && duration < 6200,
+                                    "worker received a new five-second budget");
+        else queued_check(real_wait_ms < 1500, "cancelled or expired worker did not promptly finish");
+    }
+    printf("queued_duration_ms=%u remaining_wait_ms=%llu ", duration, (unsigned long long)real_wait_ms);
 }
 static void check_bounds(lv_obj_t *o)
 {
@@ -190,7 +306,9 @@ int main(int argc, char **argv)
     DWORD handles_before = 0, handles_after = 0;
     GetProcessHandleCount(GetCurrentProcess(), &handles_before);
     int64_t began = esp_timer_get_time();
-    if (!strcmp(scenario, "ui")) {
+    if (!strncmp(scenario, "queued-", 7)) {
+        queued_case(scenario);
+    } else if (!strcmp(scenario, "ui")) {
         assert(lv_obj_has_state(nth(&lv_dropdown_class, 1), LV_STATE_DISABLED));
         assert(lv_obj_has_state(nth(&lv_dropdown_class, 2), LV_STATE_DISABLED));
         shot("modbus-default");
@@ -391,11 +509,12 @@ int main(int argc, char **argv)
     if (warmed_handles)
         assert(handles_after == handles_before);
     assert(host_open_sockets == 0 && host_active_tasks == 0);
-    printf("%s PASS elapsed_ms=%lld tasks=%ld sockets=%ld handles=%lu->%lu\n", scenario,
+    printf("%s %s elapsed_ms=%lld tasks=%ld sockets=%ld handles=%lu->%lu failures=%u\n", scenario,
+           queued_failures ? "FAIL" : "PASS",
            (long long)((esp_timer_get_time() - began) / 1000), host_tasks_started,
-           host_sockets_opened, (unsigned long)handles_before, (unsigned long)handles_after);
+           host_sockets_opened, (unsigned long)handles_before, (unsigned long)handles_after, queued_failures);
     clean_app();
     lv_deinit();
     WSACleanup();
-    return 0;
+    return queued_failures ? 1 : 0;
 }

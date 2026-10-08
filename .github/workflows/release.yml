@@ -484,6 +484,22 @@ jobs:
       - name: Test CSV viewers with real LVGL
         shell: pwsh
         run: python tools/test_csv_viewer.py --compiler clang --lvgl-library build/offline-ui/out/lvgl_host.lib --output build/csv-viewer-ci
+      - name: Test Modbus TCP with loopback peers
+        shell: pwsh
+        run: ./tools/test_modbus_network.ps1
+      - name: Retain Modbus TCP evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: modbus-network-logs
+          path: |
+            build/modbus-network/compile.log
+            build/modbus-network/result.log
+            build/modbus-network/source.json
+            build/modbus-network/*-wire.json
+            build/modbus-network/sources/
+          if-no-files-found: warn
+          retention-days: 14
       - name: Retain CSV viewer UI evidence
         uses: actions/upload-artifact@v4
         if: always()

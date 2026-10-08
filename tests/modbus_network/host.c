@@ -10,6 +10,8 @@ volatile LONG host_open_sockets, host_active_tasks, host_tasks_started, host_soc
 volatile LONG host_online = 1;
 volatile LONG host_fail_next_task;
 volatile LONG64 host_wall_offset_us;
+volatile LONG host_hold_task_start, host_task_start_waiters;
+volatile LONG64 host_monotonic_offset_us;
 static int posix_error(int error)
 {
     switch (error) {
@@ -47,7 +49,8 @@ int64_t esp_timer_get_time(void)
     QueryPerformanceCounter(&value);
     QueryPerformanceFrequency(&frequency);
     return (value.QuadPart / frequency.QuadPart) * 1000000 +
-           (value.QuadPart % frequency.QuadPart) * 1000000 / frequency.QuadPart;
+           (value.QuadPart % frequency.QuadPart) * 1000000 / frequency.QuadPart +
+           InterlockedCompareExchange64(&host_monotonic_offset_us, 0, 0);
 }
 int host_gettimeofday(struct timeval *result, void *timezone)
 {
@@ -73,6 +76,11 @@ static unsigned __stdcall worker_entry(void *argument)
 {
     struct launch job = *(struct launch *)argument;
     free(argument);
+    if (InterlockedCompareExchange(&host_hold_task_start, 0, 0)) {
+        InterlockedIncrement(&host_task_start_waiters);
+        while (InterlockedCompareExchange(&host_hold_task_start, 0, 0)) Sleep(1);
+        InterlockedDecrement(&host_task_start_waiters);
+    }
     job.function(job.argument);
     InterlockedDecrement(&host_active_tasks);
     return 0;

@@ -1,5 +1,5 @@
 """Loopback fixture for the unchanged Modbus UI/worker; no LAN or tablet needed."""
-import argparse, importlib.util, pathlib, socket, struct, subprocess, threading
+import argparse, importlib.util, json, pathlib, socket, struct, subprocess, threading
 root = pathlib.Path(__file__).resolve().parents[2]
 spec = importlib.util.spec_from_file_location('fixture', root / 'tools/modbus_test_server.py')
 fixture = importlib.util.module_from_spec(spec)
@@ -15,6 +15,7 @@ def run_case(mode):
     requests = []
     errors = []
     disconnects = []
+    connections = []
     if mode == 'closed':
         server.close()
     else:
@@ -29,6 +30,7 @@ def run_case(mode):
                 continue
             except OSError:
                 break
+            connections.append(True)
             with connection:
                 connection.settimeout(2)
                 try:
@@ -53,7 +55,7 @@ def run_case(mode):
                         assert connection.recv(1) == b''
                         disconnects.append(True)
                         continue
-                    if mode == 'timeout':
+                    if mode in ('timeout', 'queued-read-remaining'):
                         stop.wait(6)
                         continue
                     if mode == 'mismatch':
@@ -70,7 +72,7 @@ def run_case(mode):
                         if mode in ('fragmented', 'slow') and stop.wait(0.015 if mode == 'fragmented' else 0.65):
                             break
                 except EOFError:
-                    if mode != 'probe':
+                    if mode not in ('probe', 'queued-probe-expired'):
                         errors.append('unexpected EOF')
                     else:
                         disconnects.append(True)
@@ -91,12 +93,22 @@ def run_case(mode):
             server.close()
             worker.join(3)
             assert not worker.is_alive()
+    evidence = {'scenario': mode, 'exitCode': result.returncode,
+                'requests': [request.hex() for request in requests], 'connections': len(connections),
+                'disconnects': len(disconnects),
+                'serverErrors': errors, 'stdout': result.stdout, 'stderr': result.stderr,
+                'loopbackOnly': True, 'workerStartAndMonotonicClockControlled': mode.startswith('queued-'),
+                'actualSdkSchedulerOrPhysicalWifiVerified': False}
+    (output / f'{mode}-wire.json').write_text(json.dumps(evidence, indent=2) + '\n', encoding='utf-8')
     print(result.stdout, end='', flush=True)
     if result.stderr:
         print(result.stderr, end='', flush=True)
     assert result.returncode == 0, (mode, result.returncode)
     assert not errors, (mode, errors)
-    expected = 4 if mode in ('views', 'functions', 'fragmented') else 100 if mode == 'repeated' else 2 if mode in ('stop', 'home') else 0 if mode in ('ui', 'inputs', 'probe', 'closed') else 1
+    expected = (26 if mode == 'queued-retry' else 1 if mode in ('queued-read-ready', 'queued-read-remaining')
+                else 0 if mode.startswith('queued-') else 4 if mode in ('views', 'functions', 'fragmented')
+                else 100 if mode == 'repeated' else 2 if mode in ('stop', 'home')
+                else 0 if mode in ('ui', 'inputs', 'probe', 'closed') else 1)
     assert len(requests) == expected, (mode, len(requests), expected)
     if mode in ('probe', 'stop', 'home'):
         assert disconnects
@@ -113,7 +125,8 @@ if __name__ == '__main__':
     exe = args.executable
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
-    modes = args.modes or ['ui', 'views', 'inputs', 'functions', 'fragmented', 'gates', 'probe', 'exception', 'mismatch', 'oversized', 'short', 'closed', 'slow', 'timeout', 'stop', 'home', 'repeated']
+    modes = args.modes or ['ui', 'views', 'inputs', 'functions', 'fragmented', 'gates', 'probe', 'exception', 'mismatch', 'oversized', 'short', 'closed', 'slow', 'timeout', 'stop', 'home', 'repeated',
+                          'queued-read-expired', 'queued-probe-expired', 'queued-read-ready', 'queued-read-remaining', 'queued-read-stop', 'queued-read-home', 'queued-retry']
     for mode in modes:
         run_case(mode)
     print(f'All {len(modes)} real loopback scenarios passed.', flush=True)

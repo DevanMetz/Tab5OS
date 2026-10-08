@@ -15,6 +15,8 @@ extern volatile LONG host_open_sockets, host_active_tasks, host_tasks_started, h
 extern volatile LONG host_online;
 extern volatile LONG host_fail_next_task;
 extern volatile LONG64 host_wall_offset_us;
+extern volatile LONG host_hold_task_start, host_task_start_waiters;
+extern volatile LONG64 host_monotonic_offset_us;
 int64_t esp_timer_get_time(void);
 int host_gettimeofday(struct timeval *, void *);
 struct tm *host_gmtime_r(const time_t *, struct tm *);

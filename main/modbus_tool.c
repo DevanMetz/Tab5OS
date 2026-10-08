@@ -26,6 +26,7 @@ typedef struct {
     modbus_request_t request;
     bool probe;
     bool present;
+    int64_t accepted_us;
     uint32_t duration_ms;
     char status[160];
     modbus_result_t result;
@@ -125,7 +126,7 @@ static void modbus_worker(void *argument)
     portENTER_CRITICAL(&job_lock);
     job = published;
     portEXIT_CRITICAL(&job_lock);
-    int64_t started = esp_timer_get_time();
+    int64_t started = job.accepted_us;
     int64_t deadline = started + MODBUS_DEADLINE_US;
     int fd = -1;
     int error = operation_error(deadline);
@@ -363,6 +364,7 @@ static void start_clicked(lv_event_t *event)
     snprintf(job.status, sizeof(job.status), "%s in progress; STOP or Home cancels. Exchange limit: 5 seconds.",
              probe ? "TCP test" : "Read");
     portENTER_CRITICAL(&job_lock);
+    job.accepted_us = esp_timer_get_time();
     published = job;
     job_cancelled = false;
     job_busy = true;
