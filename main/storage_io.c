@@ -25,11 +25,16 @@ static void remember_errno(int *first_error)
 
 static int sync_descriptor(FILE *file)
 {
+    errno = 0;
 #ifdef _WIN32
-    return _commit(_fileno(file));
+    int result = _commit(_fileno(file));
 #else
-    return fsync(fileno(file));
+    int result = fsync(fileno(file));
 #endif
+    if (result != 0 && errno == 0) {
+        errno = EIO;
+    }
+    return result;
 }
 
 int storage_sync_file(FILE *file)
@@ -44,7 +49,11 @@ int storage_sync_file(FILE *file)
         }
         return -1;
     }
-    if (fflush(file) != 0) {
+    errno = 0;
+    if (fflush(file) != 0 || ferror(file)) {
+        if (errno == 0) {
+            errno = EIO;
+        }
         return -1;
     }
     return sync_descriptor(file);
@@ -58,6 +67,7 @@ static int close_synced(FILE **file_pointer)
     if (storage_sync_file(file) != 0) {
         remember_errno(&first_error);
     }
+    errno = 0;
     if (fclose(file) != 0) {
         remember_errno(&first_error);
     }
@@ -68,8 +78,12 @@ static int close_synced(FILE **file_pointer)
 static int path_exists(const char *path)
 {
     struct stat info;
+    errno = 0;
     if (stat(path, &info) == 0) {
         return 1;
+    }
+    if (errno == 0) {
+        errno = EIO;
     }
     return errno == ENOENT ? 0 : -1;
 }
@@ -103,8 +117,11 @@ int storage_commit_new_file(FILE **temporary_file,
     } else if (final_exists < 0) {
         remember_errno(&first_error);
     }
-    if (first_error == 0 && rename(temporary_path, final_path) != 0) {
-        remember_errno(&first_error);
+    if (first_error == 0) {
+        errno = 0;
+        if (rename(temporary_path, final_path) != 0) {
+            remember_errno(&first_error);
+        }
     }
 
     if (first_error != 0) {
@@ -139,21 +156,28 @@ int storage_commit_replace_file(FILE **temporary_file,
             remember_errno(&first_error);
         }
     }
-    if (first_error == 0 && final_exists > 0 &&
-        remove(backup_path) != 0 && errno != ENOENT) {
-        remember_errno(&first_error);
+    if (first_error == 0 && final_exists > 0) {
+        errno = 0;
+        if (remove(backup_path) != 0 && errno != ENOENT) {
+            remember_errno(&first_error);
+        }
     }
     if (first_error == 0 && final_exists > 0) {
+        errno = 0;
         if (rename(final_path, backup_path) != 0) {
             remember_errno(&first_error);
         } else {
             final_was_backed_up = 1;
         }
     }
-    if (first_error == 0 && rename(temporary_path, final_path) != 0) {
-        remember_errno(&first_error);
-        if (final_was_backed_up) {
-            (void)rename(backup_path, final_path);
+    if (first_error == 0) {
+        errno = 0;
+        if (rename(temporary_path, final_path) != 0) {
+            remember_errno(&first_error);
+            if (final_was_backed_up) {
+                errno = 0;
+                (void)rename(backup_path, final_path);
+            }
         }
     }
 
@@ -187,7 +211,12 @@ int storage_recover_replace(const char *final_path, const char *backup_path)
     if (backup_exists < 0) {
         return -1;
     }
-    return rename(backup_path, final_path);
+    errno = 0;
+    int result = rename(backup_path, final_path);
+    if (result != 0 && errno == 0) {
+        errno = EIO;
+    }
+    return result;
 }
 
 static int truncate_file(FILE *file, long length)
@@ -211,16 +240,22 @@ int storage_repair_csv_tail(const char *path)
         return -1;
     }
 
+    errno = 0;
     FILE *file = fopen(path, "r+b");
     if (file == NULL) {
+        if (errno == 0) {
+            errno = EIO;
+        }
         return errno == ENOENT ? 0 : -1;
     }
 
     int first_error = 0;
     long length = 0;
+    errno = 0;
     if (fseek(file, 0, SEEK_END) != 0) {
         remember_errno(&first_error);
     } else {
+        errno = 0;
         length = ftell(file);
         if (length < 0) {
             remember_errno(&first_error);
@@ -229,11 +264,13 @@ int storage_repair_csv_tail(const char *path)
 
     long repaired_length = length;
     if (first_error == 0 && length > 0) {
+        errno = 0;
         if (fseek(file, length - 1, SEEK_SET) != 0) {
             remember_errno(&first_error);
         } else {
+            errno = 0;
             int last_byte = fgetc(file);
-            if (last_byte == EOF) {
+            if (last_byte == EOF || ferror(file)) {
                 remember_errno(&first_error);
             } else if (last_byte != '\n') {
                 repaired_length = 0;
@@ -242,11 +279,13 @@ int storage_repair_csv_tail(const char *path)
                 while (offset > 0 && repaired_length == 0) {
                     size_t count = offset > (long)sizeof(buffer) ? sizeof(buffer) : (size_t)offset;
                     offset -= (long)count;
+                    errno = 0;
                     if (fseek(file, offset, SEEK_SET) != 0) {
                         remember_errno(&first_error);
                         break;
                     }
-                    if (fread(buffer, 1, count, file) != count) {
+                    errno = 0;
+                    if (fread(buffer, 1, count, file) != count || ferror(file)) {
                         remember_errno(&first_error);
                         break;
                     }
@@ -262,12 +301,14 @@ int storage_repair_csv_tail(const char *path)
     }
 
     if (first_error == 0 && repaired_length < length) {
+        errno = 0;
         if (truncate_file(file, repaired_length) != 0) {
             remember_errno(&first_error);
         } else if (sync_descriptor(file) != 0) {
             remember_errno(&first_error);
         }
     }
+    errno = 0;
     if (fclose(file) != 0) {
         remember_errno(&first_error);
     }

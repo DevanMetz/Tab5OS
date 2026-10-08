@@ -10,7 +10,7 @@ Python 3 and Node.js are needed for the quick checks. The configuration checks a
 | --- | --- |
 | SDK setup, board selection or root CMake | [Firmware configuration](#firmware-configuration). |
 | Relay, parsers, calculations, clipboard or file formats | [Core command reference](#core-command-reference); choose the affected module and any independent reference test. |
-| Storage writes or incomplete CSV rows | [Core command reference](#core-command-reference), [CSV tail recovery](#csv-tail-recovery) and a firmware build. |
+| Storage writes or incomplete CSV rows | [Storage failure boundaries](#storage-failure-boundaries), [CSV tail recovery](#csv-tail-recovery), affected app checks and a firmware build. |
 | Notes loading, saving or lifecycle | [Notes storage and UI](#notes-storage-and-ui) and a firmware build. |
 | Ride history loading or summary appends | [Ride history storage](#ride-history-storage) and a firmware build. |
 | Ride Start, periodic recording or Stop | [Ride recording](#ride-recording) and a firmware build. |
@@ -96,17 +96,27 @@ git diff --check
 .\tools\build_idf.ps1
 ```
 
+## Storage failure boundaries
+
+```powershell
+python tools/test_storage_faults.py --compiler 'C:/path/to/clang.exe'
+```
+
+This portable fixture compiles the complete actual `storage_io.c` with native files and controlled flush/sync/close/probe/remove/rename faults. Its 57 cases check sync, new-file publication, replacement and backup recovery, null arguments, first-error retention through failed cleanup/rollback, and 25 rollback/recover/republish pairs. Independent byte checks verify temporary, final and backup generations, stream ownership and closed handles. Successful boundaries deliberately leave stale errno; failed boundaries can supply no errno. The helper must use a fresh error for each operation, fall back to `EIO` when none is supplied, and reject stream errors after flush while preserving a supplied preexisting write error. A failed path probe must stop publication or recovery.
+
+The preceding helper fails 21 controls, including false publication or recovery after an unconfirmed probe. All 57 cases now pass, as do the original storage checks, affected app fixtures and real LVGL Notes checks. The paths, publication/rollback behavior and ownership contract stay the same. The runner retains generated source, full storage/header/test hashes, executable hash and compile/result logs under `build/storage-faults/`; Linux CI retains `storage-faults-logs`. Native file checks do not establish physical FAT/SD timing, removal or power-loss recovery.
+
 ## CSV tail recovery
 
 ```powershell
 python tools/test_storage_csv_tail.py --compiler 'C:/path/to/clang.exe'
 ```
 
-This portable fixture compiles the actual `storage_io.c` against native files, counting stdio calls and controlling seek/read/truncate/sync/close faults. Its 32 cases check exact retained bytes, empty/missing files, LF/CRLF, binary tails, the latest complete row, 511/512/513- and 1023/1024/1025-byte boundaries, and two long unfinished rows. Recovery scans backwards using a 512-byte scratch buffer. Eight controls against the preceding source exceed the seek budgets; a 65,536-byte partial tail drops from 65,538 stdio seeks to 130 while retaining the same complete prefix. Complete files require no block reads or truncation.
+This portable fixture compiles the actual `storage_io.c` against native files, counting stdio calls and controlling open/seek/size/read/truncate/sync/close faults. Its 52 cases check exact retained bytes, empty/missing files, LF/CRLF, binary tails, the latest complete row, 511/512/513- and 1023/1024/1025-byte boundaries, and two long unfinished rows. Recovery scans backwards using a 512-byte scratch buffer. Eight controls against the original scalar-scanning source exceed the seek budgets; a 65,536-byte partial tail drops from 65,538 stdio seeks to 130 while retaining the same complete prefix. Complete files require no block reads or truncation.
 
-Seek/read failures preserve all bytes, including a short read without a supplied errno. Truncate, sync and close failures report the first error and leave every modeled handle closed. Sync/close failures can follow a completed truncation, so those cases check the retained prefix without promising rollback or power-loss durability. Original storage checks and five existing MQTT/HTTP logging cases also pass. These checks use the host filesystem and controlled fault boundaries; physical FAT/SD timing, removal and power cuts remain in the hardware matrix.
+Open/seek/size/read failures preserve all bytes, including a short read or full-count read with a stream error. Each boundary uses fresh errno and falls back to `EIO`; cleanup cannot replace the first cause. Seventeen controls fail against the preceding helper, including six unconfirmed reads that incorrectly permit truncation. Truncate, sync and close failures report the first error and leave every modeled handle closed. Sync/close failures can follow a completed truncation, so those cases check the retained prefix without promising rollback or power-loss durability. These checks use the host filesystem and controlled fault boundaries; physical FAT/SD timing, removal and power cuts remain in the hardware matrix.
 
-Generated source, full storage/header/test hashes and compile/result logs stay under `build/storage-csv-tail/`. Linux CI runs the fixture and retains those files as `storage-csv-tail-logs`, including compiler/test failures. Its 32 cases are separate from the seven-suite Windows native total.
+Generated source, full storage/header/test hashes and compile/result logs stay under `build/storage-csv-tail/`. Linux CI runs the fixture and retains those files as `storage-csv-tail-logs`, including compiler/test failures. Its 52 cases are separate from the seven-suite Windows native total.
 
 ## Notes storage and UI
 

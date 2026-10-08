@@ -49,7 +49,7 @@ UART and RS-485 log creation retry only existing final or temporary filenames. O
 
 ## CSV conventions
 
-Before appending, HTTP, MQTT and Ring heart-rate logs remove an unfinished final row by retaining bytes through the last LF. Recovery scans backwards in 512-byte blocks, preserving preceding complete rows. Seek/read failures leave the file unchanged; truncation is synced before closing, and sync/close errors remain errors even if the tail has already been removed. Writers must be stopped during recovery. Native byte checks cover long tails and block boundaries; real SD timing and power-loss behavior remain hardware checks.
+Before appending, HTTP, MQTT and Ring heart-rate logs remove an unfinished final row by retaining bytes through the last LF. Recovery scans backwards in 512-byte blocks, preserving preceding complete rows. Open/seek/size/read failures leave the file unchanged, including full-count reads with a stream error; missing errno becomes `EIO` and cleanup preserves the first cause. Truncation is synced before closing, and sync/close errors remain errors even if the tail has already been removed. Writers must be stopped during recovery. Native byte checks cover long tails and block boundaries; real SD timing and power-loss behavior remain hardware checks.
 
 - UTF-8/ASCII text, comma separator, decimal point `.` and LF line endings.
 - `unix_time` and `start_unix` are whole seconds since the Unix epoch in UTC.

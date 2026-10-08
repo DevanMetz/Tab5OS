@@ -27,9 +27,13 @@ static unsigned seeks, block_reads, scalar_reads, closes, handles, truncates, sy
 static size_t largest_read;
 static unsigned fail_seek, fail_read, short_read;
 static bool fail_getc, fail_truncate, fail_sync, fail_close;
+static bool fail_open, fail_tell, no_errno, stale_success, flagged, flag_getc;
+static unsigned flag_read;
 static FILE *fixture_open(const char *path, const char *mode);
 static int fixture_seek(FILE *file, long offset, int origin);
 static int fixture_getc(FILE *file);
+static long fixture_tell(FILE *file);
+static int fixture_error(FILE *file);
 size_t fixture_read(void *buffer, size_t size, size_t count, FILE *file);
 static int fixture_close(FILE *file);
 #ifdef _WIN32
@@ -46,12 +50,16 @@ static int fixture_truncate(int descriptor, off_t length);
 #define fopen fixture_open
 #define fseek fixture_seek
 #define fgetc fixture_getc
+#define ftell fixture_tell
+#define ferror fixture_error
 #define fread fixture_read
 #define fclose fixture_close
 #include "storage_source.inc"
 #undef fopen
 #undef fseek
 #undef fgetc
+#undef ftell
+#undef ferror
 #undef fread
 #undef fclose
 #ifdef _WIN32
@@ -65,50 +73,71 @@ static int fixture_truncate(int descriptor, off_t length);
 static FILE *fixture_open(const char *path, const char *mode)
 {
     assert(!handles && !strcmp(mode, "r+b"));
+    if (fail_open) { if (!no_errno) errno = EACCES; return NULL; }
     FILE *file = fopen(path, mode);
     if (file) handles++;
+    if (file && stale_success) errno = EBUSY;
     return file;
 }
 static int fixture_seek(FILE *file, long offset, int origin)
 {
     seeks++;
-    if (seeks == fail_seek) { errno = EACCES; return -1; }
-    return fseek(file, offset, origin);
+    if (seeks == fail_seek) { if (!no_errno) errno = EACCES; return -1; }
+    int result = fseek(file, offset, origin);
+    if (!result && stale_success) errno = EBUSY;
+    return result;
+}
+static long fixture_tell(FILE *file)
+{
+    if (fail_tell) { if (!no_errno) errno = EACCES; return -1; }
+    long result = ftell(file);
+    if (result >= 0 && stale_success) errno = EBUSY;
+    return result;
 }
 static int fixture_getc(FILE *file)
 {
     scalar_reads++;
-    if (fail_getc) { errno = 0; return EOF; }
-    return fgetc(file);
+    if (fail_getc) { if (!no_errno) errno = 0; return EOF; }
+    int result = fgetc(file);
+    if (flag_getc) { flagged = true; if (!no_errno) errno = EACCES; }
+    else if (result != EOF && stale_success) errno = EBUSY;
+    return result;
 }
+static int fixture_error(FILE *file) { return flagged || ferror(file); }
 /* External linkage also compiles the preceding scalar-only implementation. */
 size_t fixture_read(void *buffer, size_t size, size_t count, FILE *file)
 {
     block_reads++;
     if (size * count > largest_read) largest_read = size * count;
-    if (block_reads == fail_read) { errno = EIO; return 0; }
+    if (block_reads == fail_read) { if (!no_errno) errno = EIO; return 0; }
     if (block_reads == short_read) {
         assert(size == 1 && count > 1);
         size_t read = fread(buffer, size, count / 2, file);
         errno = 0;
         return read;
     }
-    return fread(buffer, size, count, file);
+    size_t result = fread(buffer, size, count, file);
+    if (block_reads == flag_read) { assert(result == count); flagged = true; if (!no_errno) errno = EACCES; }
+    else if (result == count && stale_success) errno = EBUSY;
+    return result;
 }
 static int fixture_close(FILE *file)
 {
     assert(handles == 1);
     closes++; handles--;
     int result = fclose(file);
-    if (fail_close) { errno = EPERM; return EOF; }
+    if (fail_close) { if (!no_errno) errno = EPERM; return EOF; }
+    if (!result && stale_success) errno = EBUSY;
     return result;
 }
 #ifdef _WIN32
 static int fixture_commit(int descriptor)
 {
     syncs++;
-    if (fail_sync) { errno = EIO; return -1; }
-    return _commit(descriptor);
+    if (fail_sync) { if (!no_errno) errno = EIO; return -1; }
+    int result = _commit(descriptor);
+    if (!result && stale_success) errno = EBUSY;
+    return result;
 }
 static int fixture_chsize(int descriptor, int64_t length)
 {
@@ -120,13 +149,15 @@ static int fixture_chsize(int descriptor, int64_t length)
 static int fixture_sync(int descriptor)
 {
     syncs++;
-    if (fail_sync) { errno = EIO; return -1; }
-    return fsync(descriptor);
+    if (fail_sync) { if (!no_errno) errno = EIO; return -1; }
+    int result = fsync(descriptor);
+    if (!result && stale_success) errno = EBUSY;
+    return result;
 }
 static int fixture_truncate(int descriptor, off_t length)
 {
     truncates++;
-    if (fail_truncate) { errno = EACCES; return -1; }
+    if (fail_truncate) { if (!no_errno) errno = EACCES; return -1; }
     return ftruncate(descriptor, length);
 }
 #endif
@@ -139,6 +170,8 @@ static void reset(void)
     largest_read = 0;
     fail_seek = fail_read = short_read = 0;
     fail_getc = fail_truncate = fail_sync = fail_close = false;
+    fail_open = fail_tell = no_errno = stale_success = flagged = flag_getc = false;
+    flag_read = 0;
 }
 static bool verify_bytes(const unsigned char *data, size_t length, long *actual_length)
 {
@@ -169,7 +202,11 @@ static unsigned char *partial_data(size_t tail, size_t *length)
 }
 typedef enum { NO_FAULT, SEEK_END_ERROR, SEEK_LAST_ERROR, SEEK_BLOCK_ERROR, SEEK_NEXT_BLOCK_ERROR,
     GETC_ERROR, READ_ERROR, NEXT_READ_ERROR, SHORT_READ, TRUNCATE_ERROR, SYNC_ERROR, CLOSE_ERROR,
-    FIRST_ERROR_WITH_CLOSE_ERROR } fault_t;
+    FIRST_ERROR_WITH_CLOSE_ERROR, OPEN_ERROR, OPEN_NO_ERRNO, TELL_ERROR, TELL_NO_ERRNO,
+    SEEK_END_NO_ERRNO, SEEK_LAST_NO_ERRNO, SEEK_BLOCK_NO_ERRNO, SEEK_NEXT_BLOCK_NO_ERRNO,
+    GETC_NO_ERRNO, READ_NO_ERRNO, NEXT_READ_NO_ERRNO, SYNC_NO_ERRNO, CLOSE_NO_ERRNO,
+    GETC_FLAG, GETC_FLAG_NO_ERRNO, READ_FULL_FLAG, READ_FULL_FLAG_NO_ERRNO, NEXT_READ_FULL_FLAG,
+    READ_FULL_FLAG_CLOSE, STALE_HEALTHY } fault_t;
 
 static void run_case(const char *name, const unsigned char *data, size_t length, size_t kept,
                      int expected_error, fault_t fault, bool budget)
@@ -193,14 +230,34 @@ static void run_case(const char *name, const unsigned char *data, size_t length,
         case SYNC_ERROR: fail_sync = true; break;
         case CLOSE_ERROR: fail_close = true; break;
         case FIRST_ERROR_WITH_CLOSE_ERROR: fail_seek = 3; fail_close = true; break;
+        case OPEN_ERROR: fail_open = true; break;
+        case OPEN_NO_ERRNO: fail_open = no_errno = stale_success = true; break;
+        case TELL_ERROR: fail_tell = true; break;
+        case TELL_NO_ERRNO: fail_tell = no_errno = stale_success = true; break;
+        case SEEK_END_NO_ERRNO: fail_seek = 1; no_errno = stale_success = true; break;
+        case SEEK_LAST_NO_ERRNO: fail_seek = 2; no_errno = stale_success = true; break;
+        case SEEK_BLOCK_NO_ERRNO: fail_seek = 3; no_errno = stale_success = true; break;
+        case SEEK_NEXT_BLOCK_NO_ERRNO: fail_seek = 4; no_errno = stale_success = true; break;
+        case GETC_NO_ERRNO: fail_getc = no_errno = stale_success = true; break;
+        case READ_NO_ERRNO: fail_read = 1; no_errno = stale_success = true; break;
+        case NEXT_READ_NO_ERRNO: fail_read = 2; no_errno = stale_success = true; break;
+        case SYNC_NO_ERRNO: fail_sync = no_errno = stale_success = true; break;
+        case CLOSE_NO_ERRNO: fail_close = no_errno = stale_success = true; break;
+        case GETC_FLAG: flag_getc = true; break;
+        case GETC_FLAG_NO_ERRNO: flag_getc = no_errno = stale_success = true; break;
+        case READ_FULL_FLAG: flag_read = 1; break;
+        case READ_FULL_FLAG_NO_ERRNO: flag_read = 1; no_errno = stale_success = true; break;
+        case NEXT_READ_FULL_FLAG: flag_read = 2; break;
+        case READ_FULL_FLAG_CLOSE: flag_read = 1; fail_close = true; break;
+        case STALE_HEALTHY: stale_success = true; break;
     }
-    errno = 0;
+    errno = fault == OPEN_NO_ERRNO ? ENOENT : EBUSY;
     int result = storage_repair_csv_tail(case_path);
     int error = errno;
     long actual_length;
     bool data_matches = verify_bytes(data, kept, &actual_length);
     bool pass = result == (expected_error ? -1 : 0) && (!expected_error || error == expected_error) &&
-        !handles && closes == 1 && largest_read <= 512 && data_matches;
+        !handles && closes == (unsigned)(fault != OPEN_ERROR && fault != OPEN_NO_ERRNO) && largest_read <= 512 && data_matches;
     if (budget) pass = pass && seeks <= 2 + (length + 511) / 512 && scalar_reads <= 1;
     if (!expected_error) {
         pass = pass && truncates == (unsigned)(kept < length) && syncs == truncates;
@@ -259,6 +316,17 @@ int main(void)
             EACCES : fault == CLOSE_ERROR ? EPERM : EIO;
         run_case(fault_names[fault - 1], data, length, fault == SYNC_ERROR || fault == CLOSE_ERROR ? 8 : length,
             error, (fault_t)fault, false);
+    }
+    const char *additional_names[] = {"open-error", "open-no-errno", "tell-error", "tell-no-errno",
+        "seek-end-no-errno", "seek-last-no-errno", "seek-block-no-errno", "seek-next-block-no-errno",
+        "scalar-read-no-errno", "block-read-no-errno", "next-block-read-no-errno", "sync-no-errno", "close-no-errno",
+        "scalar-read-flag", "scalar-read-flag-no-errno", "full-read-flag", "full-read-flag-no-errno", "next-full-read-flag",
+        "first-full-read-error-retained", "stale-success"};
+    for (unsigned fault = OPEN_ERROR; fault <= STALE_HEALTHY; fault++) {
+        int error = fault == STALE_HEALTHY ? 0 : fault == OPEN_ERROR || fault == TELL_ERROR || fault == GETC_FLAG ||
+            fault == READ_FULL_FLAG || fault == NEXT_READ_FULL_FLAG || fault == READ_FULL_FLAG_CLOSE ? EACCES : EIO;
+        size_t kept = fault == SYNC_NO_ERRNO || fault == CLOSE_NO_ERRNO || fault == STALE_HEALTHY ? 8 : length;
+        run_case(additional_names[fault - OPEN_ERROR], data, length, kept, error, (fault_t)fault, fault == STALE_HEALTHY);
     }
     free(data);
     printf("%s %u CSV tail cases failures=%u handles=%u (native files; controlled I/O faults)\n",

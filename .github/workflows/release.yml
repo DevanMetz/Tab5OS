@@ -29,6 +29,8 @@ jobs:
         run: |
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/storage_io.c tests/storage_io_test.c -o "$RUNNER_TEMP/storage_io_test"
           "$RUNNER_TEMP/storage_io_test"
+      - name: Test storage failure boundaries
+        run: python3 tools/test_storage_faults.py --compiler cc
       - name: Test CSV tail recovery
         run: python3 tools/test_storage_csv_tail.py --compiler cc
       - name: Test Notes storage
@@ -120,6 +122,19 @@ jobs:
             build/ota-result/result.log
             build/ota-result/source.json
             build/ota-result/ota_result.inc
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Retain storage failure test evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: storage-faults-logs
+          path: |
+            build/storage-faults/compile.log
+            build/storage-faults/result.log
+            build/storage-faults/source.json
+            build/storage-faults/storage_source.inc
           if-no-files-found: warn
           retention-days: 14
 
