@@ -37,8 +37,11 @@ static int ride_max_power = 350, ride_max_hr = 170;
 static FILE *source_file, *output_file;
 static char paths[3][128];
 static unsigned handles, fs_calls, mutations, reads, writes, copied, source_closes, output_closes, temporary_removes;
-static bool read_error;
+static bool read_error, output_error;
 static int recorded_error;
+static bool no_errno, stale_success, positive_result, cleanup_errors, cleanup_remove_error;
+static int stale_errno, boundary_errno;
+static unsigned writer_opens, newline_calls, header_calls, row_calls, flush_calls, sync_calls, publications, error_reports;
 typedef enum { NO_FAULT, NO_SD, FOLDER_ERROR, FINAL_STAT_ERROR, BACKUP_STAT_ERROR,
     RECOVERY_ERROR, INITIAL_REMOVE_ERROR, OPEN_READ_ERROR, OPEN_WRITE_ERROR,
     READ_ERROR, NEXT_READ_ERROR, READ_ZERO_ERRNO, FULL_READ_ERROR, SOURCE_CLOSE_ERROR,
@@ -46,6 +49,9 @@ typedef enum { NO_FAULT, NO_SD, FOLDER_ERROR, FINAL_STAT_ERROR, BACKUP_STAT_ERRO
     FLUSH_ERROR, SYNC_ERROR, OUTPUT_CLOSE_ERROR, PUBLISH_ERROR, ROLLBACK_ERROR,
     READ_CLEANUP_ERROR, COPY_CLEANUP_ERROR, OPEN_CLEANUP_ERROR, STALE_READ_ERROR } fault_t;
 static fault_t fault;
+
+static void supply_errno(int error) { if (!no_errno) errno = boundary_errno ? boundary_errno : error; }
+static void leave_stale_errno(void) { if (stale_success) errno = stale_errno; }
 
 static const char *native_path(const char *path)
 {
@@ -56,11 +62,16 @@ static const char *native_path(const char *path)
 FILE *fixture_open(const char *path, const char *mode)
 {
     fs_calls++; bool input = !strcmp(mode, "rb");
-    if (!input) mutations++;
-    if (input && fault == OPEN_READ_ERROR) { errno = EACCES; return NULL; }
-    if (!input && (fault == OPEN_WRITE_ERROR || fault == OPEN_CLEANUP_ERROR)) { errno = ENOSPC; return NULL; }
+    if (!input) { mutations++; writer_opens++; }
+    if (input && fault == OPEN_READ_ERROR) { supply_errno(EACCES); return NULL; }
+    if (!input && (fault == OPEN_WRITE_ERROR || fault == OPEN_CLEANUP_ERROR)) { supply_errno(ENOSPC); return NULL; }
     FILE *file = fopen(native_path(path), mode);
-    if (file) { handles++; if (input) source_file = file; else output_file = file; }
+    if (file) {
+        handles++;
+        if (input) { source_file = file; read_error = false; }
+        else { output_file = file; output_error = false; }
+        leave_stale_errno();
+    }
     return file;
 }
 size_t fixture_read(void *buffer, size_t size, size_t count, FILE *file)
@@ -69,29 +80,46 @@ size_t fixture_read(void *buffer, size_t size, size_t count, FILE *file)
     if (((fault == READ_ERROR || fault == READ_ZERO_ERRNO || fault == FULL_READ_ERROR || fault == READ_CLEANUP_ERROR) && reads == 1) ||
         (fault == NEXT_READ_ERROR && reads == 2)) {
         size_t read = fread(buffer, size, fault == FULL_READ_ERROR ? count : count / 2, file);
-        read_error = true; errno = fault == READ_ZERO_ERRNO ? 0 : EIO; return read;
+        read_error = true;
+        if (fault == READ_ZERO_ERRNO) errno = 0;
+        else supply_errno(EIO);
+        return read;
     }
-    return fread(buffer, size, count, file);
+    size_t read = fread(buffer, size, count, file);
+    if (!ferror(file)) leave_stale_errno();
+    return read;
 }
 char *fixture_gets(char *buffer, int size, FILE *file)
 {
     assert(file == source_file); fs_calls++; reads++;
     if (fault == STALE_READ_ERROR && reads == 3) { read_error = true; return NULL; }
     if (((fault == READ_ERROR || fault == READ_ZERO_ERRNO || fault == READ_CLEANUP_ERROR) && reads == 3) ||
-        (fault == NEXT_READ_ERROR && reads == 4)) { read_error = true; errno = fault == READ_ZERO_ERRNO ? 0 : EIO; return NULL; }
+        (fault == NEXT_READ_ERROR && reads == 4)) {
+        char *result = positive_result ? fgets(buffer, size, file) : NULL;
+        read_error = true;
+        if (fault == READ_ZERO_ERRNO) errno = 0;
+        else supply_errno(EIO);
+        return result;
+    }
     char *result = fgets(buffer, size, file);
     if (result && fault == STALE_READ_ERROR) errno = ENOSPC;
+    else if (!ferror(file)) leave_stale_errno();
     return result;
 }
-int fixture_error(FILE *file) { return (file == source_file && read_error) || ferror(file); }
+int fixture_error(FILE *file) { return (file == source_file && read_error) || (file == output_file && output_error) || ferror(file); }
 size_t fixture_write(const void *buffer, size_t size, size_t count, FILE *file)
 {
     assert(file == output_file && size == 1); fs_calls++; writes++; mutations++;
     if (fault == COPY_ERROR || fault == COPY_ZERO_ERRNO || fault == COPY_CLEANUP_ERROR) {
-        assert(count); size_t written = fwrite(buffer, size, count - 1, file); copied += (unsigned)written;
-        errno = fault == COPY_ZERO_ERRNO ? 0 : ENOSPC; return written;
+        assert(count); size_t written = fwrite(buffer, size, positive_result ? count : count - 1, file); copied += (unsigned)written;
+        if (positive_result) output_error = true;
+        if (fault == COPY_ZERO_ERRNO) errno = 0;
+        else supply_errno(ENOSPC);
+        return written;
     }
-    size_t written = fwrite(buffer, size, count, file); copied += (unsigned)written; return written;
+    size_t written = fwrite(buffer, size, count, file); copied += (unsigned)written;
+    if (!ferror(file)) leave_stale_errno();
+    return written;
 }
 int fixture_close(FILE *file)
 {
@@ -100,61 +128,87 @@ int fixture_close(FILE *file)
     if (input) { source_closes++; source_file = NULL; } else { assert(file == output_file); output_closes++; output_file = NULL; }
     int result = fclose(file);
     if ((input && (fault == SOURCE_CLOSE_ERROR || fault == READ_CLEANUP_ERROR || fault == COPY_CLEANUP_ERROR || fault == OPEN_CLEANUP_ERROR)) ||
-        (!input && (fault == OUTPUT_CLOSE_ERROR || fault == READ_CLEANUP_ERROR || fault == COPY_CLEANUP_ERROR))) { errno = EPERM; return EOF; }
+        (!input && (fault == OUTPUT_CLOSE_ERROR || fault == READ_CLEANUP_ERROR || fault == COPY_CLEANUP_ERROR))) { supply_errno(EPERM); return EOF; }
+    if (cleanup_errors && (!input || fault == READ_ERROR || fault == COPY_ERROR || fault == OPEN_WRITE_ERROR)) { errno = EPERM; return EOF; }
+    if (!result) leave_stale_errno();
     return result;
 }
 int fixture_stat(const char *path, struct stat *info)
 {
     fs_calls++; const char *mapped = native_path(path);
-    if ((mapped == paths[0] && fault == FINAL_STAT_ERROR) || (mapped == paths[2] && fault == BACKUP_STAT_ERROR)) { errno = EACCES; return -1; }
-    return stat(mapped, info);
+    if ((mapped == paths[0] && fault == FINAL_STAT_ERROR) || (mapped == paths[2] && fault == BACKUP_STAT_ERROR)) { supply_errno(EACCES); return -1; }
+    int result = stat(mapped, info);
+    if (!result) leave_stale_errno();
+    return result;
 }
 int fixture_remove(const char *path)
 {
     fs_calls++; mutations++; const char *mapped = native_path(path);
     if (mapped == paths[1]) {
         temporary_removes++;
-        if (fault == INITIAL_REMOVE_ERROR || ((fault == READ_CLEANUP_ERROR || fault == COPY_CLEANUP_ERROR) && temporary_removes > 1)) { errno = EACCES; return -1; }
+        if (fault == INITIAL_REMOVE_ERROR || ((fault == READ_CLEANUP_ERROR || fault == COPY_CLEANUP_ERROR) && temporary_removes > 1)) { supply_errno(EACCES); return -1; }
+        if (cleanup_remove_error && temporary_removes > 1) { errno = EPERM; return -1; }
     }
-    return remove(mapped);
+    int result = remove(mapped);
+    if (!result) leave_stale_errno();
+    return result;
 }
 int fixture_rename(const char *from, const char *to)
 {
     fs_calls++; mutations++; const char *a = native_path(from), *b = native_path(to);
     if ((a == paths[2] && b == paths[0] && (fault == RECOVERY_ERROR || fault == ROLLBACK_ERROR)) ||
         (a == paths[1] && b == paths[0] && (fault == PUBLISH_ERROR || fault == ROLLBACK_ERROR))) { errno = EACCES; return -1; }
-    return rename(a, b);
+    int result = rename(a, b);
+    if (!result) { if (a == paths[1] && b == paths[0]) publications++; leave_stale_errno(); }
+    return result;
 }
 int fixture_mkdir(const char *path, int mode)
 {
     assert(!strcmp(path, SD_PATH "/RIDES") && mode == 0775); fs_calls++; mutations++;
-    if (fault == FOLDER_ERROR) { errno = ENOSPC; return -1; } errno = EEXIST; return -1;
+    if (fault == FOLDER_ERROR) { supply_errno(ENOSPC); return -1; } errno = EEXIST; return -1;
 }
 int fixture_putc(int byte, FILE *file)
 {
-    assert(file == output_file); fs_calls++; mutations++;
-    if (fault == NEWLINE_ERROR) { errno = ENOSPC; return EOF; } return fputc(byte, file);
+    assert(file == output_file); fs_calls++; mutations++; newline_calls++;
+    if (fault == NEWLINE_ERROR) {
+        int result = positive_result ? fputc(byte, file) : EOF;
+        if (positive_result) output_error = true;
+        supply_errno(ENOSPC); return result;
+    }
+    int result = fputc(byte, file);
+    if (result != EOF) leave_stale_errno();
+    return result;
 }
 int fixture_puts(const char *text, FILE *file)
 {
-    assert(file == output_file); fs_calls++; mutations++;
-    if (fault == HEADER_ERROR) { errno = ENOSPC; return EOF; } return fputs(text, file);
+    assert(file == output_file); fs_calls++; mutations++; header_calls++;
+    if (fault == HEADER_ERROR) {
+        int result = positive_result ? fputs(text, file) : EOF;
+        if (positive_result) output_error = true;
+        supply_errno(ENOSPC); return result;
+    }
+    int result = fputs(text, file);
+    if (result >= 0) leave_stale_errno();
+    return result;
 }
 int fixture_printf(FILE *file, const char *format, ...)
 {
-    assert(file == output_file); fs_calls++; mutations++;
-    if (fault == ROW_ERROR) { errno = ENOSPC; return -1; }
-    va_list args; va_start(args, format); int result = vfprintf(file, format, args); va_end(args); return result;
+    assert(file == output_file); fs_calls++; mutations++; row_calls++;
+    if (fault == ROW_ERROR && !positive_result) { supply_errno(ENOSPC); return -1; }
+    va_list args; va_start(args, format); int result = vfprintf(file, format, args); va_end(args);
+    if (fault == ROW_ERROR) { output_error = true; supply_errno(ENOSPC); }
+    else if (result >= 0) leave_stale_errno();
+    return result;
 }
 int fixture_flush(FILE *file)
 {
-    fs_calls++; if (fault == FLUSH_ERROR) { errno = EIO; return EOF; } return fflush(file);
+    fs_calls++; flush_calls++; if (fault == FLUSH_ERROR) { errno = EIO; return EOF; } return fflush(file);
 }
 #ifdef _WIN32
-int fixture_sync(int descriptor) { fs_calls++; if (fault == SYNC_ERROR) { errno = EIO; return -1; } return _commit(descriptor); }
+int fixture_sync(int descriptor) { fs_calls++; sync_calls++; if (fault == SYNC_ERROR) { errno = EIO; return -1; } return _commit(descriptor); }
 #define _commit fixture_sync
 #else
-int fixture_sync(int descriptor) { fs_calls++; if (fault == SYNC_ERROR) { errno = EIO; return -1; } return fsync(descriptor); }
+int fixture_sync(int descriptor) { fs_calls++; sync_calls++; if (fault == SYNC_ERROR) { errno = EIO; return -1; } return fsync(descriptor); }
 #define fsync fixture_sync
 #endif
 void lv_label_set_text(lv_obj_t *object, const char *text)
@@ -164,7 +218,7 @@ void lv_label_set_text_fmt(lv_obj_t *object, const char *format, ...)
     assert(object); va_list args; va_start(args, format); int result = vsnprintf(object->text, sizeof(object->text), format, args); va_end(args);
     assert(result >= 0 && (size_t)result < sizeof(object->text));
 }
-void sd_record_error(int error) { recorded_error = error; }
+void sd_record_error(int error) { recorded_error = error; error_reports++; }
 int sd_error_snapshot(void) { return recorded_error; }
 
 #define fopen fixture_open
@@ -235,7 +289,10 @@ static void prepare(const char *data, const char *previous)
     assert(!handles); for (unsigned i = 0; i < 3; i++) if (remove(paths[i]) != 0) assert(errno == ENOENT);
     write_bytes(0, data); write_bytes(1, retained); write_bytes(2, previous);
     fs_calls = mutations = reads = writes = copied = source_closes = output_closes = temporary_removes = 0;
-    source_file = output_file = NULL; read_error = false; fault = NO_FAULT; sd_ready = true; recorded_error = 0;
+    source_file = output_file = NULL; read_error = output_error = false; fault = NO_FAULT; sd_ready = true; recorded_error = 0;
+    no_errno = stale_success = positive_result = cleanup_errors = cleanup_remove_error = false;
+    stale_errno = EBUSY; boundary_errno = 0;
+    writer_opens = newline_calls = header_calls = row_calls = flush_calls = sync_calls = publications = error_reports = 0;
     ride_history = &label; strcpy(label.text, "unchanged");
 }
 static void report(const char *name, bool pass, int result, int error)
@@ -291,6 +348,77 @@ static void append_case(const char *name, const char *data, const char *previous
     }
     report(name, pass, result, error ? actual_error : 0);
 }
+static void history_boundary(const char *name, fault_t point, bool missing_errno, bool positive, bool cleanup, bool absent)
+{
+    prepare(absent ? NULL : summary, absent ? NULL : backup);
+    fault = point; no_errno = missing_errno; stale_success = true; positive_result = positive; cleanup_errors = cleanup;
+    boundary_errno = EACCES; stale_errno = point == OPEN_READ_ERROR ? ENOENT : EBUSY;
+    expected_error = missing_errno ? EIO : EACCES; errno = ENOENT;
+    ride_load_history();
+    bool pass = !handles && recorded_error == expected_error && error_reports == 1;
+    pass = pass && !strncmp(label.text, "History unavailable:", 20) && !writer_opens && !mutations;
+    if (point == READ_ERROR) pass = pass && reads == 3;
+    pass = pass && text_match(0, absent ? NULL : summary) && text_match(1, retained) && text_match(2, absent ? NULL : backup);
+    report(name, pass, 0, recorded_error);
+}
+static void append_boundary(const char *name, const char *data, fault_t point, bool missing_errno,
+                            bool positive, bool cleanup, const char *kept, size_t kept_length)
+{
+    prepare(data, data ? backup : NULL);
+    fault = point; no_errno = missing_errno; stale_success = true; positive_result = positive; cleanup_errors = cleanup;
+    cleanup_remove_error = kept != NULL; boundary_errno = EACCES;
+    stale_errno = point == FOLDER_ERROR ? EEXIST : point == OPEN_READ_ERROR || point == INITIAL_REMOVE_ERROR ? ENOENT : EBUSY;
+    expected_error = missing_errno ? EIO : EACCES; errno = stale_errno;
+    bool result = ride_append_summary(3600); int actual = errno;
+    bool pass = !result && actual == expected_error && !handles && !publications && !error_reports && !flush_calls && !sync_calls;
+    pass = pass && text_match(0, data) && text_match(2, data ? backup : NULL);
+    if (point == FOLDER_ERROR || point == INITIAL_REMOVE_ERROR) {
+        pass = pass && text_match(1, retained) && !writer_opens && !reads && !writes;
+        if (point == FOLDER_ERROR) pass = pass && !temporary_removes;
+    } else if (kept) pass = pass && bytes_match(1, kept, kept_length);
+    else pass = pass && text_match(1, NULL);
+    if (point == OPEN_READ_ERROR) pass = pass && !writer_opens && !writes && !row_calls;
+    if (point == OPEN_WRITE_ERROR) pass = pass && !writes && !row_calls && source_closes == (unsigned)(data != NULL);
+    if (point == READ_ERROR) pass = pass && !writes && !row_calls;
+    if (point == COPY_ERROR) pass = pass && reads == 1 && writes == 1 && !newline_calls && !header_calls && !row_calls;
+    if (point == SOURCE_CLOSE_ERROR || point == NEWLINE_ERROR || point == HEADER_ERROR) pass = pass && !row_calls;
+    report(name, pass, result, actual);
+}
+static void history_failure_retry(const char *name, fault_t point)
+{
+    bool pass = true;
+    for (unsigned i = 0; i < 25; i++) {
+        prepare(summary, backup); fault = point; no_errno = stale_success = true; positive_result = point == READ_ERROR;
+        stale_errno = point == OPEN_READ_ERROR ? ENOENT : EBUSY;
+        ride_load_history();
+        pass = pass && recorded_error == EIO && error_reports == 1 && !handles && !strncmp(label.text, "History unavailable:", 20);
+        if (point == READ_ERROR) pass = pass && reads == 3;
+        pass = pass && text_match(0, summary) && text_match(1, retained) && text_match(2, backup);
+        fault = NO_FAULT; no_errno = stale_success = positive_result = false;
+        ride_load_history();
+        pass = pass && !handles && error_reports == 1 && !strcmp(label.text, "History: 2 rides  |  1.9 mi  |  1.5 hr  |  best 400 W");
+        pass = pass && text_match(0, summary) && text_match(1, retained) && text_match(2, backup);
+    }
+    expected_error = EIO; report(name, pass, 0, recorded_error);
+}
+static void append_failure_retry(const char *name, fault_t point)
+{
+    char complete[256]; assert(snprintf(complete, sizeof(complete), "%s%s", summary, new_row) > 0);
+    bool pass = true;
+    for (unsigned i = 0; i < 25; i++) {
+        prepare(summary, backup); fault = point; no_errno = stale_success = true; stale_errno = EEXIST;
+        positive_result = cleanup_errors = cleanup_remove_error = point == COPY_ERROR;
+        bool rejected = ride_append_summary(3600); int error = errno;
+        pass = pass && !rejected && error == EIO && !handles && !publications && !flush_calls && !sync_calls;
+        pass = pass && text_match(0, summary) && text_match(2, backup) && text_match(1, point == COPY_ERROR ? summary : retained);
+        fault = NO_FAULT; no_errno = stale_success = positive_result = cleanup_errors = cleanup_remove_error = false;
+        bool saved = ride_append_summary(3600);
+        pass = pass && saved && !handles && publications == 1 && text_match(0, complete) && text_match(2, summary) && text_match(1, NULL);
+        ride_load_history();
+        pass = pass && !handles && !error_reports && !strcmp(label.text, "History: 3 rides  |  9.5 mi  |  2.5 hr  |  best 400 W");
+    }
+    expected_error = 0; report(name, pass, 1, 0);
+}
 int main(void)
 {
     for (unsigned i = 0; i < 3; i++) {
@@ -345,6 +473,47 @@ int main(void)
     prepare(summary, backup); expected_error = 0; bool stable = true;
     for (unsigned i = 0; i < 25; i++) { ride_load_history(); stable = stable && !handles && !recorded_error; }
     report("history-reopen-25", stable && text_match(0, summary) && text_match(2, backup) && text_match(1, retained), 0, 0);
+    history_boundary("history-open-no-errno-existing", OPEN_READ_ERROR, true, false, false, false);
+    history_boundary("history-open-no-errno-missing", OPEN_READ_ERROR, true, false, false, true);
+    history_boundary("history-close-no-errno", SOURCE_CLOSE_ERROR, true, false, false, false);
+    history_boundary("history-positive-read-error", READ_ERROR, false, true, false, false);
+    history_boundary("history-positive-read-no-errno", READ_ERROR, true, true, false, false);
+    history_boundary("history-first-positive-read-error", READ_ERROR, false, true, true, false);
+    history_boundary("history-first-read-no-errno", READ_ERROR, true, false, true, false);
+    history_failure_retry("history-open-retry-25", OPEN_READ_ERROR);
+    history_failure_retry("history-positive-read-retry-25", READ_ERROR);
+    const struct { const char *name; fault_t point; } preparation[] = {
+        {"directory", FOLDER_ERROR}, {"temp-removal", INITIAL_REMOVE_ERROR},
+        {"open-read", OPEN_READ_ERROR}, {"open-write", OPEN_WRITE_ERROR}, {"source-close", SOURCE_CLOSE_ERROR}};
+    for (unsigned i = 0; i < sizeof(preparation) / sizeof(preparation[0]); i++) {
+        for (unsigned missing = 0; missing < 2; missing++) {
+            char name[96]; assert(snprintf(name, sizeof(name), "append-%s-boundary-%s", preparation[i].name, missing ? "no-errno" : "error") > 0);
+            append_boundary(name, summary, preparation[i].point, missing != 0, false, false, NULL, 0);
+        }
+    }
+    append_boundary("append-open-no-errno-missing", NULL, OPEN_READ_ERROR, true, false, false, NULL, 0);
+    const struct { const char *name, *data; fault_t point; } stages[] = {
+        {"copy", summary, COPY_ERROR}, {"newline", "row without LF", NEWLINE_ERROR},
+        {"header", NULL, HEADER_ERROR}, {"row", summary, ROW_ERROR}};
+    for (unsigned i = 0; i < sizeof(stages) / sizeof(stages[0]); i++) {
+        for (unsigned positive = 0; positive < 2; positive++) {
+            for (unsigned missing = 0; missing < 2; missing++) {
+                char name[96]; assert(snprintf(name, sizeof(name), "append-%s-%s-%s", stages[i].name,
+                    positive ? "positive" : "rejected", missing ? "no-errno" : "error") > 0);
+                append_boundary(name, stages[i].data, stages[i].point, missing != 0, positive != 0, false, NULL, 0);
+            }
+        }
+    }
+    append_boundary("append-first-open-no-errno", summary, OPEN_WRITE_ERROR, true, false, true, NULL, 0);
+    append_boundary("append-first-read-no-errno", summary, READ_ERROR, true, false, true, "", 0);
+    append_boundary("append-first-copy-no-errno", summary, COPY_ERROR, true, false, true, summary, strlen(summary) - 1);
+    append_boundary("append-first-positive-copy-error", summary, COPY_ERROR, false, true, true, summary, strlen(summary));
+    append_boundary("append-first-positive-copy-no-errno", summary, COPY_ERROR, true, true, true, summary, strlen(summary));
+    char complete[256]; assert(snprintf(complete, sizeof(complete), "%s%s", summary, new_row) > 0);
+    append_boundary("append-first-positive-row-error", summary, ROW_ERROR, false, true, true, complete, strlen(complete));
+    append_boundary("append-first-positive-row-no-errno", summary, ROW_ERROR, true, true, true, complete, strlen(complete));
+    append_failure_retry("append-preparation-retry-25", FOLDER_ERROR);
+    append_failure_retry("append-positive-copy-retry-25", COPY_ERROR);
     for (unsigned i = 0; i < 3; i++) if (remove(paths[i]) != 0) assert(errno == ENOENT);
     printf("%s %u ride history cases failures=%u handles=%u (native files; controlled UI/I/O)\n", failures ? "FAIL" : "PASS", cases, failures, handles);
     return failures ? 1 : 0;

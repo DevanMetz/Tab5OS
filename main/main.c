@@ -6742,10 +6742,14 @@ static void ride_load_history(void)
     if (!ride_history) return;
     int error = sd_ready ? 0 : sd_error_snapshot();
     if (!sd_ready && !error) error = ENODEV;
-    if (!error && storage_recover_replace(SD_PATH "/RIDES/SUMMARY.CSV", SD_PATH "/RIDES/SUMMARY.BAK") != 0)
-        error = errno ? errno : EIO;
+    if (!error) {
+        errno = 0;
+        if (storage_recover_replace(SD_PATH "/RIDES/SUMMARY.CSV", SD_PATH "/RIDES/SUMMARY.BAK") != 0)
+            error = errno ? errno : EIO;
+    }
     FILE *file = NULL;
     if (!error) {
+        errno = 0;
         file = fopen(SD_PATH "/RIDES/SUMMARY.CSV", "rb");
         if (!file && errno != ENOENT) error = errno ? errno : EIO;
     }
@@ -6760,7 +6764,12 @@ static void ride_load_history(void)
     if (file) {
         for (;;) {
             errno = 0;
-            if (!fgets(line, sizeof(line), file)) break;
+            char *entry = fgets(line, sizeof(line), file);
+            if (ferror(file)) {
+                error = errno ? errno : EIO;
+                break;
+            }
+            if (!entry) break;
             if (sscanf(line, "%lld,%u,%f,%f,%d,%d,%d,%d", &start, &duration, &distance,
                        &work, &average_power, &maximum_power, &average_hr, &maximum_hr) != 8) continue;
             rides++;
@@ -6768,7 +6777,7 @@ static void ride_load_history(void)
             total_distance += distance;
             if (maximum_power > best_power) best_power = maximum_power;
         }
-        if (ferror(file)) error = errno ? errno : EIO;
+        errno = 0;
         if (fclose(file) != 0 && !error) error = errno ? errno : EIO;
     }
     if (error) {
@@ -6789,17 +6798,32 @@ static bool ride_append_summary(unsigned duration)
         errno = error ? error : ENODEV;
         return false;
     }
-    if (mkdir(SD_PATH "/RIDES", 0775) != 0 && errno != EEXIST) return false;
+    errno = 0;
+    if (mkdir(SD_PATH "/RIDES", 0775) != 0 && errno != EEXIST) {
+        if (!errno) errno = EIO;
+        return false;
+    }
     const char *temporary_path = SD_PATH "/RIDES/SUMMARY.TMP";
     const char *final_path = SD_PATH "/RIDES/SUMMARY.CSV";
     const char *backup_path = SD_PATH "/RIDES/SUMMARY.BAK";
+    errno = 0;
     if (storage_recover_replace(final_path, backup_path) != 0) return false;
-    if (remove(temporary_path) != 0 && errno != ENOENT) return false;
+    errno = 0;
+    if (remove(temporary_path) != 0 && errno != ENOENT) {
+        if (!errno) errno = EIO;
+        return false;
+    }
+    errno = 0;
     FILE *source = fopen(final_path, "rb");
-    if (!source && errno != ENOENT) return false;
+    if (!source && errno != ENOENT) {
+        if (!errno) errno = EIO;
+        return false;
+    }
+    errno = 0;
     FILE *file = fopen(temporary_path, "wb");
     if (!file) {
         int error = errno ? errno : EIO;
+        errno = 0;
         if (source) fclose(source);
         errno = error;
         return false;
@@ -6818,27 +6842,39 @@ static bool ride_append_summary(unsigned duration)
         if (length) {
             empty = false;
             last = (unsigned char)buffer[length - 1];
-            if (fwrite(buffer, 1, length, file) != length) error = errno ? errno : EIO;
+            errno = 0;
+            if (fwrite(buffer, 1, length, file) != length || ferror(file)) error = errno ? errno : EIO;
         }
         if (length < sizeof(buffer)) break;
     }
+    errno = 0;
     if (source && fclose(source) != 0 && !error) error = errno ? errno : EIO;
-    if (!error && !empty && last != '\n' && fputc('\n', file) == EOF) error = errno ? errno : EIO;
-    if (!error && empty &&
-        fputs("start_unix,duration_s,distance_km,work_kj,avg_power_w,max_power_w,avg_hr,max_hr\n", file) < 0)
-        error = errno ? errno : EIO;
-    if (!error &&
-        fprintf(file, "%lld,%u,%.3f,%.1f,%d,%d,%d,%d\n", (long long)ride_started_at, duration,
+    if (!error && !empty && last != '\n') {
+        errno = 0;
+        if (fputc('\n', file) == EOF || ferror(file)) error = errno ? errno : EIO;
+    }
+    if (!error && empty) {
+        errno = 0;
+        if (fputs("start_unix,duration_s,distance_km,work_kj,avg_power_w,max_power_w,avg_hr,max_hr\n", file) < 0 || ferror(file))
+            error = errno ? errno : EIO;
+    }
+    if (!error) {
+        errno = 0;
+        if (fprintf(file, "%lld,%u,%.3f,%.1f,%d,%d,%d,%d\n", (long long)ride_started_at, duration,
                      ride_distance_km, ride_work_kj,
                      ride_power_samples ? (int)(ride_power_sum / ride_power_samples) : 0, ride_max_power,
-                     ride_hr_samples_count ? (int)(ride_hr_sum / ride_hr_samples_count) : 0, ride_max_hr) < 0)
-        error = errno ? errno : EIO;
+                     ride_hr_samples_count ? (int)(ride_hr_sum / ride_hr_samples_count) : 0, ride_max_hr) < 0 || ferror(file))
+            error = errno ? errno : EIO;
+    }
     if (error) {
+        errno = 0;
         fclose(file);
+        errno = 0;
         remove(temporary_path);
         errno = error;
         return false;
     }
+    errno = 0;
     return storage_commit_replace_file(&file, temporary_path, final_path, backup_path) == 0;
 }
 

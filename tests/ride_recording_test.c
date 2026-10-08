@@ -35,7 +35,7 @@
 #endif
 #include "ride_recording_config.inc"
 enum { INDEX_TMP = 200, INDEX_CSV, INDEX_BAK, PATHS };
-enum point { NONE, ROOT, DATE, STAT, OPEN, FDOPEN, HEADER, ROW, FLUSH, SYNC, CLOSE, PUBLISH, INDEX_OPEN, POINTS };
+enum point { NONE, ROOT, DATE, STAT, OPEN, FDOPEN, HEADER, ROW, FLUSH, SYNC, CLOSE, PUBLISH, INDEX_OPEN, INDEX_READ, POINTS };
 static enum point failed_point;
 static unsigned failed_call, calls[POINTS], handles, descriptors, publications, index_publications, reports, cases, failures, ring_requests;
 static int failed_errno, reported_error;
@@ -137,6 +137,7 @@ static FILE *fixture_fopen(const char *path, const char *mode)
 {
     unsigned slot = path_slot(path); assert(slot >= 200);
     if (slot == INDEX_TMP && inject(INDEX_OPEN)) return NULL;
+    if (slot == INDEX_CSV && !strcmp(mode, "rb") && inject(INDEX_READ)) return NULL;
     FILE *file = fopen(paths[slot], mode); if (file) { track(file, slot); if (strchr(mode, 'w')) owned[slot] = true; } return file;
 }
 static int fixture_remove(const char *path)
@@ -365,6 +366,15 @@ int main(void)
     no_sd_case(false); no_sd_case(true); collisions(); recovery_case(1); recovery_case(25);
     prepare(NONE, 0); assert(ride_start()); step(1); step(2); failed_point = INDEX_OPEN; failed_errno = ENOSPC; bool saved = ride_stop();
     result("summary-failure", saved && stopped() && publications == 1 && !index_publications && reports == 1 && reported_error == ENOSPC && strstr(ride_notice, "history index update failed"), matches(100, complete) && index_untouched());
+    for (unsigned missing = 0; missing < 2; missing++) {
+        prepare(NONE, 0); assert(ride_start()); step(1); step(2); failed_point = INDEX_READ; failed_errno = missing ? 0 : EACCES;
+        saved = ride_stop();
+        result(missing ? "summary-source-open-no-errno" : "summary-source-open-error",
+               saved && stopped() && publications == 1 && !index_publications && reports == 1 &&
+               reported_error == (missing ? EIO : EACCES) && calls[INDEX_READ] == 2 && strstr(ride_notice, "history index update failed"),
+               matches(0, NULL) && matches(100, complete) && index_untouched() &&
+               !strcmp(labels[1].text, "History: 1 rides  |  0.6 mi  |  0.0 hr  |  best 100 W"));
+    }
     prepare(NONE, 0); sd_ready = false; ride_button_clicked(NULL); result("no-sd-admission", stopped() && !reports && !calls[ROOT] && strstr(labels[0].text, "unavailable"), index_untouched());
     prepare(NONE, 0); kickr_subscribed = false; ride_button_clicked(NULL); result("no-subscription-admission", stopped() && !reports && !calls[ROOT] && strstr(labels[0].text, "connect"), index_untouched());
     clean(); for (int d = 1; d >= 0; d--) if (owned_directories[d]) { assert(native_rmdir(directories[d]) == 0); owned_directories[d] = false; }
