@@ -95,6 +95,8 @@ The Scope/I2C capture and saved serial CSV viewers require a successful close be
 
 Files dispatches supported CSVs to those viewers before its text fallback. The fallback reads at most 4,095 bytes into its existing static buffer and publishes them only after checking the stream and closing successfully. Failed open/read/close operations display the first error; missing errno becomes EIO. Error reporting to the shared SD callback is scoped to the exact `/sdcard/` prefix. Native files and controlled UI/probe/path boundaries check this callback; physical storage and panel behavior remain open.
 
+Files directory browsing resets errno before each directory read so per-entry `stat` errors cannot masquerade as an enumeration error at EOF. A failed read or close keeps the visited entries visible with an explicit incomplete-list warning, preserving the first error. Entry capacity and skipped long paths are disclosed. The existing 64 path slots include a parent-navigation slot when needed, and each path remains bounded to 256 bytes. SD root and descendant errors reach the shared callback. Native directory/file checks verify these transitions and callback path ownership; UI, mount paths and error injection are controlled.
+
 See [Storage and compatibility contract](compatibility.md) and [Data formats](data-formats.md).
 
 ## Network and radio

@@ -17,6 +17,7 @@ Python 3 and Node.js are needed for the quick checks. The configuration checks a
 | Ebook page loading or navigation | [Ebook pages](#ebook-pages) and a firmware build. |
 | Scope/I2C capture or saved serial CSV viewers | [CSV viewer storage and UI](#csv-viewer-storage-and-ui), existing serial-copy checks and a firmware build. |
 | Files fallback text previews | [Files text previews](#files-text-previews) and a firmware build. |
+| Files directory browsing | [Files directories](#files-directories) and a firmware build. |
 | Offline apps, SPI or I2C editor/result flows | [Offline and peripheral UI](#offline-and-peripheral-ui). |
 | Serial, saved serial logs or RTU Frames | [Serial and RTU UI](#serial-and-rtu-ui). |
 | Modbus TCP, NTP, Wake-on-LAN, UDP or HTTP fixtures | [Network fixtures and UI](#network-fixtures-and-ui). |
@@ -175,6 +176,18 @@ This portable runner compiles the actual `open_file` callback from `main/main.c`
 UI, CSV viewer probes and the SD error callback are controlled. Logical internal/SD paths map to one owned native fixture file. These checks verify callback dispatch, exact preview/error text and SD callback arguments; they do not run the shared SD callback's filtering, actual LVGL, mount handling or physical storage/panel behavior. The real CSV viewer checks above cover the delegated viewers separately. The 4,095-byte cap and existing NUL/text behavior remain in place.
 
 Generated callback/config source, full main/function/test hashes and compile/runtime logs stay under `build/file-preview/`. Linux CI retains `file-preview-logs`, including available compiler/test failure diagnostics. These 36 cases are separate from the Windows native total.
+
+## Files directories
+
+```powershell
+python tools/test_files_directory.py --compiler 'C:/path/to/clang.exe'
+```
+
+The portable runner compiles the actual `show_files` callback. Its 31 cases exercise native directory enumeration and `stat`, file/directory classification, explicit dot entries, empty directories, mount selection, entry/path limits, open/read/close faults, first-error preservation, stale errno, callback path ownership, reopen recovery and 25 success/error/success cycles. Windows Find APIs and POSIX directory APIs provide the host entries; native dot entries are normalized before separate dot-injection checks. Every case verifies unchanged file bytes and closed directory handles. The previous callback fails 21 controls: 14 silent read/close/recovery cases, three limit disclosures and four open-error details/reporting cases.
+
+UI and SD callbacks, logical mount paths and directory/stat failures are controlled. A null read with zero errno remains EOF; the fixture does not claim to detect an unreported backend error. The SD callback's filtering and SDK mount implementation are not executed. These checks do not establish LVGL allocation, panel rendering, physical SD, latency or power-loss behavior. The existing 64 path slots include parent navigation; paths stay bounded to 256 bytes.
+
+Generated callback/config source, full main/function/test hashes and compile/result logs stay under `build/files-directory/`. Linux CI retains `files-directory-logs`, including available failure diagnostics. These 31 checks are separate from the Windows native total.
 
 ## OTA manifests
 

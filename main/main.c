@@ -4311,19 +4311,33 @@ static void show_files(const char *path)
         lv_obj_add_event_cb(up, home_clicked, LV_EVENT_CLICKED, NULL);
     }
 
+    bool sd_directory = !strcmp(path, SD_PATH) || !strncmp(path, SD_PATH "/", sizeof(SD_PATH));
+    errno = 0;
     DIR *dir = opendir(path);
     if (!dir) {
-        lv_list_add_text(list, "Could not open directory");
+        int error = errno ? errno : EIO;
+        if (sd_directory) sd_record_error(error);
+        char message[96];
+        snprintf(message, sizeof(message), "Could not open directory: %s", strerror(error));
+        lv_list_add_text(list, message);
         return;
     }
-    struct dirent *entry;
-    while (file_path_count < 64 && (entry = readdir(dir))) {
+    int error = 0;
+    size_t skipped = 0;
+    while (file_path_count < sizeof(file_paths) / sizeof(file_paths[0])) {
+        errno = 0;
+        struct dirent *entry = readdir(dir);
+        if (!entry) {
+            error = errno;
+            break;
+        }
         if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
         char *full = file_paths[file_path_count++];
         size_t path_len = strlen(path);
         size_t name_len = strlen(entry->d_name);
         if (path_len + name_len + 2 > sizeof(file_paths[0])) {
             file_path_count--;
+            skipped++;
             continue;
         }
         memcpy(full, path, path_len);
@@ -4334,7 +4348,21 @@ static void show_files(const char *path)
         lv_obj_t *item = lv_list_add_button(list, is_dir ? LV_SYMBOL_DIRECTORY : LV_SYMBOL_FILE, entry->d_name);
         lv_obj_add_event_cb(item, file_clicked, LV_EVENT_CLICKED, full);
     }
-    closedir(dir);
+    errno = 0;
+    if (closedir(dir) != 0 && !error) error = errno ? errno : EIO;
+    if (error) {
+        if (sd_directory) sd_record_error(error);
+        char message[96];
+        snprintf(message, sizeof(message), "Directory listing incomplete: %s", strerror(error));
+        lv_list_add_text(list, message);
+    }
+    if (file_path_count == sizeof(file_paths) / sizeof(file_paths[0]))
+        lv_list_add_text(list, "Directory entry limit reached");
+    if (skipped) {
+        char message[96];
+        snprintf(message, sizeof(message), "Skipped %u paths that exceed the path limit", (unsigned)skipped);
+        lv_list_add_text(list, message);
+    }
 }
 
 static void files_clicked(lv_event_t *event)
