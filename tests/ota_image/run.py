@@ -20,6 +20,7 @@ MODES = (
     "informational", "trailer", "partial-header", "header-overflow", "trailer-truncated",
     "header-trickle", "description-trickle", "body-trickle", "transport-allocation", "transport-init", "metadata-repeat",
     "large-length", "aliased-length", "narrow-length", "max-length", "zero-padded-length",
+    "oversized-stream", "oversized-close-delimited", "oversized-stream-matching-hash",
 )
 FETCH_MODES = (
     "manifest-direct", "manifest-fragmented", "manifest-chunked", "manifest-close-delimited",
@@ -38,6 +39,7 @@ ERRORS = {"wrong-hash": 0x109, "wrong-size": 0x104, "wrong-version": 0x10a, "sho
           "header-trickle": 0x107, "description-trickle": 0x107, "body-trickle": 0x107,
           "transport-allocation": 0x101, "transport-init": 0x101,
           "large-length": 0x104, "aliased-length": 0x104, "narrow-length": 0x104, "max-length": 0x108,
+          "oversized-stream": 0x109, "oversized-close-delimited": 0x109, "oversized-stream-matching-hash": 0x109,
           "manifest-incomplete-length": 0x104, "manifest-incomplete-chunked": 0x104,
           "manifest-truncated-json": 0x108, "manifest-overflow": 0x104, "manifest-nul-suffix": 0x108,
           "manifest-large-length": 0x104, "manifest-max-length": 0x108,
@@ -111,6 +113,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 body.append(0)
             elif mode == "short-image-matching-hash":
                 body = body[:-1]
+            elif kind in ("oversized-stream", "oversized-close-delimited", "oversized-stream-matching-hash"):
+                body *= 4
             if kind in ("partial-header", "header-deadline"):
                 response = b"HTTP/1.1 200 OK\r\nX-Probe: unfinished-value"
             elif kind == "header-overflow":
@@ -119,7 +123,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             elif kind == "http-error":
                 response = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             elif kind in ("chunked", "incomplete-chunked", "long-image", "long-image-matching-hash", "short-image-matching-hash",
-                          "trailer", "trailer-truncated", "metadata-repeat"):
+                          "trailer", "trailer-truncated", "metadata-repeat", "oversized-stream", "oversized-stream-matching-hash"):
                 transfer_name = b"tRaNsFeR-EnCoDiNg" if kind == "incomplete-chunked" else b"Transfer-Encoding"
                 response = b"HTTP/1.1 200 OK\r\n" + transfer_name + b": chunked\r\nConnection: close\r\n\r\n"
                 for offset in range(0, len(body), 173):
@@ -131,7 +135,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     response += b"0\r\nX-Probe: unfinished-value"
                 elif kind != "incomplete-chunked":
                     response += b"0\r\n\r\n"
-            elif kind == "close-delimited":
+            elif kind in ("close-delimited", "oversized-close-delimited"):
                 response = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" + body
             else:
                 declared = len(body)
@@ -186,8 +190,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
 def run_case(executable, output, mode, data):
     source = output / "fixture.bin"
     digest = hashlib.sha256(data).hexdigest()
-    digest_argument = hashlib.sha256(data + b"\0").hexdigest() if mode == "long-image-matching-hash" else (
-        hashlib.sha256(data[:-1]).hexdigest() if mode == "short-image-matching-hash" else digest)
+    digest_data = data
+    if mode == "oversized-stream-matching-hash":
+        digest_data = data * 4
+    elif mode == "long-image-matching-hash":
+        digest_data = data + b"\0"
+    elif mode == "short-image-matching-hash":
+        digest_data = data[:-1]
+    digest_argument = hashlib.sha256(digest_data).hexdigest()
     with http.server.HTTPServer(("127.0.0.1", 0), Handler) as server:
         server.mode = mode
         server.image = data

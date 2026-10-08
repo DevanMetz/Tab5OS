@@ -422,6 +422,11 @@ esp_err_t ota_manifest_install(const ota_manifest_t *manifest,
             set_message(message, message_size, "Image download exceeded 5 minutes");
             goto abort;
         }
+        if (hash.bytes > manifest->size) {
+            set_message(message, message_size, "Downloaded image size does not match manifest");
+            error = ESP_ERR_INVALID_CRC;
+            goto abort;
+        }
     } while (error == ESP_ERR_HTTPS_OTA_IN_PROGRESS);
     if (error != ESP_OK || !esp_https_ota_is_complete_data_received(handle) ||
         !http_transport_response_complete(transport)) {

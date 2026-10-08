@@ -205,8 +205,15 @@ int main(int argc, char **argv)
             assert(message[0] && selected == 0);
             if (strcmp(mode, "boot-fault")) assert(!boots);
             if (!strcmp(mode, "wrong-hash") || !strcmp(mode, "corrupt-image") || !strcmp(mode, "long-image") ||
-                !strcmp(mode, "long-image-matching-hash") || !strcmp(mode, "short-image-matching-hash"))
+                !strcmp(mode, "long-image-matching-hash") || !strcmp(mode, "short-image-matching-hash") ||
+                !strcmp(mode, "oversized-stream") || !strcmp(mode, "oversized-close-delimited") ||
+                !strcmp(mode, "oversized-stream-matching-hash"))
                 assert(ends == 0 && aborts == 1);
+            if (!strcmp(mode, "oversized-stream") || !strcmp(mode, "oversized-close-delimited") ||
+                !strcmp(mode, "oversized-stream-matching-hash")) {
+                assert(begins == 1 && written_size > expected_size && written_size <= expected_size + 1024);
+                assert(image_event_bytes == (int64_t)written_size);
+            }
             if (!strcmp(mode, "wrong-version") || !strcmp(mode, "wrong-size") || !strcmp(mode, "large-length") ||
                 !strcmp(mode, "aliased-length") || !strcmp(mode, "narrow-length") || !strcmp(mode, "short-header"))
                 assert(begins == 0 && writes == 0 && ends == 0 && aborts == 0);
