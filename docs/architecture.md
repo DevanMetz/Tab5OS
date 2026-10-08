@@ -85,6 +85,8 @@ CSV tail repair uses a 512-byte scratch buffer and scans backwards by blocks bef
 
 Notes uses a temporary PSRAM buffer to load an entire file of up to 65,535 bytes and frees that buffer after LVGL copies the text. It applies the editor's character limit after loading, using LVGL's bulk text path. Recovery/read/close failures, oversized files and NUL data disable editing and Save; the save callback rechecks ownership, SD availability and byte length before changing paths. The launcher leave hook clears its editor pointer and permission before content deletion. The existing replacement helper still syncs/closes `NOTE.TMP`, retains the previous complete generation in `NOTE.BAK`, and reports publication failures. Real LVGL checks use the unchanged 96 KiB pool; physical SD and panel behavior remain open.
 
+Ride history shows totals only after recovery, reading and closing the summary succeed; a missing index is valid empty history. Storage errors display an unavailable message and update the shared SD error. Appending checks known SD availability, directory creation and temporary-file removal before copying. A failed read chunk is rejected before writing, and the first read/write/open error survives source/destination close and temporary cleanup failures. The existing replacement helper still owns sync, backup, publication and rollback. Native tests verify exact file bytes and closed modeled handles; physical FAT/SD and panel behavior remain open.
+
 See [Storage and compatibility contract](compatibility.md) and [Data formats](data-formats.md).
 
 ## Network and radio

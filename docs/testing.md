@@ -12,6 +12,7 @@ Python 3 and Node.js are needed for the quick checks. The configuration checks a
 | Relay, parsers, calculations, clipboard or file formats | [Core command reference](#core-command-reference); choose the affected module and any independent reference test. |
 | Storage writes or incomplete CSV rows | [Core command reference](#core-command-reference), [CSV tail recovery](#csv-tail-recovery) and a firmware build. |
 | Notes loading, saving or lifecycle | [Notes storage and UI](#notes-storage-and-ui) and a firmware build. |
+| Ride history loading or summary appends | [Ride history storage](#ride-history-storage) and a firmware build. |
 | Offline apps, SPI or I2C editor/result flows | [Offline and peripheral UI](#offline-and-peripheral-ui). |
 | Serial, saved serial logs or RTU Frames | [Serial and RTU UI](#serial-and-rtu-ui). |
 | Modbus TCP, NTP, Wake-on-LAN, UDP or HTTP fixtures | [Network fixtures and UI](#network-fixtures-and-ui). |
@@ -110,6 +111,18 @@ The portable runner compiles four unchanged Notes functions extracted from `main
 The optional real LVGL mode runs five additional cases against the cached pinned library with its existing 96 KiB pool. It checks complete 65,535-byte ASCII and 65,534-byte UTF-8 load/save, an oversized original file, a multibyte draft whose byte count exceeds the limit, and 25 reopen cycles with identical free bytes and allocation counts. Text is installed before the character limit so LVGL uses its bulk path. Files are native; SD faults and PSRAM allocation APIs are controlled. This does not prove physical rendering, card latency, removal or power-loss durability.
 
 Generated callbacks/config/storage source, full main/function/storage/header/test hashes and compile/result logs stay under the selected output directory. Linux CI retains the 36-case evidence as `notes-io-logs`. Windows CI runs the five real LVGL cases after the existing seven suites and retains separate `notes-ui-logs`; those five add to the prior 815 native checks. Both artifacts retain diagnostics when their test step fails.
+
+## Ride history storage
+
+```powershell
+python tools/test_ride_history.py --compiler 'C:/path/to/clang.exe'
+```
+
+This portable fixture compiles the two actual ride-history callbacks extracted from `main/main.c` and the complete `storage_io.c`. Its 50 cases check missing/empty indexes, exact aggregate totals and appended rows, backup recovery, unavailable SD, preparation/open/read/write/flush/sync/close/publication/rollback errors and 25 history reopens. Every case independently checks final, backup and temporary bytes with no remaining modeled file handles. UI and I/O error boundaries are controlled; the files use the native filesystem.
+
+The preceding callbacks fail 24 controls, including misleading totals after recovery/read/close errors, ignored SD/preparation errors and lost first errors during cleanup. Compounded read/copy/open failures retain their original error when later closes or removal fail. Missing read/write errno falls back to `EIO`; a successful earlier history read cannot supply a stale errno for a later failure. Multi-block and full-count read-error cases reject the failed chunk before copying. Cleanup failure can retain an unpublished partial temporary file, and publication/rollback failures can retain recovery generations. These checks do not validate every CSV field or prove physical FAT/SD latency, removal, power cuts or panel rendering.
+
+Generated callbacks/storage source, full main/function/storage/header/test hashes and compile/result logs stay under `build/ride-history/`. Linux CI runs the fixture and retains these files as `ride-history-logs`, including diagnostics when compilation or execution fails. Its 50 cases are separate from the Windows native total.
 
 ## OTA manifests
 

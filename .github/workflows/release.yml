@@ -33,6 +33,8 @@ jobs:
         run: python3 tools/test_storage_csv_tail.py --compiler cc
       - name: Test Notes storage
         run: python3 tools/test_notes_io.py --compiler cc
+      - name: Test ride history storage
+        run: python3 tools/test_ride_history.py --compiler cc
       - name: Test capture reader
         run: |
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/capture_data.c tests/capture_data_test.c -o "$RUNNER_TEMP/capture_data_test"
@@ -128,6 +130,20 @@ jobs:
             build/notes-io/notes_callbacks.inc
             build/notes-io/notes_config.inc
             build/notes-io/storage_source.inc
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Retain ride history test evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ride-history-logs
+          path: |
+            build/ride-history/compile.log
+            build/ride-history/result.log
+            build/ride-history/source.json
+            build/ride-history/ride_history.inc
+            build/ride-history/storage_source.inc
           if-no-files-found: warn
           retention-days: 14
 

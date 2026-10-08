@@ -51,6 +51,8 @@ Ride summary header:
 start_unix,duration_s,distance_km,work_kj,avg_power_w,max_power_w,avg_hr,max_hr
 ```
 
+History totals require successful backup recovery, open, read and close. A missing index shows empty history; storage errors show `History unavailable` instead of zero or partial totals. Summary appends check SD availability and preparation errors, reject failed read chunks before copying, and preserve the first error through cleanup. Failed cleanup can leave an unpublished `SUMMARY.TMP`; publication or rollback errors can also retain the temporary or backup generation. The individual ride CSV remains authoritative. Native files and controlled errors verify these boundaries; physical SD and power-loss behavior remain hardware checks.
+
 Heart-rate header:
 
 ```text
