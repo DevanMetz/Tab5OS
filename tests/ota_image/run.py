@@ -21,6 +21,7 @@ MODES = (
     "header-trickle", "description-trickle", "body-trickle", "transport-allocation", "transport-init", "metadata-repeat",
     "large-length", "aliased-length", "narrow-length", "max-length", "zero-padded-length",
     "oversized-stream", "oversized-close-delimited", "oversized-stream-matching-hash",
+    "sha-start", "sha-update-first", "sha-update-late", "sha-finish", "small-manifest",
 )
 FETCH_MODES = (
     "manifest-direct", "manifest-fragmented", "manifest-chunked", "manifest-close-delimited",
@@ -40,6 +41,7 @@ ERRORS = {"wrong-hash": 0x109, "wrong-size": 0x104, "wrong-version": 0x10a, "sho
           "transport-allocation": 0x101, "transport-init": 0x101,
           "large-length": 0x104, "aliased-length": 0x104, "narrow-length": 0x104, "max-length": 0x108,
           "oversized-stream": 0x109, "oversized-close-delimited": 0x109, "oversized-stream-matching-hash": 0x109,
+          "sha-update-first": 0x109, "sha-update-late": 0x109, "sha-finish": 0x109, "small-manifest": 0x109,
           "manifest-incomplete-length": 0x104, "manifest-incomplete-chunked": 0x104,
           "manifest-truncated-json": 0x108, "manifest-overflow": 0x104, "manifest-nul-suffix": 0x108,
           "manifest-large-length": 0x104, "manifest-max-length": 0x108,
@@ -123,7 +125,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             elif kind == "http-error":
                 response = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             elif kind in ("chunked", "incomplete-chunked", "long-image", "long-image-matching-hash", "short-image-matching-hash",
-                          "trailer", "trailer-truncated", "metadata-repeat", "oversized-stream", "oversized-stream-matching-hash"):
+                          "trailer", "trailer-truncated", "metadata-repeat", "oversized-stream", "oversized-stream-matching-hash", "small-manifest"):
                 transfer_name = b"tRaNsFeR-EnCoDiNg" if kind == "incomplete-chunked" else b"Transfer-Encoding"
                 response = b"HTTP/1.1 200 OK\r\n" + transfer_name + b": chunked\r\nConnection: close\r\n\r\n"
                 for offset in range(0, len(body), 173):
@@ -232,7 +234,7 @@ def run_case(executable, output, mode, data):
         print(log, end="", flush=True)
         assert completed.returncode == 0, mode
         kind = mode.removeprefix("manifest-")
-        assert len(server.requests) == (0 if kind in ("transport-allocation", "transport-init") else
+        assert len(server.requests) == (0 if kind in ("transport-allocation", "transport-init", "sha-start") else
             26 if kind in ("repeat", "metadata-repeat") else 3 if kind == "redirect-chain" else 2 if kind.startswith("redirect-") else 1)
         return evidence
 

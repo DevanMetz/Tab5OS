@@ -31,6 +31,32 @@ static unsigned clock_scale = 1;
 int64_t ota_fixture_real_time(void);
 int64_t esp_timer_get_time(void) { return ota_fixture_real_time() * clock_scale; }
 
+/* Controlled API failures; normal calls reach the pinned SHA implementation. */
+static unsigned sha_injected;
+static size_t sha_update_bytes;
+int ota_fixture_sha256_starts(mbedtls_sha256_context *context, int is224);
+int ota_fixture_sha256_update(mbedtls_sha256_context *context, const unsigned char *data, size_t size);
+int ota_fixture_sha256_finish(mbedtls_sha256_context *context, unsigned char output[32]);
+int mbedtls_sha256_starts(mbedtls_sha256_context *context, int is224)
+{
+    if (!strcmp(mode, "sha-start")) { sha_injected++; return MBEDTLS_ERR_SHA256_BAD_INPUT_DATA; }
+    return ota_fixture_sha256_starts(context, is224);
+}
+int mbedtls_sha256_update(mbedtls_sha256_context *context, const unsigned char *data, size_t size)
+{
+    sha_update_bytes += size;
+    if (!strcmp(mode, "sha-update-first") || (!strcmp(mode, "sha-update-late") && sha_update_bytes > 1024)) {
+        sha_injected++;
+        return MBEDTLS_ERR_SHA256_BAD_INPUT_DATA;
+    }
+    return ota_fixture_sha256_update(context, data, size);
+}
+int mbedtls_sha256_finish(mbedtls_sha256_context *context, unsigned char output[32])
+{
+    if (!strcmp(mode, "sha-finish")) { sha_injected++; return MBEDTLS_ERR_SHA256_BAD_INPUT_DATA; }
+    return ota_fixture_sha256_finish(context, output);
+}
+
 esp_err_t esp_event_post(const char *base, int32_t id, const void *data, size_t size, unsigned ticks)
 {
     (void)ticks;
@@ -134,6 +160,7 @@ int main(int argc, char **argv)
     }
     if (!strcmp(mode, "wrong-hash")) manifest.sha256[0] ^= 1;
     if (!strcmp(mode, "wrong-size")) manifest.size++;
+    if (!strcmp(mode, "small-manifest")) manifest.size = 512;
     uint8_t expected_digest[32];
     memcpy(expected_digest, manifest.sha256, sizeof(expected_digest));
     esp_err_t expected_error = (esp_err_t)strtol(argv[5], NULL, 0);
@@ -149,6 +176,8 @@ int main(int argc, char **argv)
     for (unsigned cycle = 0; cycle < cycles; cycle++) {
         begins = writes = ends = aborts = boots = selected = active = redirect_events = 0;
         written_size = 0;
+        sha_injected = 0;
+        sha_update_bytes = 0;
         image_event_bytes = non_image_event_bytes = previous_non_image_bytes = 0;
         response_length = 0;
         response_complete = false;
@@ -204,6 +233,14 @@ int main(int argc, char **argv)
         } else {
             assert(message[0] && selected == 0);
             if (strcmp(mode, "boot-fault")) assert(!boots);
+            if (!strcmp(mode, "sha-start") || !strcmp(mode, "sha-update-first") || !strcmp(mode, "small-manifest"))
+                assert(!begins && !writes && !ends && !aborts && !written_size);
+            if (!strcmp(mode, "sha-update-first") || !strcmp(mode, "sha-update-late"))
+                assert(!strcmp(message, "Could not verify image SHA-256"));
+            if (!strcmp(mode, "sha-update-late"))
+                assert(begins == 1 && written_size == 2048 && ends == 0 && aborts == 1);
+            if (!strcmp(mode, "sha-finish"))
+                assert(begins == 1 && written_size == expected_size && ends == 0 && aborts == 1);
             if (!strcmp(mode, "wrong-hash") || !strcmp(mode, "corrupt-image") || !strcmp(mode, "long-image") ||
                 !strcmp(mode, "long-image-matching-hash") || !strcmp(mode, "short-image-matching-hash") ||
                 !strcmp(mode, "oversized-stream") || !strcmp(mode, "oversized-close-delimited") ||
@@ -232,6 +269,10 @@ int main(int argc, char **argv)
            cycles, (unsigned long)handles_before, (unsigned long)handles_after);
     if (fetching && response_finished) printf("HTTP_RESPONSE %s content_length=%lld complete=%u\n",
                                               mode, (long long)response_length, (unsigned)response_complete);
+    if (!strncmp(mode, "sha-", 4)) {
+        assert(sha_injected == 1);
+        printf("SHA_FAULT %s injections=%u update_bytes=%zu\n", mode, sha_injected, sha_update_bytes);
+    }
     http_dns_test_close();
     WSACleanup();
     return 0;

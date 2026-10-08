@@ -90,6 +90,8 @@ set_source_files_properties(${SDK_SOURCES} PROPERTIES COMPILE_OPTIONS
     "-Wno-unused-parameter;-Wno-sign-compare;-Wno-enum-conversion;-include;${HTTP_TESTS}/track.h")
 set_source_files_properties("${TAB5_ROOT}/tests/modbus_network/host.c" PROPERTIES
     COMPILE_DEFINITIONS "esp_timer_get_time=ota_fixture_real_time")
+set_source_files_properties("${MBEDTLS}/library/sha256.c" PROPERTIES COMPILE_DEFINITIONS
+    "mbedtls_sha256_starts=ota_fixture_sha256_starts;mbedtls_sha256_update=ota_fixture_sha256_update;mbedtls_sha256_finish=ota_fixture_sha256_finish")
 target_link_libraries(image_test PRIVATE ws2_32)
 '@ | Set-Content -LiteralPath (Join-Path $build 'CMakeLists.txt')
     & $cmake -S $build -B "$build/out" -G Ninja "-DTAB5_ROOT=$($root.Replace('\', '/'))" "-DTAB5_IDF=$($IdfPath.Replace('\', '/'))" "-DCMAKE_C_COMPILER=$Compiler" "-DCMAKE_MAKE_PROGRAM=$ninja" -DCMAKE_BUILD_TYPE=Debug
