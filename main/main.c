@@ -457,6 +457,7 @@ static volatile bool ebook_download_busy;
 static volatile bool ebook_download_done;
 static lv_obj_t *ota_status;
 static lv_obj_t *ota_button;
+static lv_obj_t *system_ota_info;
 static lv_timer_t *ota_timer;
 static lv_timer_t *gpio_timer;
 static lv_obj_t *i2c_status;
@@ -4069,6 +4070,7 @@ static void clear_content(void)
     ebook_next = NULL;
     ota_status = NULL;
     ota_button = NULL;
+    system_ota_info = NULL;
     i2c_status = NULL;
     i2c_devices = NULL;
     i2c_address_label = NULL;
@@ -5308,6 +5310,25 @@ static void system_self_test(void)
     assert(!wifi_forget_confirmation_valid(false, 100, 100));
 }
 
+static void system_refresh_ota(void)
+{
+    if (!system_ota_info) return;
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    const char *state_text = esp_ota_get_state_partition(running, &state) == ESP_OK
+                             ? ota_state_name(state) : "not tracked";
+    char last_rollback[40] = "none recorded";
+    const esp_partition_t *invalid = esp_ota_get_last_invalid_partition();
+    if (invalid) {
+        esp_app_desc_t description;
+        if (esp_ota_get_partition_description(invalid, &description) == ESP_OK)
+            snprintf(last_rollback, sizeof(last_rollback), "%s", description.version);
+    }
+    lv_label_set_text_fmt(system_ota_info,
+        "OTA image: %s\nLast OTA: %s\nInvalid OTA image: %s",
+        state_text, ota_last_result, last_rollback);
+}
+
 static void storage_format_clicked(lv_event_t *event)
 {
     if (internal_ready || ota_busy) return;
@@ -5326,7 +5347,10 @@ static void storage_format_clicked(lv_event_t *event)
         lv_label_set_text(storage_status, "Internal storage is ready");
         lv_label_set_text(storage_format_label, "Internal storage ready");
         lv_obj_add_state(lv_event_get_target(event), LV_STATE_DISABLED);
-        if (ota_health_window_elapsed) validate_running_ota();
+        if (ota_health_window_elapsed) {
+            validate_running_ota();
+            system_refresh_ota();
+        }
     } else {
         lv_label_set_text_fmt(storage_status, "Initialization failed: %s", esp_err_to_name(storage_init_error));
         lv_label_set_text(storage_format_label, "Try initialization again");
@@ -5352,16 +5376,6 @@ static void system_clicked(lv_event_t *event)
         snprintf(running_text, sizeof(running_text), "%s @ 0x%08lx (%lu KB)",
                  running->label, (unsigned long)running->address,
                  (unsigned long)(running->size / 1024));
-    esp_ota_img_states_t ota_state = ESP_OTA_IMG_UNDEFINED;
-    const char *ota_state_text = esp_ota_get_state_partition(running, &ota_state) == ESP_OK
-                                 ? ota_state_name(ota_state) : "not tracked";
-    char last_rollback[40] = "none recorded";
-    const esp_partition_t *invalid = esp_ota_get_last_invalid_partition();
-    if (invalid) {
-        esp_app_desc_t description;
-        if (esp_ota_get_partition_description(invalid, &description) == ESP_OK)
-            snprintf(last_rollback, sizeof(last_rollback), "%s", description.version);
-    }
     char internal_text[64] = "unavailable";
     size_t internal_total = 0, internal_used = 0;
     if (internal_ready && esp_spiffs_info("storage", &internal_total, &internal_used) == ESP_OK)
@@ -5390,7 +5404,7 @@ static void system_clicked(lv_event_t *event)
         "Reset: %s\nUptime: %lu d %02lu:%02lu\n"
         "Internal heap: %lu KB free / %lu KB minimum\nPSRAM: %lu KB free / %lu KB total\n\n"
         "Settings: %s\nInternal: %s\nSD card: %s\nWi-Fi: %s\n"
-        "Running app: %s\nOTA image: %s\nLast OTA: %s\nInvalid OTA image: %s",
+        "Running app: %s",
         app->version, ESP_IDF_VERSION_MAJOR, ESP_IDF_VERSION_MINOR,
         ESP_IDF_VERSION_PATCH, elf_hash,
         chip.revision / 100, chip.revision % 100, chip.cores,
@@ -5404,8 +5418,12 @@ static void system_clicked(lv_event_t *event)
         nvs_init_error == ESP_OK ? "ready" : esp_err_to_name(nvs_init_error),
         internal_text, sd_text,
         wifi_connected ? wifi_ip : wifi_ready ? "disconnected" : "unavailable",
-        running_text, ota_state_text, ota_last_result, last_rollback);
+        running_text);
     lv_obj_set_style_text_line_space(info, 8, 0);
+    system_ota_info = lv_label_create(content);
+    lv_obj_set_width(system_ota_info, LV_PCT(100));
+    lv_obj_set_style_text_line_space(system_ota_info, 8, 0);
+    system_refresh_ota();
     storage_format_armed = false;
     if (!internal_ready) {
         storage_status = lv_label_create(content);
@@ -7678,6 +7696,7 @@ static void confirm_running_ota(lv_timer_t *timer)
     }
     lv_timer_delete(timer);
     validate_running_ota();
+    system_refresh_ota();
 }
 
 void app_main(void)

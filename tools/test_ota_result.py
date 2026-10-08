@@ -22,6 +22,13 @@ def main():
     assert code.count("static void ota_") == 3
     assert "static void ota_record_result(const char *result)" in code
     assert "static void ota_load_result(void)" in code
+    state_start = source.index("static const char *ota_state_name(esp_ota_img_states_t state)")
+    code += source[state_start:source.index("static void system_self_test(void)", state_start)]
+    diagnostics_start = source.find("static void system_refresh_ota(void)\n{")
+    if diagnostics_start >= 0:
+        code += source[diagnostics_start:source.index("static void storage_format_clicked(", diagnostics_start)]
+    storage_start = source.index("static void storage_format_clicked(lv_event_t *event)")
+    code += source[storage_start:source.index("static void system_clicked(", storage_start)]
     health_start = source.index("static void validate_running_ota(void)\n{")
     health = source[health_start:source.index("void app_main(void)", health_start)]
     assert health.count("static void ") == 2
@@ -59,7 +66,8 @@ def main():
         "executableSha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
         "exitCode": result.returncode, "nvsAndOtaStateApisControlled": True,
         "validationAndTimerApisControlled": True, "workerApisAndSignalAccessControlled": True,
-        "actualFunctionsCompiled": 8,
+        "actualFunctionsCompiled": 10 + int(diagnostics_start >= 0),
+        "systemDiagnosticsApisControlled": diagnostics_start >= 0,
         "physicalFlashVerified": False,
     }, indent=2) + "\n")
     print(log, end="", flush=True)

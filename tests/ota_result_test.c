@@ -19,7 +19,7 @@ typedef struct { unsigned id; } esp_partition_t;
 typedef struct { char version[32]; } esp_app_desc_t;
 typedef struct { unsigned id; } lv_timer_t;
 typedef struct { unsigned id; } lv_event_t;
-typedef struct { char text[96]; unsigned states; } lv_obj_t;
+typedef struct { char text[192]; unsigned states; } lv_obj_t;
 typedef struct { char version[32]; } ota_manifest_t;
 typedef void *TaskHandle_t;
 enum { pdTRUE = 1, pdPASS = 1, LV_STATE_DISABLED = 1 };
@@ -47,6 +47,12 @@ static TaskHandle_t ota_task_handle;
 static char ota_error[96];
 static lv_obj_t status_object, button_object;
 static lv_obj_t *ota_status = &status_object, *ota_button = &button_object;
+static lv_obj_t diagnostics_object, *system_ota_info;
+static unsigned diagnostics_renders;
+static lv_obj_t storage_status_object, storage_format_object, format_button_object;
+static lv_obj_t *storage_status = &storage_status_object, *storage_format_label = &storage_format_object;
+static bool storage_format_armed;
+static unsigned format_calls, mount_calls;
 static const char *blocker_text;
 static unsigned task_token, create_calls, notify_calls, fetch_calls, check_calls, install_calls;
 static unsigned delay_calls, restart_calls, wait_calls, activity_calls, screensaver_calls;
@@ -66,6 +72,7 @@ static unsigned boot_partition_reads, boot_description_reads;
 static void ota_update_task(void *argument);
 static void ota_clicked(lv_event_t *event);
 static void confirm_running_ota(lv_timer_t *timer);
+static void validate_running_ota(void);
 /* Observe the publication lvalue before its store; source bodies are unchanged. */
 static atomic_bool *fixture_done_access(void)
 {
@@ -240,6 +247,20 @@ static void lv_label_set_text(lv_obj_t *object, const char *text)
     assert(object && strlen(text) < sizeof(object->text));
     strcpy(object->text, text);
 }
+void lv_label_set_text_fmt(lv_obj_t *object, const char *format, ...)
+{
+    assert(object && (object == system_ota_info || object == storage_status));
+    va_list args;
+    va_start(args, format);
+    int length = vsnprintf(object->text, sizeof(object->text), format, args);
+    va_end(args);
+    assert(length > 0 && (size_t)length < sizeof(object->text));
+    if (object == system_ota_info) diagnostics_renders++;
+}
+static lv_obj_t *lv_event_get_target(lv_event_t *event) { assert(event && event->id == 1); return &format_button_object; }
+static void lv_refr_now(void *display) { assert(!display); }
+static esp_err_t esp_spiffs_format(const char *label) { assert(!strcmp(label, "storage")); format_calls++; return ESP_OK; }
+static bool mount_internal(void) { mount_calls++; return true; }
 static void lv_obj_add_state(lv_obj_t *object, unsigned state) { assert(object); object->states |= state; }
 static void lv_obj_remove_state(lv_obj_t *object, unsigned state) { assert(object); object->states &= ~state; }
 static void lv_display_trigger_activity(void *display) { assert(!display); activity_calls++; }
@@ -274,6 +295,11 @@ static void reset(void)
     create_calls = notify_calls = fetch_calls = check_calls = install_calls = 0;
     delay_calls = restart_calls = wait_calls = activity_calls = screensaver_calls = 0;
     memset(&status_object, 0, sizeof(status_object)); memset(&button_object, 0, sizeof(button_object));
+    memset(&diagnostics_object, 0, sizeof(diagnostics_object));
+    system_ota_info = NULL; diagnostics_renders = 0;
+    memset(&storage_status_object, 0, sizeof(storage_status_object));
+    memset(&storage_format_object, 0, sizeof(storage_format_object)); memset(&format_button_object, 0, sizeof(format_button_object));
+    storage_format_armed = false; format_calls = mount_calls = 0;
     ota_status = &status_object; ota_button = &button_object;
     strcpy(installed_description.version, "v0.8.0-87654321");
     internal_ready = true;
@@ -328,6 +354,27 @@ static void worker_case(const char *name, bool pass)
            (unsigned)(ota_button && (ota_button->states & LV_STATE_DISABLED)),
            boot_partition_reads, boot_description_reads,
            saved_pending, ota_last_result, status_object.text);
+}
+/* Supply the already rendered System snapshot; creation and Home are controlled. */
+static void open_diagnostics(void)
+{
+    system_ota_info = &diagnostics_object;
+    int length = snprintf(diagnostics_object.text, sizeof(diagnostics_object.text),
+        "OTA image: %s\nLast OTA: %s\nInvalid OTA image: %s", ota_state_name(running_state),
+        ota_last_result, invalid_present ? invalid_description.version : "none recorded");
+    assert(length > 0 && (size_t)length < sizeof(diagnostics_object.text));
+}
+static void diagnostic_case(const char *name, const char *expected, unsigned reads, unsigned validations, bool extra)
+{
+    bool pass = !handles && timer_deletes == 1 && ota_health_window_elapsed &&
+        (!reads || state_reads == reads) && validation_calls == validations && extra &&
+        !strcmp(diagnostics_object.text, expected);
+    cases++; failures += !pass;
+    char flat[sizeof(diagnostics_object.text)];
+    strcpy(flat, diagnostics_object.text);
+    for (char *at = flat; *at; at++) if (*at == '\n') *at = '|';
+    printf("%s %s handles=%u state_reads=%u validations=%u renders=%u diagnostics=\"%s\"\n",
+        pass ? "PASS" : "FAIL", name, handles, state_reads, validation_calls, diagnostics_renders, flat);
 }
 
 int main(void)
@@ -585,6 +632,43 @@ int main(void)
     worker_case("worker-pending-reboot-reconciliation", !ota_busy && !done_storage && !has_pending &&
         !strcmp(ota_last_result, "Installed v0.8.0-87654321") && !strcmp(saved_result, ota_last_result) &&
         write_opens == 2 && sets == 2 && erases == 1 && commits == 2 && state_reads == 2 && validation_calls == 1 && timer_deletes == 1);
+    const char *validated_diagnostics = "OTA image: validated\nLast OTA: Installed v0.7.0-12345678\nInvalid OTA image: none recorded";
+    const char *pending_diagnostics = "OTA image: health check pending\nLast OTA: Installing v0.7.0-12345678; health pending\nInvalid OTA image: none recorded";
+    reset(); running_state = ESP_OTA_IMG_PENDING_VERIFY; ota_load_result(); open_diagnostics();
+    confirm_running_ota(&health_timer);
+    diagnostic_case("system-pending-health-validation", validated_diagnostics, 3, 1, !has_pending);
+    reset(); state_error = ESP_FAIL; ota_load_result(); state_error = ESP_OK; open_diagnostics();
+    confirm_running_ota(&health_timer);
+    diagnostic_case("system-valid-state-recovery", validated_diagnostics, 4, 0, !has_pending);
+    reset(); running_state = ESP_OTA_IMG_PENDING_VERIFY; ota_load_result(); open_diagnostics(); state_read_fail_at = 3;
+    confirm_running_ota(&health_timer);
+    diagnostic_case("system-diagnostics-read-error", "OTA image: not tracked\nLast OTA: Installed v0.7.0-12345678\nInvalid OTA image: none recorded", 3, 1, !has_pending);
+    reset(); running_state = ESP_OTA_IMG_PENDING_VERIFY; ota_load_result(); open_diagnostics(); ota_busy = true;
+    confirm_running_ota(&health_timer);
+    bool held_diagnostics = !strcmp(diagnostics_object.text, pending_diagnostics) && !diagnostics_renders &&
+        state_reads == 1 && !validation_calls && !timer_deletes && health_timer_period == 250;
+    ota_busy = false; confirm_running_ota(&health_timer);
+    diagnostic_case("system-deferred-health-validation", validated_diagnostics, 3, 1, held_diagnostics && !has_pending);
+    reset(); strcpy(saved_pending, "v0.7.0-123456789012345678901234"); strcpy(running_description.version, saved_pending);
+    strcpy(invalid_description.version, saved_pending); invalid_present = true;
+    running_state = ESP_OTA_IMG_PENDING_VERIFY; ota_load_result(); open_diagnostics(); confirm_running_ota(&health_timer);
+    diagnostic_case("system-maximum-version-validation", "OTA image: validated\nLast OTA: Installed v0.7.0-123456789012345678901234\nInvalid OTA image: v0.7.0-123456789012345678901234", 3, 1, !has_pending);
+    reset(); running_state = ESP_OTA_IMG_PENDING_VERIFY; ota_load_result(); open_diagnostics(); validation_error = ESP_FAIL;
+    confirm_running_ota(&health_timer);
+    diagnostic_case("system-validation-error-retains-pending", pending_diagnostics, 0, 1, has_pending && !write_opens);
+    reset(); running_state = ESP_OTA_IMG_PENDING_VERIFY; ota_load_result(); open_diagnostics();
+    system_ota_info = NULL; confirm_running_ota(&health_timer);
+    diagnostic_case("system-offscreen-health-validation", pending_diagnostics, 2, 1, !has_pending && !diagnostics_renders);
+    reset(); running_state = ESP_OTA_IMG_PENDING_VERIFY; ota_load_result(); open_diagnostics();
+    internal_ready = false; storage_init_error = ESP_FAIL; confirm_running_ota(&health_timer);
+    lv_event_t format_event = {1}; storage_format_clicked(&format_event);
+    bool confirmation_required = storage_format_armed && !format_calls && !mount_calls && !validation_calls &&
+        !strcmp(diagnostics_object.text, pending_diagnostics);
+    storage_format_clicked(&format_event);
+    diagnostic_case("system-storage-recovery-validation", validated_diagnostics, 5, 1,
+        confirmation_required && !has_pending && internal_ready && !storage_format_armed &&
+        format_calls == 1 && mount_calls == 1 && format_button_object.states == LV_STATE_DISABLED &&
+        !strcmp(storage_status_object.text, "Internal storage is ready"));
     printf("%s %u OTA result cases failures=%u handles=%u (controlled NVS/state APIs)\n",
            failures ? "FAIL" : "PASS", cases, failures, handles);
     return failures ? 1 : 0;
