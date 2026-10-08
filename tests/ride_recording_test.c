@@ -268,7 +268,8 @@ static void creation_case(const char *name, enum point point, int error, bool cl
 {
     prepare(point, error); close_error = cleanup_error; bool started = ride_start(); close_unexpected();
     bool ok = !started && failed(error ? error : EIO); if (point == ROOT) ok = ok && !calls[DATE] && !calls[OPEN];
-    if (point == STAT) ok = ok && calls[STAT] == 1 && !calls[OPEN]; if (point == OPEN) ok = ok && calls[OPEN] == 1 && !calls[FDOPEN];
+    if (point == STAT) ok = ok && calls[STAT] == 1 && !calls[OPEN];
+    if (point == OPEN) ok = ok && calls[OPEN] == 1 && !calls[FDOPEN];
     if (point == FDOPEN) ok = ok && calls[FDOPEN] == 1 && !calls[HEADER];
     bool bytes_ok = index_untouched(); for (unsigned i = 0; i < 200; i++) bytes_ok = matches(i, NULL) && bytes_ok;
     result(name, ok, bytes_ok);
@@ -291,7 +292,8 @@ static void write_case(const char *name, enum point point, int error, bool clean
     tick_clobber = !error; step(point == ROW ? 1 : 10); bool ended = !ride_recording; close_unexpected();
     char expected[4096]; snprintf(expected, sizeof(expected), "%s%s", header, point == ROW ? "PART" : "1700000010,10,200,80.0,36.00,120,4,0.100,2.0\n");
     bool ok = ended && failed(error ? error : EIO) && !ride_stop();
-    if (point == ROW) ok = ok && !calls[FLUSH] && !calls[SYNC]; if (point == FLUSH) ok = ok && calls[FLUSH] == 1 && !calls[SYNC];
+    if (point == ROW) ok = ok && !calls[FLUSH] && !calls[SYNC];
+    if (point == FLUSH) ok = ok && calls[FLUSH] == 1 && !calls[SYNC];
     if (point == SYNC) ok = ok && calls[SYNC] == 1;
     result(name, ok, matches(0, expected) && matches(100, NULL) && index_untouched());
 }
