@@ -90,6 +90,8 @@ jobs:
             cc -std=c11 -Wall -Wextra -Werror -pedantic -DLWIP_IPV6=$ipv6 -I tests/network_ping_host/stubs -I main main/network_ping.c tests/network_ping_host/ping_test.c -o "$RUNNER_TEMP/network_ping_test"
             "$RUNNER_TEMP/network_ping_test"
           done
+      - name: Test resolver dispatch deadlines
+        run: python3 tools/test_resolver_dispatch.py --compiler cc
       - name: Test app calculations and protocol parsing
         run: |
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/payload_clipboard.c tests/payload_clipboard_test.c -o "$RUNNER_TEMP/payload_clipboard_test"
@@ -119,6 +121,18 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/resistor_data.c tests/resistor_data_test.c -lm -o "$RUNNER_TEMP/resistor_data_test"
           "$RUNNER_TEMP/resistor_data_test"
 
+      - name: Retain resolver dispatch evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: resolver-dispatch-logs
+          path: |
+            build/resolver-dispatch/compile-*.log
+            build/resolver-dispatch/result-*.log
+            build/resolver-dispatch/source.json
+            build/resolver-dispatch/sources/
+          if-no-files-found: warn
+          retention-days: 14
       - name: Retain OTA result test evidence
         uses: actions/upload-artifact@v4
         if: always()

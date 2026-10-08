@@ -10,6 +10,7 @@
 
 typedef struct {
     uint32_t id;
+    int64_t deadline_us;
     bool done;
     int error;
     size_t count;
@@ -59,6 +60,11 @@ static void lookup_dispatch(void *argument)
     char host[256];
     portENTER_CRITICAL(&lookup_lock);
     lookup_t *lookup = find_lookup((uint32_t)(uintptr_t)argument);
+    if (lookup && esp_timer_get_time() >= lookup->deadline_us) {
+        lookup->error = ETIMEDOUT;
+        lookup->done = true;
+        lookup = NULL;
+    }
     bool attached = lookup != NULL;
     if (lookup) memcpy(host, lookup->host, sizeof(host));
     portEXIT_CRITICAL(&lookup_lock);
@@ -95,6 +101,7 @@ int network_resolve_host(const char *host, ip_addr_t *addresses, size_t capacity
     }
 
     lookup_t lookup = {0};
+    lookup.deadline_us = deadline_us;
     memcpy(lookup.host, host, strlen(host) + 1);
     unsigned slot;
     portENTER_CRITICAL(&lookup_lock);
