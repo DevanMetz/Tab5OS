@@ -25,6 +25,8 @@ static size_t expected_size, written_size;
 static unsigned begins, writes, ends, aborts, boots, selected, active;
 static unsigned redirect_events;
 static int64_t image_event_bytes, non_image_event_bytes, previous_non_image_bytes;
+static int64_t response_length;
+static bool response_complete, response_finished;
 
 esp_err_t esp_event_post(const char *base, int32_t id, const void *data, size_t size, unsigned ticks)
 {
@@ -32,6 +34,13 @@ esp_err_t esp_event_post(const char *base, int32_t id, const void *data, size_t 
     if (!strcmp(base, "ESP_HTTP_CLIENT_EVENT")) {
         if (id == HTTP_EVENT_HEADERS_SENT) previous_non_image_bytes = 0;
         if (id == HTTP_EVENT_REDIRECT) redirect_events++;
+        if (id == HTTP_EVENT_ON_FINISH) {
+            assert(data && size == sizeof(esp_http_client_handle_t));
+            esp_http_client_handle_t client = *(const esp_http_client_handle_t *)data;
+            response_length = esp_http_client_get_content_length(client);
+            response_complete = esp_http_client_is_complete_data_received(client);
+            response_finished = true;
+        }
         if (id == HTTP_EVENT_ON_DATA) {
             assert(data && size == sizeof(esp_http_client_on_data_t));
             const esp_http_client_on_data_t *event = data;
@@ -109,7 +118,9 @@ int main(int argc, char **argv)
     assert(!fclose(file));
     ota_manifest_t manifest = {.size = expected_size};
     snprintf(manifest.version, sizeof(manifest.version), "%s", "v0.6.0-fixture");
-    snprintf(manifest.url, sizeof(manifest.url), "http://127.0.0.1:%u/%s", port, mode);
+    char request_url[256];
+    snprintf(request_url, sizeof(request_url), "http://127.0.0.1:%u/%s", port, mode);
+    snprintf(manifest.url, sizeof(manifest.url), "%s", request_url);
     assert(strlen(argv[4]) == 64);
     for (size_t i = 0; i < 32; i++) {
         unsigned value;
@@ -118,18 +129,25 @@ int main(int argc, char **argv)
     }
     if (!strcmp(mode, "wrong-hash")) manifest.sha256[0] ^= 1;
     if (!strcmp(mode, "wrong-size")) manifest.size++;
+    uint8_t expected_digest[32];
+    memcpy(expected_digest, manifest.sha256, sizeof(expected_digest));
     esp_err_t expected_error = (esp_err_t)strtol(argv[5], NULL, 0);
     WSADATA sockets;
     assert(!WSAStartup(MAKEWORD(2, 2), &sockets));
     char message[128] = {0};
-    unsigned cycles = !strcmp(mode, "repeat") ? 26 : 1;
+    bool fetching = !strncmp(mode, "manifest-", 9);
+    unsigned cycles = !strcmp(mode, "repeat") || !strcmp(mode, "manifest-repeat") ? 26 : 1;
     DWORD handles_before = 0, handles_after = 0;
     esp_err_t error = ESP_OK;
     for (unsigned cycle = 0; cycle < cycles; cycle++) {
         begins = writes = ends = aborts = boots = selected = active = redirect_events = 0;
         written_size = 0;
         image_event_bytes = non_image_event_bytes = previous_non_image_bytes = 0;
-        error = ota_manifest_install(&manifest, message, sizeof(message));
+        response_length = 0;
+        response_complete = false;
+        response_finished = false;
+        error = fetching ? ota_manifest_fetch(request_url, &manifest, message, sizeof(message)) :
+                           ota_manifest_install(&manifest, message, sizeof(message));
         if (error != expected_error) {
             fprintf(stderr, "FAIL %s actual=%d expected=%d image_events=%lld non_image_events=%lld redirect_events=%u message=%s\n",
                     mode, error, expected_error, (long long)image_event_bytes, (long long)non_image_event_bytes,
@@ -138,7 +156,19 @@ int main(int argc, char **argv)
         }
         assert(!active && !host_open_sockets && !host_active_tasks && !http_host_allocations &&
                !http_host_sdk_allocations && !http_host_transports);
-        if (error == ESP_OK) {
+        if (fetching) {
+            assert(!begins && !writes && !ends && !aborts && !boots && !selected);
+            if (error == ESP_OK) {
+                assert(manifest.size == expected_size && !memcmp(manifest.sha256, expected_digest, sizeof(expected_digest)));
+                assert(!strcmp(manifest.version, "v0.6.0-fixture") && !strcmp(manifest.minimum_predecessor, "v0.5.1"));
+                assert(!strcmp(manifest.url, "https://github.com/DevanMetz/Tab5OS/releases/download/v0.6.0/tab5_os.bin"));
+                assert(ota_manifest_check(&manifest, "v0.5.1", message, sizeof(message)) == ESP_OK);
+                if (!strcmp(mode, "manifest-close-delimited"))
+                    assert(response_length == -1 && !response_complete);
+            } else {
+                assert(message[0]);
+            }
+        } else if (error == ESP_OK) {
             assert(begins == 1 && ends == 1 && !aborts && boots == 1 && selected == 1);
             assert(image_event_bytes == (int64_t)expected_size);
             if (!strncmp(mode, "redirect-", 9)) {
@@ -164,6 +194,8 @@ int main(int argc, char **argv)
            mode, error, written_size, begins, writes, ends, aborts, boots, selected,
            (long long)image_event_bytes, (long long)non_image_event_bytes, redirect_events,
            cycles, (unsigned long)handles_before, (unsigned long)handles_after);
+    if (fetching && response_finished) printf("HTTP_RESPONSE %s content_length=%lld complete=%u\n",
+                                              mode, (long long)response_length, (unsigned)response_complete);
     WSACleanup();
     return 0;
 }

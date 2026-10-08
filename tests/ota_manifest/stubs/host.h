@@ -21,6 +21,8 @@ esp_err_t esp_crt_bundle_attach(void *configuration);
 typedef enum {
     HTTP_EVENT_ON_DATA,
     HTTP_EVENT_REDIRECT,
+    HTTP_EVENT_HEADERS_SENT,
+    HTTP_EVENT_ON_HEADER,
 } esp_http_client_event_id_t;
 typedef struct {
     esp_http_client_event_id_t event_id;
@@ -28,6 +30,7 @@ typedef struct {
     int data_len;
     void *user_data;
     void *client;
+    char *header_key;
 } esp_http_client_event_t;
 typedef struct {
     const char *url;
@@ -46,6 +49,7 @@ esp_err_t esp_http_client_set_header(esp_http_client_handle_t client, const char
                                      const char *value);
 esp_err_t esp_http_client_perform(esp_http_client_handle_t client);
 int esp_http_client_get_status_code(esp_http_client_handle_t client);
+bool esp_http_client_is_complete_data_received(esp_http_client_handle_t client);
 esp_err_t esp_http_client_cleanup(esp_http_client_handle_t client);
 
 typedef struct { char version[32]; } esp_app_desc_t;

@@ -26,6 +26,7 @@ typedef struct {
     char body[OTA_MANIFEST_JSON_MAX + 1];
     size_t length;
     bool overflow;
+    bool framed;
 } manifest_response_t;
 
 typedef struct {
@@ -177,14 +178,29 @@ static bool image_url_valid(const char *url)
            !strstr(url, "..") && !strchr(url, '?') && !strchr(url, '#');
 }
 
+static bool header_name_is(const char *name, const char *expected)
+{
+    if (!name) return false;
+    while (*name && *expected) {
+        if (tolower((unsigned char)*name++) != (unsigned char)*expected++) return false;
+    }
+    return !*name && !*expected;
+}
+
 static esp_err_t manifest_event(esp_http_client_event_t *event)
 {
     manifest_response_t *response = event->user_data;
     if (!response) return ESP_OK;
-    if (event->event_id == HTTP_EVENT_REDIRECT) {
+    if (event->event_id == HTTP_EVENT_HEADERS_SENT || event->event_id == HTTP_EVENT_REDIRECT) {
         response->length = 0;
         response->overflow = false;
-    } else if (event->event_id == HTTP_EVENT_ON_DATA && event->data_len > 0) {
+        response->framed = false;
+    } else if (event->event_id == HTTP_EVENT_ON_HEADER &&
+               (header_name_is(event->header_key, "transfer-encoding") ||
+                header_name_is(event->header_key, "content-length"))) {
+        response->framed = true;
+    } else if (event->event_id == HTTP_EVENT_ON_DATA && event->data_len > 0 &&
+               esp_http_client_get_status_code(event->client) == 200) {
         size_t available = OTA_MANIFEST_JSON_MAX - response->length;
         size_t copy = (size_t)event->data_len < available ? (size_t)event->data_len : available;
         memcpy(response->body + response->length, event->data, copy);
@@ -222,10 +238,19 @@ esp_err_t ota_manifest_fetch(const char *manifest_url, ota_manifest_t *manifest,
     esp_http_client_set_header(client, "User-Agent", "Tab5OS/1.0");
     esp_err_t error = esp_http_client_perform(client);
     int status = esp_http_client_get_status_code(client);
+    bool complete = false;
+    if (error == ESP_OK) {
+        /* perform() can succeed after a truncated body. The SDK reports
+         * close-delimited EOF as incomplete, so apply its check to framing. */
+        complete = !response->framed || esp_http_client_is_complete_data_received(client);
+    }
     esp_http_client_cleanup(client);
     if (error == ESP_OK && status != 200) {
         set_message(message, message_size, "Manifest server did not return HTTP 200");
         error = ESP_FAIL;
+    } else if (error == ESP_OK && !complete) {
+        set_message(message, message_size, "Manifest response was incomplete");
+        error = ESP_ERR_INVALID_SIZE;
     } else if (error == ESP_OK && (response->overflow || !response->length)) {
         set_message(message, message_size, response->overflow ? "Manifest exceeds 1536 bytes" :
                                                                "Manifest response was empty");

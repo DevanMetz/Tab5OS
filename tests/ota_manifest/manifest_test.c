@@ -16,6 +16,7 @@ static const char *body;
 static size_t body_size, chunk_size, allocations, allocation_calls;
 static size_t fail_allocation = SIZE_MAX;
 static bool redirect_response, fail_init;
+static bool response_complete = true;
 static int status = 200, clients, checks, failures;
 static esp_err_t request_error;
 static esp_http_client_config_t request;
@@ -67,6 +68,11 @@ esp_err_t esp_http_client_perform(esp_http_client_handle_t client)
         assert(request.event_handler(&event) == ESP_OK);
         event.event_id = HTTP_EVENT_ON_DATA;
     }
+    event.event_id = HTTP_EVENT_ON_HEADER;
+    event.header_key = "Content-Length";
+    assert(request.event_handler(&event) == ESP_OK);
+    event.event_id = HTTP_EVENT_ON_DATA;
+    event.header_key = NULL;
     for (size_t offset = 0; offset < body_size;) {
         size_t count = body_size - offset;
         if (count > chunk_size) count = chunk_size;
@@ -79,6 +85,8 @@ esp_err_t esp_http_client_perform(esp_http_client_handle_t client)
 }
 int esp_http_client_get_status_code(esp_http_client_handle_t client)
 { assert(client == &request); return status; }
+bool esp_http_client_is_complete_data_received(esp_http_client_handle_t client)
+{ assert(client == &request && request_error == ESP_OK); return response_complete; }
 esp_err_t esp_http_client_cleanup(esp_http_client_handle_t client)
 { assert(client == &request && clients == 1); clients--; return ESP_OK; }
 
@@ -131,7 +139,8 @@ static ota_manifest_t fetch(const char *name, const char *json, size_t size, esp
         ota_manifest_t empty = {0};
         assert(!memcmp(&manifest, &empty, sizeof(manifest)));
     }
-    if (!strcmp(name, "deep-array-before-recursion")) assert(allocation_calls == 0);
+    if (!strcmp(name, "deep-array-before-recursion") || !strcmp(name, "incomplete-body"))
+        assert(allocation_calls == 0);
     return manifest;
 }
 static void changed(const char *name, const char *before, const char *after, esp_err_t expected)
@@ -179,6 +188,11 @@ int main(void)
     fetch("overflow", padded, 1537, ESP_ERR_INVALID_SIZE);
     fetch("empty", "", 0, ESP_ERR_INVALID_SIZE);
     fetch("truncated", valid_json, strlen(valid_json) - 1, ESP_ERR_INVALID_RESPONSE);
+    response_complete = false;
+    fetch("incomplete-body", valid_json, strlen(valid_json), ESP_ERR_INVALID_SIZE);
+    status = 404;
+    fetch("incomplete-non-200", valid_json, strlen(valid_json), ESP_FAIL);
+    response_complete = true;
     status = 404;
     fetch("non-200", valid_json, strlen(valid_json), ESP_FAIL);
     status = 200;
