@@ -31,6 +31,8 @@ jobs:
           "$RUNNER_TEMP/storage_io_test"
       - name: Test CSV tail recovery
         run: python3 tools/test_storage_csv_tail.py --compiler cc
+      - name: Test Notes storage
+        run: python3 tools/test_notes_io.py --compiler cc
       - name: Test capture reader
         run: |
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/capture_data.c tests/capture_data_test.c -o "$RUNNER_TEMP/capture_data_test"
@@ -111,6 +113,21 @@ jobs:
             build/storage-csv-tail/result.log
             build/storage-csv-tail/source.json
             build/storage-csv-tail/storage_source.inc
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Retain Notes storage test evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: notes-io-logs
+          path: |
+            build/notes-io/compile.log
+            build/notes-io/result.log
+            build/notes-io/source.json
+            build/notes-io/notes_callbacks.inc
+            build/notes-io/notes_config.inc
+            build/notes-io/storage_source.inc
           if-no-files-found: warn
           retention-days: 14
 
@@ -219,6 +236,23 @@ jobs:
       - name: Test offline apps, network consoles and OTA manifests/images
         shell: pwsh
         run: ./tools/test_native_ui_ci.ps1
+      - name: Test Notes with real LVGL
+        shell: pwsh
+        run: python tools/test_notes_io.py --compiler clang --lvgl-library build/offline-ui/out/lvgl_host.lib --output build/notes-ui
+      - name: Retain Notes UI test evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: notes-ui-logs
+          path: |
+            build/notes-ui/compile.log
+            build/notes-ui/result.log
+            build/notes-ui/source.json
+            build/notes-ui/notes_callbacks.inc
+            build/notes-ui/notes_config.inc
+            build/notes-ui/storage_source.inc
+          if-no-files-found: warn
+          retention-days: 14
       - uses: actions/upload-artifact@v4
         if: always()
         with:

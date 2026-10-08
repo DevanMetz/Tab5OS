@@ -11,6 +11,7 @@ Python 3 and Node.js are needed for the quick checks. The configuration checks a
 | SDK setup, board selection or root CMake | [Firmware configuration](#firmware-configuration). |
 | Relay, parsers, calculations, clipboard or file formats | [Core command reference](#core-command-reference); choose the affected module and any independent reference test. |
 | Storage writes or incomplete CSV rows | [Core command reference](#core-command-reference), [CSV tail recovery](#csv-tail-recovery) and a firmware build. |
+| Notes loading, saving or lifecycle | [Notes storage and UI](#notes-storage-and-ui) and a firmware build. |
 | Offline apps, SPI or I2C editor/result flows | [Offline and peripheral UI](#offline-and-peripheral-ui). |
 | Serial, saved serial logs or RTU Frames | [Serial and RTU UI](#serial-and-rtu-ui). |
 | Modbus TCP, NTP, Wake-on-LAN, UDP or HTTP fixtures | [Network fixtures and UI](#network-fixtures-and-ui). |
@@ -95,6 +96,20 @@ This portable fixture compiles the actual `storage_io.c` against native files, c
 Seek/read failures preserve all bytes, including a short read without a supplied errno. Truncate, sync and close failures report the first error and leave every modeled handle closed. Sync/close failures can follow a completed truncation, so those cases check the retained prefix without promising rollback or power-loss durability. Original storage checks and five existing MQTT/HTTP logging cases also pass. These checks use the host filesystem and controlled fault boundaries; physical FAT/SD timing, removal and power cuts remain in the hardware matrix.
 
 Generated source, full storage/header/test hashes and compile/result logs stay under `build/storage-csv-tail/`. Linux CI runs the fixture and retains those files as `storage-csv-tail-logs`, including compiler/test failures. Its 32 cases are separate from the seven-suite Windows native total.
+
+## Notes storage and UI
+
+```powershell
+python tools/test_notes_io.py --compiler 'C:/path/to/clang.exe'
+# With the cached Debug LVGL library from the offline UI runner:
+python tools/test_notes_io.py --compiler 'C:/path/to/clang.exe' --lvgl-library build/offline-ui/out/lvgl_host.lib --output build/notes-ui
+```
+
+The portable runner compiles four unchanged Notes functions extracted from `main/main.c` and the actual complete `storage_io.c`. Its 36 native-file cases cover missing/empty notes, backup recovery, the former 2 KiB boundary, 5 KiB and maximum-size files, oversized and NUL-containing files, allocation/recovery/open/read/close errors, the first read error, save length/UTF-8 guards, card availability, stream/publication/rollback failures and stale Save/reopen behavior. Every case independently checks final, backup and temporary bytes and closes its modeled file/allocation handles. Four prior-source full-file controls reproduce truncation to 2,047 bytes; recovery and read faults also reproduce unsafe Save actions. New allocation/probe/leave controls test the added boundaries rather than asserting that the previous callbacks used those APIs.
+
+The optional real LVGL mode runs five additional cases against the cached pinned library with its existing 96 KiB pool. It checks complete 65,535-byte ASCII and 65,534-byte UTF-8 load/save, an oversized original file, a multibyte draft whose byte count exceeds the limit, and 25 reopen cycles with identical free bytes and allocation counts. Text is installed before the character limit so LVGL uses its bulk path. Files are native; SD faults and PSRAM allocation APIs are controlled. This does not prove physical rendering, card latency, removal or power-loss durability.
+
+Generated callbacks/config/storage source, full main/function/storage/header/test hashes and compile/result logs stay under the selected output directory. Linux CI retains the 36-case evidence as `notes-io-logs`. Windows CI runs the five real LVGL cases after the existing seven suites and retains separate `notes-ui-logs`; those five add to the prior 815 native checks. Both artifacts retain diagnostics when their test step fails.
 
 ## OTA manifests
 

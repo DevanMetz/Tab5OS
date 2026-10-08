@@ -21,6 +21,8 @@ Tab5 OS keeps user-owned documents and logs on the removable microSD card. Built
 
 Files ending in `.TMP` are unpublished: they may be incomplete after power loss, or fully synced but retained because publication failed. They must not be reported as finished captures without validation. A `.BAK` file is the previous complete generation and can be used for recovery when its corresponding final file is absent.
 
+Notes edits complete text files of at most 65,535 bytes. A missing note starts an empty draft; a missing final note can be restored from `NOTE.BAK`. Recovery, open, read or close failures disable editing and Save until a successful reopen. Oversized files and files containing NUL bytes also disable Save and keep their original bytes. Save checks the draft's byte length before changing any path, including for UTF-8 text whose character count is smaller than its byte count. Notes loads the complete text in bulk before applying the editor's character limit. Leaving Notes clears its editor pointer and Save permission. Native files and LVGL checks verify these boundaries; physical SD removal, full-card and power-loss behavior remain hardware gates.
+
 Files opens published Scope and I2C `.CSV` captures as graphs when their headers match the formats below. The viewer shows up to the first 2,048 well-formed rows, leaves the file unchanged, and shows failed I2C reads as gaps. Other files retain the text preview.
 
 Files also opens published UART and RS-485 `.CSV` logs as a timestamped RX/TX timeline. The viewer loads up to the first 512 well-formed rows, shows eight rows per page, and lets you filter by direction or switch between hex and escaped ASCII without changing the file. Unpublished `.TMP` files retain the text preview.

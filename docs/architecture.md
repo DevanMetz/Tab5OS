@@ -83,6 +83,8 @@ The serial log viewer loads at most 512 validated rows and closes the file befor
 
 CSV tail repair uses a 512-byte scratch buffer and scans backwards by blocks before truncating at the most recent LF. HTTP, MQTT and Ring health logging share this helper with serialized writers. A seek/read failure prevents truncation; later truncate/sync/close failures preserve the first error. Native checks verify retained bytes and reduced stdio call counts, while physical FAT/SD latency and power-loss durability remain device checks.
 
+Notes uses a temporary PSRAM buffer to load an entire file of up to 65,535 bytes and frees that buffer after LVGL copies the text. It applies the editor's character limit after loading, using LVGL's bulk text path. Recovery/read/close failures, oversized files and NUL data disable editing and Save; the save callback rechecks ownership, SD availability and byte length before changing paths. The launcher leave hook clears its editor pointer and permission before content deletion. The existing replacement helper still syncs/closes `NOTE.TMP`, retains the previous complete generation in `NOTE.BAK`, and reports publication failures. Real LVGL checks use the unchanged 96 KiB pool; physical SD and panel behavior remain open.
+
 See [Storage and compatibility contract](compatibility.md) and [Data formats](data-formats.md).
 
 ## Network and radio

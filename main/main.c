@@ -130,6 +130,7 @@
 #define BROWSER_MAX_TEXT 12288
 #define BROWSER_MAX_LINKS 12
 #define EBOOK_PAGE_BYTES 8192
+#define NOTE_MAX_BYTES 65535
 #define OTA_MANIFEST_URL "https://github.com/DevanMetz/Tab5OS/releases/latest/download/tab5_os.json"
 #define BATTERY_EMPTY_MV 6000
 #define BATTERY_FULL_MV 8230
@@ -359,6 +360,7 @@ static int battery_millivolts;
 static int battery_milliamps;
 static int battery_percent;
 static lv_obj_t *note_area;
+static bool note_can_save;
 static lv_obj_t *counter_label;
 static bool internal_ready;
 static esp_err_t storage_init_error = ESP_OK;
@@ -4563,9 +4565,44 @@ static void ebooks_clicked(lv_event_t *event)
     show_ebooks();
 }
 
+static void notes_leave(void)
+{
+    note_area = NULL;
+    note_can_save = false;
+}
+
+static int load_note(char *note)
+{
+    note[0] = '\0';
+    if (storage_recover_replace(SD_PATH "/DOCS/NOTE.TXT", SD_PATH "/DOCS/NOTE.BAK") != 0)
+        return errno ? errno : EIO;
+    FILE *file = fopen(SD_PATH "/DOCS/NOTE.TXT", "rb");
+    if (!file) return errno == ENOENT ? 0 : errno ? errno : EIO;
+
+    errno = 0;
+    size_t read = fread(note, 1, NOTE_MAX_BYTES, file);
+    int error = ferror(file) ? (errno ? errno : EIO) : 0;
+    if (!error && fgetc(file) != EOF) error = EFBIG;
+    if (!error && ferror(file)) error = errno ? errno : EIO;
+    if (!error && memchr(note, '\0', read)) error = EILSEQ;
+    if (fclose(file) != 0 && !error) error = errno ? errno : EIO;
+    note[read] = '\0';
+    return error;
+}
+
 static void save_note(lv_event_t *event)
 {
+    if (!note_can_save || !note_area) return;
     lv_obj_t *status = lv_event_get_user_data(event);
+    if (!sd_ready) {
+        lv_label_set_text(status, "Save failed: SD card unavailable");
+        return;
+    }
+    const char *text = lv_textarea_get_text(note_area);
+    if (strlen(text) > NOTE_MAX_BYTES) {
+        lv_label_set_text_fmt(status, "Note too long (maximum %d bytes)", NOTE_MAX_BYTES);
+        return;
+    }
     mkdir(SD_PATH "/DOCS", 0775);
     const char *temporary_path = SD_PATH "/DOCS/NOTE.TMP";
     const char *final_path = SD_PATH "/DOCS/NOTE.TXT";
@@ -4578,7 +4615,7 @@ static void save_note(lv_event_t *event)
         lv_label_set_text_fmt(status, "Save failed: %s", strerror(error));
         return;
     }
-    if (fputs(lv_textarea_get_text(note_area), file) < 0) {
+    if (fputs(text, file) < 0) {
         int write_error = errno ? errno : EIO;
         fclose(file);
         file = NULL;
@@ -4617,21 +4654,36 @@ static void notes_clicked(lv_event_t *event)
     lv_obj_t *save_label = lv_label_create(save);
     lv_label_set_text(save_label, "Save");
     lv_obj_center(save_label);
-    if (!sd_ready) lv_obj_add_state(save, LV_STATE_DISABLED);
-
-    static char note[2048];
-    storage_recover_replace(SD_PATH "/DOCS/NOTE.TXT", SD_PATH "/DOCS/NOTE.BAK");
-    FILE *file = fopen(SD_PATH "/DOCS/NOTE.TXT", "rb");
-    size_t read = file ? fread(note, 1, sizeof(note) - 1, file) : 0;
-    if (file) fclose(file);
-    note[read] = '\0';
+    note_can_save = false;
+    char *note = sd_ready ? heap_caps_malloc(NOTE_MAX_BYTES + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) : NULL;
+    if (sd_ready && !note) {
+        lv_label_set_text(status, "Load failed: not enough memory; reopen Notes to retry");
+    } else if (note) {
+        int error = load_note(note);
+        if (!error) note_can_save = true;
+        else if (error == EFBIG)
+            lv_label_set_text_fmt(status, "Note exceeds %d bytes; Save disabled", NOTE_MAX_BYTES);
+        else if (error == EILSEQ)
+            lv_label_set_text(status, "Note contains NUL bytes; Save disabled");
+        else {
+            sd_record_error(error);
+            lv_label_set_text_fmt(status, "Load failed: %s; reopen Notes to retry", strerror(error));
+        }
+    }
 
     note_area = lv_textarea_create(content);
     lv_obj_set_size(note_area, 640, 420);
-    lv_textarea_set_text(note_area, note);
+    lv_textarea_set_text(note_area, note_can_save ? note : "");
+    lv_textarea_set_max_length(note_area, NOTE_MAX_BYTES);
+    heap_caps_free(note);
     lv_obj_t *keyboard = lv_keyboard_create(content);
     lv_obj_set_size(keyboard, 640, 500);
     lv_keyboard_set_textarea(keyboard, note_area);
+    if (!note_can_save) {
+        lv_obj_add_state(save, LV_STATE_DISABLED);
+        lv_obj_add_state(note_area, LV_STATE_DISABLED);
+        lv_obj_add_state(keyboard, LV_STATE_DISABLED);
+    }
 }
 
 static void update_counter(void)
@@ -7597,7 +7649,7 @@ static void screensaver_tick(lv_timer_t *timer)
 
 static const app_definition_t launcher_apps[] = {
     {LV_SYMBOL_DIRECTORY, "Files", 0x2196F3, files_clicked, NULL, 0, 0},
-    {LV_SYMBOL_EDIT, "Notes", 0x00A896, notes_clicked, NULL, 1, 0},
+    {LV_SYMBOL_EDIT, "Notes", 0x00A896, notes_clicked, notes_leave, 1, 0},
     {LV_SYMBOL_PLUS, "Counter", 0xF59E0B, counter_clicked, NULL, 2, 0},
     {LV_SYMBOL_CHARGE, "GPIO", 0xE65100, gpio_clicked, NULL, 3, 0},
     {LV_SYMBOL_WIFI, "Settings", 0x0288D1, settings_clicked, settings_leave, 0, 1},
