@@ -138,7 +138,7 @@ static void check(const char *name, const char *message, bool retain_pending, un
 int main(void)
 {
     const char *installed = "Installed v0.7.0-12345678";
-    const char *pending = "Installing v0.7.0-12345678; health check pending";
+    const char *pending = "Installing v0.7.0-12345678; health pending";
     const char *unconfirmed = "Running v0.7.0-12345678; health not confirmed";
     const char *unavailable = "Running v0.7.0-12345678; OTA state unavailable";
     const char *state_names[] = {"new", "pending-verify", "valid", "invalid", "aborted"};
@@ -188,6 +188,13 @@ int main(void)
     reset(); strcpy(saved_pending, "v0.7.0-123456789012345678901234"); strcpy(running_description.version, saved_pending);
     running_state = ESP_OTA_IMG_UNDEFINED; ota_load_result();
     check("maximum-version-unconfirmed", "Running v0.7.0-123456789012345678901234; health not confirmed", true, 0, 1);
+    for (unsigned state = 0; state < 2; state++) {
+        reset(); strcpy(saved_pending, "v0.7.0-123456789012345678901234"); strcpy(running_description.version, saved_pending);
+        assert(strlen(saved_pending) == 31);
+        running_state = (esp_ota_img_states_t)state; ota_load_result();
+        check(state ? "maximum-version-pending-verify" : "maximum-version-new",
+              "Installing v0.7.0-123456789012345678901234; health pending", true, 0, 1);
+    }
     printf("%s %u OTA result cases failures=%u handles=%u (controlled NVS/state APIs)\n",
            failures ? "FAIL" : "PASS", cases, failures, handles);
     return failures ? 1 : 0;

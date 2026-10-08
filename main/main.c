@@ -5121,7 +5121,7 @@ static void ota_load_result(void)
             return;
         }
         if (state == ESP_OTA_IMG_NEW || state == ESP_OTA_IMG_PENDING_VERIFY) {
-            snprintf(ota_last_result, sizeof(ota_last_result), "Installing %s; health check pending", pending);
+            snprintf(ota_last_result, sizeof(ota_last_result), "Installing %s; health pending", pending);
             return;
         }
         if (state != ESP_OTA_IMG_VALID) {

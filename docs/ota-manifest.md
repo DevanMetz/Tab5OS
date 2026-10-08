@@ -49,7 +49,7 @@ Before the earlier framing fix, the SDK accepted 284 JSON bytes against a declar
 
 Device image-header types are adapted to preserve the P4 serialized layout under the Windows ABI; the real SDK application-description layout is checked. Image finalization and boot selection are simulated in RAM. Physical flash-image validation, hardware SHA failures, boot, rollback, TLS and both panels remain in the [hardware checklist](hardware-smoke-checklist.md).
 
-The separate [OTA result fixture](testing.md#ota-results) runs the actual three result functions from `main.c` with controlled NVS/state APIs. All 28 cases pass, including nine regressions against the preceding functions and recovery after an unreadable state. It preserves pending metadata until validation is known and verifies both new messages fit a 31-byte version. Its CI execution remains pending; device flash/reboot behavior is unverified.
+The separate [OTA result fixture](testing.md#ota-results) runs the actual three result functions from `main.c` with controlled NVS/state APIs. All 30 cases pass locally, including nine regressions against the `0f4a54e` functions and recovery after an unreadable state. It preserves pending metadata until validation is known and checks uncertain-state and pending-health messages with a 31-byte version. Linux CI caught a pending-health message that could exceed the buffer; the shorter text fits completely and the retained compiler-failure evidence was inspected. Device flash/reboot behavior is unverified.
 
 ## Trust boundary
 
