@@ -45,15 +45,22 @@ static lv_obj_t *content = &root_object, *note_area;
 static bool note_can_save, sd_ready;
 static unsigned allocations, handles, fs_calls, mutations, read_calls, close_calls;
 static int recorded_error;
+static unsigned error_reports, write_opens, directory_calls, remove_calls, write_calls, flush_calls, sync_calls;
+static bool no_errno, stale_success, full_read, positive_probe, full_write_flag, close_cleanup_error, remove_cleanup_error;
+static bool existing_directory;
+static int stale_errno = EBUSY;
 static char paths[3][128];
-static FILE *read_file;
-static bool read_error;
+static FILE *read_file, *write_file;
+static bool read_error, write_error;
 typedef enum { NO_FAULT, NO_SD, ALLOC_ERROR, FINAL_STAT_ERROR, BACKUP_STAT_ERROR,
     RECOVERY_ERROR, OPEN_READ_ERROR, PARTIAL_READ_ERROR, ZERO_ERRNO_READ_ERROR,
     PROBE_READ_ERROR, READ_CLOSE_ERROR, READ_AND_CLOSE_ERROR, OPEN_WRITE_ERROR,
     WRITE_ERROR, FLUSH_ERROR, SYNC_ERROR, WRITE_CLOSE_ERROR, PUBLISH_ERROR,
-    ROLLBACK_ERROR } fault_t;
+    ROLLBACK_ERROR, DIRECTORY_ERROR, REMOVE_TEMP_ERROR } fault_t;
 static fault_t fault;
+
+static void leave_stale_errno(void) { if (stale_success) errno = stale_errno; }
+static void supply_errno(int error) { if (!no_errno) errno = error; }
 
 static const char *native_path(const char *path)
 {
@@ -65,39 +72,51 @@ FILE *fixture_open(const char *path, const char *mode)
 {
     fs_calls++;
     bool reading = !strcmp(mode, "rb");
-    if (!reading) mutations++;
+    if (!reading) { mutations++; write_opens++; }
     if ((reading && fault == OPEN_READ_ERROR) || (!reading && fault == OPEN_WRITE_ERROR)) {
-        errno = EACCES; return NULL;
+        supply_errno(EACCES); return NULL;
     }
     FILE *file = fopen(native_path(path), mode);
-    if (file) { handles++; if (reading) read_file = file; }
+    if (file) { handles++; if (reading) read_file = file; else write_file = file; leave_stale_errno(); }
     return file;
 }
 size_t fixture_read(void *buffer, size_t size, size_t count, FILE *file)
 {
     assert(file == read_file && size == 1); read_calls++; fs_calls++;
     if (fault == PARTIAL_READ_ERROR || fault == ZERO_ERRNO_READ_ERROR || fault == READ_AND_CLOSE_ERROR) {
-        size_t read = fread(buffer, size, count / 2, file);
-        read_error = true; errno = fault == ZERO_ERRNO_READ_ERROR ? 0 : EACCES;
+        size_t read = fread(buffer, size, full_read ? count : count / 2, file);
+        read_error = true;
+        if (fault == ZERO_ERRNO_READ_ERROR) errno = 0;
+        else supply_errno(EACCES);
         return read;
     }
-    return fread(buffer, size, count, file);
+    size_t read = fread(buffer, size, count, file);
+    if (!ferror(file)) leave_stale_errno();
+    return read;
 }
 int fixture_getc(FILE *file)
 {
     fs_calls++;
-    if (fault == PROBE_READ_ERROR && file == read_file) { read_error = true; errno = EIO; return EOF; }
-    return fgetc(file);
+    if (fault == PROBE_READ_ERROR && file == read_file) {
+        int result = positive_probe ? fgetc(file) : EOF;
+        read_error = true; supply_errno(EIO); return result;
+    }
+    int result = fgetc(file);
+    if (!ferror(file)) leave_stale_errno();
+    return result;
 }
-int fixture_error(FILE *file) { return (file == read_file && read_error) || ferror(file); }
+int fixture_error(FILE *file) { return (file == read_file && read_error) || (file == write_file && write_error) || ferror(file); }
 int fixture_close(FILE *file)
 {
     assert(handles); handles--; close_calls++; fs_calls++;
     bool reading = file == read_file;
     int result = fclose(file);
     if (reading) read_file = NULL;
+    else write_file = NULL;
     if ((reading && (fault == READ_CLOSE_ERROR || fault == READ_AND_CLOSE_ERROR)) ||
-        (!reading && fault == WRITE_CLOSE_ERROR)) { errno = EPERM; return EOF; }
+        (!reading && fault == WRITE_CLOSE_ERROR)) { supply_errno(EPERM); return EOF; }
+    if (close_cleanup_error) { errno = EPERM; return EOF; }
+    if (!result) leave_stale_errno();
     return result;
 }
 int fixture_stat(const char *path, struct stat *info)
@@ -107,9 +126,19 @@ int fixture_stat(const char *path, struct stat *info)
     if ((mapped == paths[0] && fault == FINAL_STAT_ERROR) || (mapped == paths[2] && fault == BACKUP_STAT_ERROR)) {
         errno = EACCES; return -1;
     }
-    return stat(mapped, info);
+    int result = stat(mapped, info);
+    if (!result) leave_stale_errno();
+    return result;
 }
-int fixture_remove(const char *path) { fs_calls++; mutations++; return remove(native_path(path)); }
+int fixture_remove(const char *path)
+{
+    fs_calls++; mutations++; remove_calls++;
+    if (!strcmp(path, SD_PATH "/DOCS/NOTE.TMP") && fault == REMOVE_TEMP_ERROR) { supply_errno(EACCES); return -1; }
+    if (remove_cleanup_error && write_calls) { errno = EACCES; return -1; }
+    int result = remove(native_path(path));
+    if (!result) leave_stale_errno();
+    return result;
+}
 int fixture_rename(const char *from, const char *to)
 {
     fs_calls++; mutations++;
@@ -122,27 +151,35 @@ int fixture_rename(const char *from, const char *to)
 }
 int fixture_mkdir(const char *path, int mode)
 {
-    assert(!strcmp(path, SD_PATH "/DOCS") && mode == 0775); fs_calls++; mutations++; return 0;
+    assert(!strcmp(path, SD_PATH "/DOCS") && mode == 0775); fs_calls++; mutations++; directory_calls++;
+    if (fault == DIRECTORY_ERROR) { supply_errno(EACCES); return -1; }
+    if (existing_directory) { errno = EEXIST; return -1; }
+    leave_stale_errno(); return 0;
 }
 int fixture_puts(const char *text, FILE *file)
 {
-    fs_calls++; mutations++;
+    fs_calls++; mutations++; write_calls++;
     if (fault == WRITE_ERROR) {
+        if (full_write_flag) {
+            int result = fputs(text, file); assert(result >= 0); write_error = true; supply_errno(EIO); return result;
+        }
         size_t length = strlen(text) / 2;
-        assert(fwrite(text, 1, length, file) == length); errno = EIO; return EOF;
+        assert(fwrite(text, 1, length, file) == length); supply_errno(EIO); return EOF;
     }
-    return fputs(text, file);
+    int result = fputs(text, file);
+    if (result >= 0) leave_stale_errno();
+    return result;
 }
 int fixture_flush(FILE *file)
 {
-    fs_calls++;
+    fs_calls++; flush_calls++;
     if (fault == FLUSH_ERROR) { errno = EIO; return EOF; }
     return fflush(file);
 }
 #ifdef _WIN32
 int fixture_sync(int descriptor)
 {
-    fs_calls++;
+    fs_calls++; sync_calls++;
     if (fault == SYNC_ERROR) { errno = EIO; return -1; }
     return _commit(descriptor);
 }
@@ -150,7 +187,7 @@ int fixture_sync(int descriptor)
 #else
 int fixture_sync(int descriptor)
 {
-    fs_calls++;
+    fs_calls++; sync_calls++;
     if (fault == SYNC_ERROR) { errno = EIO; return -1; }
     return fsync(descriptor);
 }
@@ -214,7 +251,7 @@ void *heap_caps_malloc(size_t size, unsigned caps)
     void *memory = malloc(size); assert(memory); allocations++; return memory;
 }
 void heap_caps_free(void *memory) { if (memory) { assert(allocations); allocations--; free(memory); } }
-void sd_record_error(int error) { recorded_error = error; }
+void sd_record_error(int error) { recorded_error = error; error_reports++; }
 int sd_error_snapshot(void) { return recorded_error; }
 
 #define fopen fixture_open
@@ -278,7 +315,11 @@ static void prepare(const unsigned char *data, size_t length, const unsigned cha
     write_bytes(0, data, length); write_bytes(2, backup, backup_length);
     write_bytes(1, retained, sizeof(retained) - 1);
     recorded_error = 0; fs_calls = mutations = read_calls = close_calls = 0;
-    read_file = NULL; read_error = false; sd_ready = true; fault = NO_FAULT;
+    read_file = write_file = NULL; read_error = write_error = false; sd_ready = true; fault = NO_FAULT;
+    no_errno = stale_success = full_read = positive_probe = full_write_flag = close_cleanup_error = remove_cleanup_error = false;
+    existing_directory = false;
+    stale_errno = EBUSY;
+    error_reports = write_opens = directory_calls = remove_calls = write_calls = flush_calls = sync_calls = 0;
 }
 static void report(const char *name, bool pass, size_t length, size_t loaded, unsigned blocked_mutations)
 {
@@ -286,6 +327,122 @@ static void report(const char *name, bool pass, size_t length, size_t loaded, un
     printf("%s %s input=%zu displayed=%zu fs_calls=%u mutations=%u blocked_mutations=%u reads=%u closes=%u handles=%u allocations=%u error=%d\n",
         pass ? "PASS" : "FAIL", name, length, loaded, fs_calls, mutations, blocked_mutations,
         read_calls, close_calls, handles, allocations, recorded_error);
+}
+static lv_obj_t *boundary_status(void)
+{
+#ifdef NOTES_REAL_LVGL
+    return lv_obj_get_child(lv_obj_get_child(content, 0), 0);
+#else
+    return &objects[1];
+#endif
+}
+static bool boundary_disabled(void)
+{
+#ifdef NOTES_REAL_LVGL
+    return lv_obj_has_state(lv_obj_get_child(lv_obj_get_child(content, 0), 1), LV_STATE_DISABLED) &&
+           lv_obj_has_state(note_area, LV_STATE_DISABLED);
+#else
+    return (objects[2].state & LV_STATE_DISABLED) && (note_area->state & LV_STATE_DISABLED);
+#endif
+}
+static void boundary_save(void)
+{
+#ifdef NOTES_REAL_LVGL
+    lv_obj_send_event(lv_obj_get_child(lv_obj_get_child(content, 0), 1), LV_EVENT_CLICKED, NULL);
+#else
+    lv_event_t event = {.user_data = boundary_status()}; save_note(&event);
+#endif
+}
+static const char *boundary_status_text(void)
+{
+#ifdef NOTES_REAL_LVGL
+    return lv_label_get_text(boundary_status());
+#else
+    return boundary_status()->text;
+#endif
+}
+static void load_boundary(const char *name, const unsigned char *data, size_t length, fault_t point,
+                          bool missing_errno, bool full_count, bool positive, bool cleanup_error, int expected)
+{
+    prepare(data, length, data ? old_backup : NULL, data ? sizeof(old_backup) - 1 : 0);
+    fault = point; no_errno = missing_errno; stale_success = true; full_read = full_count; positive_probe = positive;
+    close_cleanup_error = cleanup_error; if (point == OPEN_READ_ERROR) stale_errno = ENOENT;
+    notes_clicked(NULL);
+    size_t displayed = strlen(lv_textarea_get_text(note_area));
+    bool pass = !note_can_save && boundary_disabled() && !displayed && recorded_error == expected && error_reports == 1;
+    unsigned previous_mutations = mutations; boundary_save();
+    pass = pass && mutations == previous_mutations && !handles && !allocations;
+    pass = pass && bytes_match(0, data, length) && bytes_match(1, retained, sizeof(retained) - 1);
+    pass = pass && bytes_match(2, data ? old_backup : NULL, data ? sizeof(old_backup) - 1 : 0);
+    report(name, pass, length, displayed, mutations - previous_mutations);
+}
+static void save_boundary(const char *name, fault_t point, bool missing_errno, bool full_flag, bool cleanup_error, bool retain_partial)
+{
+    const char *draft = "new complete note\n";
+    prepare(old_note, sizeof(old_note) - 1, old_backup, sizeof(old_backup) - 1);
+    notes_clicked(NULL); lv_textarea_set_text(note_area, draft);
+    fault = point; no_errno = missing_errno; stale_success = true; full_write_flag = full_flag;
+    close_cleanup_error = cleanup_error; remove_cleanup_error = retain_partial;
+    errno = point == DIRECTORY_ERROR ? EEXIST : EBUSY;
+    unsigned previous_opens = write_opens, previous_removes = remove_calls, previous_closes = close_calls;
+    int expected = missing_errno ? EIO : point == WRITE_ERROR ? EIO : EACCES;
+    boundary_save();
+    bool pass = strncmp(boundary_status_text(), "Saved", 5) && recorded_error == expected && error_reports == 1;
+    pass = pass && !handles && !allocations && !flush_calls && !sync_calls;
+    pass = pass && bytes_match(0, old_note, sizeof(old_note) - 1) && bytes_match(2, old_backup, sizeof(old_backup) - 1);
+    if (point == DIRECTORY_ERROR || point == REMOVE_TEMP_ERROR) {
+        pass = pass && write_opens == previous_opens && close_calls == previous_closes && !write_calls;
+        if (point == DIRECTORY_ERROR) pass = pass && remove_calls == previous_removes;
+        pass = pass && bytes_match(1, retained, sizeof(retained) - 1);
+    } else if (point == WRITE_ERROR && retain_partial) {
+        const unsigned char *expected_temp = full_flag ? (const unsigned char *)draft : (const unsigned char *)"new compl";
+        pass = pass && bytes_match(1, expected_temp, full_flag ? strlen(draft) : 9) && close_calls == previous_closes + 1;
+    } else {
+        pass = pass && bytes_match(1, NULL, 0);
+    }
+    report(name, pass, strlen(draft), strlen(lv_textarea_get_text(note_area)), 0);
+}
+static void repeat_boundary_retry(const char *name, fault_t point)
+{
+    bool pass = true;
+#ifdef NOTES_REAL_LVGL
+    clear_content(); lv_obj_update_layout(content); lv_mem_monitor_t before, after; lv_mem_monitor(&before);
+#endif
+    for (unsigned i = 0; i < 25; i++) {
+        prepare(old_note, sizeof(old_note) - 1, old_backup, sizeof(old_backup) - 1);
+        notes_clicked(NULL); lv_textarea_set_text(note_area, "new complete note\n");
+        fault = point; no_errno = stale_success = true; close_cleanup_error = remove_cleanup_error = point == WRITE_ERROR;
+        errno = EEXIST; boundary_save();
+        pass = pass && recorded_error == EIO && error_reports == 1 && !handles && !allocations;
+        pass = pass && bytes_match(0, old_note, sizeof(old_note) - 1) && bytes_match(2, old_backup, sizeof(old_backup) - 1);
+        pass = pass && bytes_match(1, point == WRITE_ERROR ? (const unsigned char *)"new compl" : retained,
+                                  point == WRITE_ERROR ? 9 : sizeof(retained) - 1);
+        fault = NO_FAULT; no_errno = stale_success = close_cleanup_error = remove_cleanup_error = false;
+        boundary_save();
+        pass = pass && !strncmp(boundary_status_text(), "Saved", 5) && error_reports == 1 && !handles && !allocations;
+        pass = pass && bytes_match(0, (const unsigned char *)"new complete note\n", 18) && bytes_match(2, old_note, sizeof(old_note) - 1) && bytes_match(1, NULL, 0);
+        notes_clicked(NULL);
+        pass = pass && !strcmp(lv_textarea_get_text(note_area), "new complete note\n") && !handles && !allocations;
+        clear_content();
+#ifdef NOTES_REAL_LVGL
+        lv_obj_update_layout(content);
+#endif
+    }
+#ifdef NOTES_REAL_LVGL
+    lv_mem_monitor(&after); pass = pass && before.free_size == after.free_size && before.used_cnt == after.used_cnt;
+#endif
+    report(name, pass, 18, 18, 0);
+}
+static void preparation_success(const char *name, bool directory_exists, bool temp_missing)
+{
+    prepare(old_note, sizeof(old_note) - 1, old_backup, sizeof(old_backup) - 1);
+    notes_clicked(NULL); lv_textarea_set_text(note_area, "new complete note\n");
+    existing_directory = directory_exists;
+    if (temp_missing) assert(remove(paths[1]) == 0);
+    boundary_save();
+    bool pass = !strncmp(boundary_status_text(), "Saved", 5) && !error_reports && !handles && !allocations;
+    pass = pass && bytes_match(0, (const unsigned char *)"new complete note\n", 18) && bytes_match(2, old_note, sizeof(old_note) - 1) && bytes_match(1, NULL, 0);
+    report(name, pass, 18, strlen(lv_textarea_get_text(note_area)), 0);
 }
 #ifndef NOTES_REAL_LVGL
 static void load_case(const char *name, const unsigned char *data, size_t length,
@@ -378,6 +535,32 @@ int main(void)
     save_case("save-utf8-byte-limit", large, NO_FAULT, false, true);
     large[NOTE_MAX_BYTES - 1] = 0;
     load_case("complete-utf8", (const unsigned char *)large, NOTE_MAX_BYTES - 1, NULL, 0, NO_FAULT, true, 0);
+    memset(large, 'x', NOTE_MAX_BYTES + 1); large[NOTE_MAX_BYTES + 1] = '\0';
+    load_boundary("open-no-errno-existing", old_note, sizeof(old_note) - 1, OPEN_READ_ERROR, true, false, false, false, EIO);
+    load_boundary("open-no-errno-missing", NULL, 0, OPEN_READ_ERROR, true, false, false, false, EIO);
+    load_boundary("probe-no-errno", old_note, sizeof(old_note) - 1, PROBE_READ_ERROR, true, false, false, false, EIO);
+    load_boundary("positive-probe-error", (const unsigned char *)large, NOTE_MAX_BYTES + 1, PROBE_READ_ERROR, false, false, true, false, EIO);
+    load_boundary("positive-probe-no-errno", (const unsigned char *)large, NOTE_MAX_BYTES + 1, PROBE_READ_ERROR, true, false, true, false, EIO);
+    load_boundary("close-no-errno", old_note, sizeof(old_note) - 1, READ_CLOSE_ERROR, true, false, false, false, EIO);
+    load_boundary("full-read-error", (const unsigned char *)large, NOTE_MAX_BYTES, PARTIAL_READ_ERROR, false, true, false, false, EACCES);
+    load_boundary("full-read-no-errno", (const unsigned char *)large, NOTE_MAX_BYTES, PARTIAL_READ_ERROR, true, true, false, false, EIO);
+    load_boundary("first-probe-no-errno", old_note, sizeof(old_note) - 1, PROBE_READ_ERROR, true, false, false, true, EIO);
+    load_boundary("first-full-read-error", (const unsigned char *)large, NOTE_MAX_BYTES, PARTIAL_READ_ERROR, false, true, false, true, EACCES);
+    const fault_t preparation[] = {DIRECTORY_ERROR, REMOVE_TEMP_ERROR, OPEN_WRITE_ERROR, WRITE_ERROR};
+    const char *preparation_names[] = {"directory", "temp-removal", "open-write", "partial-write"};
+    for (unsigned i = 0; i < 4; i++) for (unsigned missing = 0; missing < 2; missing++) {
+        char name[64]; snprintf(name, sizeof(name), "%s-%s", preparation_names[i], missing ? "no-errno" : "error");
+        save_boundary(name, preparation[i], missing, false, false, false);
+    }
+    save_boundary("positive-write-error", WRITE_ERROR, false, true, false, false);
+    save_boundary("positive-write-no-errno", WRITE_ERROR, true, true, false, false);
+    save_boundary("first-write-close-error", WRITE_ERROR, false, false, true, false);
+    save_boundary("first-write-no-errno-cleanup", WRITE_ERROR, true, false, true, true);
+    save_boundary("first-positive-write-cleanup", WRITE_ERROR, true, true, true, true);
+    repeat_boundary_retry("preparation-failure-retry-25", DIRECTORY_ERROR);
+    repeat_boundary_retry("write-failure-retry-25", WRITE_ERROR);
+    preparation_success("existing-directory-accepted", true, false);
+    preparation_success("missing-temp-accepted", false, true);
     free(large);
 #if NOTES_HAS_LEAVE
     prepare(old_note, sizeof(old_note) - 1, NULL, 0); notes_clicked(NULL);
@@ -434,6 +617,13 @@ int main(void)
     lv_textarea_set_max_length(note_area, NOTE_MAX_BYTES);
     unsigned previous_mutations = mutations; lv_obj_send_event(save_button(), LV_EVENT_CLICKED, NULL);
     report("real-lvgl-utf8-byte-guard", mutations == previous_mutations && bytes_match(0, old_note, sizeof(old_note) - 1) && bytes_match(2, old_backup, sizeof(old_backup) - 1) && bytes_match(1, retained, sizeof(retained) - 1) && strncmp(lv_label_get_text(status_label()), "Saved", 5), NOTE_MAX_BYTES + 1, strlen(lv_textarea_get_text(note_area)), mutations - previous_mutations);
+    load_boundary("real-lvgl-open-no-errno", old_note, sizeof(old_note) - 1, OPEN_READ_ERROR, true, false, false, false, EIO);
+    load_boundary("real-lvgl-probe-no-errno", old_note, sizeof(old_note) - 1, PROBE_READ_ERROR, true, false, false, false, EIO);
+    save_boundary("real-lvgl-directory-error", DIRECTORY_ERROR, false, false, false, false);
+    save_boundary("real-lvgl-temp-removal-error", REMOVE_TEMP_ERROR, false, false, false, false);
+    save_boundary("real-lvgl-first-write-error", WRITE_ERROR, true, false, true, true);
+    repeat_boundary_retry("real-lvgl-failure-retry-25", WRITE_ERROR);
+    preparation_success("real-lvgl-existing-directory-missing-temp", true, true);
     free(large);
     prepare(old_note, sizeof(old_note) - 1, NULL, 0); notes_clicked(NULL); clear_content(); lv_obj_update_layout(content);
     lv_mem_monitor_t before, after; lv_mem_monitor(&before);

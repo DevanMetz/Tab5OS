@@ -4757,17 +4757,24 @@ static void notes_leave(void)
 static int load_note(char *note)
 {
     note[0] = '\0';
+    errno = 0;
     if (storage_recover_replace(SD_PATH "/DOCS/NOTE.TXT", SD_PATH "/DOCS/NOTE.BAK") != 0)
         return errno ? errno : EIO;
+    errno = 0;
     FILE *file = fopen(SD_PATH "/DOCS/NOTE.TXT", "rb");
     if (!file) return errno == ENOENT ? 0 : errno ? errno : EIO;
 
     errno = 0;
     size_t read = fread(note, 1, NOTE_MAX_BYTES, file);
     int error = ferror(file) ? (errno ? errno : EIO) : 0;
-    if (!error && fgetc(file) != EOF) error = EFBIG;
-    if (!error && ferror(file)) error = errno ? errno : EIO;
+    if (!error) {
+        errno = 0;
+        int extra = fgetc(file);
+        if (ferror(file)) error = errno ? errno : EIO;
+        else if (extra != EOF) error = EFBIG;
+    }
     if (!error && memchr(note, '\0', read)) error = EILSEQ;
+    errno = 0;
     if (fclose(file) != 0 && !error) error = errno ? errno : EIO;
     note[read] = '\0';
     return error;
@@ -4786,11 +4793,24 @@ static void save_note(lv_event_t *event)
         lv_label_set_text_fmt(status, "Note too long (maximum %d bytes)", NOTE_MAX_BYTES);
         return;
     }
-    mkdir(SD_PATH "/DOCS", 0775);
     const char *temporary_path = SD_PATH "/DOCS/NOTE.TMP";
     const char *final_path = SD_PATH "/DOCS/NOTE.TXT";
     const char *backup_path = SD_PATH "/DOCS/NOTE.BAK";
-    remove(temporary_path);
+    int preparation_error = 0;
+    errno = 0;
+    if (mkdir(SD_PATH "/DOCS", 0775) != 0 && errno != EEXIST)
+        preparation_error = errno ? errno : EIO;
+    if (!preparation_error) {
+        errno = 0;
+        if (remove(temporary_path) != 0 && errno != ENOENT)
+            preparation_error = errno ? errno : EIO;
+    }
+    if (preparation_error) {
+        sd_record_error(preparation_error);
+        lv_label_set_text_fmt(status, "Save failed: %s", strerror(preparation_error));
+        return;
+    }
+    errno = 0;
     FILE *file = fopen(temporary_path, "wb");
     if (!file) {
         int error = errno ? errno : EIO;
@@ -4798,19 +4818,23 @@ static void save_note(lv_event_t *event)
         lv_label_set_text_fmt(status, "Save failed: %s", strerror(error));
         return;
     }
-    if (fputs(text, file) < 0) {
+    errno = 0;
+    if (fputs(text, file) < 0 || ferror(file)) {
         int write_error = errno ? errno : EIO;
+        errno = 0;
         fclose(file);
         file = NULL;
+        errno = 0;
         remove(temporary_path);
         sd_record_error(write_error);
         lv_label_set_text_fmt(status, "Save failed: %s", strerror(write_error));
         return;
     }
     if (storage_commit_replace_file(&file, temporary_path, final_path, backup_path) != 0) {
-        int save_error = errno;
+        int save_error = errno ? errno : EIO;
         sd_record_error(save_error);
         struct stat info;
+        errno = 0;
         if (stat(temporary_path, &info) == 0)
             lv_label_set_text(status, "Save not published; NOTE.TMP was retained");
         else
