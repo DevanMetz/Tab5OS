@@ -27,6 +27,7 @@ typedef struct {
     void *data;
     int data_len;
     void *user_data;
+    void *client;
 } esp_http_client_event_t;
 typedef struct {
     const char *url;

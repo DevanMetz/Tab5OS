@@ -94,7 +94,12 @@ typedef struct { int fd; bool secure, connecting; const char *common_name; } nat
 static int native_poll(esp_transport_handle_t transport, int timeout_ms, bool reading)
 {
     native_transport_t *state = esp_transport_get_context_data(transport);
-    assert(state->fd >= 0 && timeout_ms >= 0 && timeout_ms <= 100);
+    assert(state->fd >= 0 && timeout_ms >= 0);
+#if HTTP_HOST_BLOCKING
+    assert(timeout_ms <= 30000);
+#else
+    assert(timeout_ms <= 100);
+#endif
     fd_set ready; FD_ZERO(&ready); FD_SET((SOCKET)state->fd, &ready);
     struct timeval timeout = {.tv_sec = timeout_ms / 1000, .tv_usec = (timeout_ms % 1000) * 1000};
     return host_select(state->fd + 1, reading ? &ready : NULL, reading ? NULL : &ready, NULL, &timeout);
@@ -139,6 +144,18 @@ static int native_read(esp_transport_handle_t transport, char *buffer, int lengt
     if (result < 0) { esp_transport_capture_errno(transport, errno); return ERR_TCP_TRANSPORT_CONNECTION_FAILED; }
     return result == 0 ? ERR_TCP_TRANSPORT_CONNECTION_CLOSED_BY_FIN : result;
 }
+#if HTTP_HOST_BLOCKING
+static int native_blocking_connect(esp_transport_handle_t transport, const char *host, int port, int timeout_ms)
+{
+    assert(timeout_ms >= 0 && timeout_ms <= 30000);
+    int64_t deadline = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
+    int result;
+    do {
+        result = native_connect(transport, host, port, 100);
+    } while (result == 0 && esp_timer_get_time() < deadline);
+    return result > 0 ? 0 : -1;
+}
+#endif
 static int native_write(esp_transport_handle_t transport, const char *buffer, int length, int timeout_ms)
 {
     int result = native_poll_write(transport, timeout_ms);
@@ -170,7 +187,13 @@ static esp_transport_handle_t native_init(bool secure)
     state->fd = -1; state->secure = secure;
     transport->foundation = esp_transport_init_foundation_transport(); assert(transport->foundation);
     esp_transport_set_context_data(transport, state);
-    esp_transport_set_func(transport, NULL, native_read, native_write, native_close,
+    esp_transport_set_func(transport,
+#if HTTP_HOST_BLOCKING
+                           native_blocking_connect,
+#else
+                           NULL,
+#endif
+                           native_read, native_write, native_close,
                            native_poll_read, native_poll_write, native_destroy);
     esp_transport_set_async_connect_func(transport, native_connect);
     InterlockedIncrement(&http_host_transports);

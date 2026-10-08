@@ -277,7 +277,9 @@ static esp_err_t image_hash_event(esp_http_client_event_t *event)
     if (event->event_id == HTTP_EVENT_REDIRECT) {
         hash->bytes = 0;
         hash->failed = mbedtls_sha256_starts(&hash->context, false) != 0;
-    } else if (event->event_id == HTTP_EVENT_ON_DATA && event->data_len > 0 && !hash->failed) {
+    } else if (event->event_id == HTTP_EVENT_ON_DATA && event->data_len > 0 && !hash->failed &&
+               esp_http_client_get_status_code(event->client) == 200) {
+        /* SDK OTA drains redirect bodies without HTTP_EVENT_REDIRECT. */
         hash->failed = mbedtls_sha256_update(&hash->context, event->data,
                                              (size_t)event->data_len) != 0;
         hash->bytes += (size_t)event->data_len;

@@ -8,7 +8,8 @@ if (-not $Compiler) { $Compiler = (Get-Command clang -ErrorAction Stop).Source }
 $nativeIdf = Join-Path $root 'build/native-ui-idf'
 $nativeTemp = Join-Path $root 'build/native-ui-temp'
 foreach ($directory in @($nativeTemp, "$root/build/offline-ui", "$root/build/mqtt-ui", "$root/build/mqtt-network",
-                         "$root/build/http-network", "$root/build/network-ui", "$root/build/ota-manifest")) {
+                         "$root/build/http-network", "$root/build/network-ui", "$root/build/ota-manifest",
+                         "$root/build/ota-image")) {
     New-Item -ItemType Directory -Force -Path $directory | Out-Null
 }
 $savedNativeTemp = $env:TEMP
@@ -36,6 +37,9 @@ try {
         Tee-Object -FilePath $suiteLog
     $suiteLog = "$root/build/ota-manifest/ci.log"
     & "$PSScriptRoot/test_ota_manifest.ps1" -Compiler $Compiler -IdfPath $nativeIdf 2>&1 |
+        Tee-Object -FilePath $suiteLog
+    $suiteLog = "$root/build/ota-image/ci.log"
+    & "$PSScriptRoot/test_ota_image.ps1" -Compiler $Compiler -IdfPath $nativeIdf 2>&1 |
         Tee-Object -FilePath $suiteLog
 } catch {
     # A terminating error can precede Tee-Object's first output/file creation.

@@ -187,7 +187,7 @@ jobs:
           tar -xzf build/native-ui-sources.tar.gz
           if ($LASTEXITCODE) { throw 'Native UI source extraction failed.' }
           Get-Content build/native-ui-sources.json
-      - name: Test offline apps, network consoles and OTA manifests
+      - name: Test offline apps, network consoles and OTA manifests/images
         shell: pwsh
         run: ./tools/test_native_ui_ci.ps1
       - uses: actions/upload-artifact@v4
@@ -208,6 +208,10 @@ jobs:
             build/network-ui/ci.log
             build/network-ui/dns-*/*.log
             build/ota-manifest/*.log
+            build/ota-image/*.log
+            build/ota-image/*-wire.json
+            build/ota-image/image-checks.json
+            build/ota-image/fixture.bin
             build/native-ui-sources.json
           if-no-files-found: warn
           retention-days: 14
