@@ -14,12 +14,19 @@
 #include <string.h>
 #include <sys/stat.h>
 #ifdef _WIN32
+#include <direct.h>
 #include <io.h>
 #include <process.h>
 #define fixture_pid _getpid
+#define make_directory(path) _mkdir(path)
+#define remove_directory(path) _rmdir(path)
+#define S_ISDIR(mode) (((mode) & _S_IFMT) == _S_IFDIR)
+#define S_ISREG(mode) (((mode) & _S_IFMT) == _S_IFREG)
 #else
 #include <unistd.h>
 #define fixture_pid getpid
+#define make_directory(path) mkdir(path, 0775)
+#define remove_directory(path) rmdir(path)
 #endif
 
 typedef int esp_err_t;
@@ -41,6 +48,8 @@ static int reported_error, status;
 static FILE *output_file;
 static bool output_error, no_errno, stale_success, full_count, flag_error, close_cleanup_error, remove_cleanup_error;
 static int stale_errno;
+static bool path_kind_controlled, special_path, last_kind_saved;
+static size_t path_size;
 static char paths[2][128];
 static unsigned char body[2051], installed[1025];
 static const unsigned char retained[] = "old unpublished ebook\n";
@@ -67,7 +76,13 @@ static int fixture_stat(const char *path, struct stat *info)
         supply_errno(EACCES); return -1;
     }
     int result = stat(paths[index], info);
-    if (!result) leave_stale_errno();
+    if (!result) {
+        if (!index && path_kind_controlled) {
+            info->st_size = path_size;
+            if (special_path) info->st_mode = 0; /* Modeled nonregular metadata; no special file is opened. */
+        }
+        leave_stale_errno();
+    }
     return result;
 }
 static int fixture_remove(const char *path)
@@ -222,6 +237,7 @@ static void prepare(const unsigned char *original, size_t length)
     clients = handles = stat_calls = remove_calls = open_calls = write_calls = flush_calls = sync_calls = close_calls = publications = 0;
     init_calls = perform_calls = cleanup_calls = callbacks = callback_failures = reports = 0;
     output_file = NULL; output_error = no_errno = full_count = flag_error = close_cleanup_error = remove_cleanup_error = false;
+    path_kind_controlled = special_path = false; path_size = 0;
     stale_success = true; stale_errno = ENOENT; fault = NONE; fault_at = 1; active_book = 0; reported_error = 0; status = 200; errno = ENOENT;
 }
 static void report(const char *name, bool pass, bool result)
@@ -298,6 +314,54 @@ static void failed_network_cleanup(const char *name, enum point point, int respo
     report(name, !saved && reports == 1 && reported_error == expected && !publications && !flush_calls && !sync_calls && close_calls == 1 &&
            matches(0, NULL, 0) && matches(1, point == INIT ? (const unsigned char *)"" : body, point == INIT ? 0 : sizeof(body)), saved);
 }
+static bool reject_path_kind(unsigned book, size_t size, bool special)
+{
+    prepare(special ? installed : NULL, special ? sizeof(installed) : 0); active_book = book;
+    if (!special) assert(make_directory(paths[0]) == 0);
+    path_kind_controlled = true; special_path = special; path_size = size;
+    int expected = special ? EINVAL : EISDIR;
+    errno = EBUSY;
+    bool present = ebook_default_installed(&ebook_defaults[book]);
+    int probe_error = errno;
+    bool saved = ebook_download_default(&ebook_defaults[book]);
+    last_kind_saved = saved;
+    bool pass = !present && probe_error == expected && !saved && reports == 1 && reported_error == expected;
+    pass = pass && stat_calls == 2 && !remove_calls && !open_calls && !init_calls && !perform_calls && !callbacks;
+    pass = pass && !publications && !clients && !handles && matches(1, retained, sizeof(retained) - 1);
+    if (special) pass = pass && matches(0, installed, sizeof(installed));
+    else {
+        struct stat info; pass = pass && stat(paths[0], &info) == 0 && S_ISDIR(info.st_mode);
+        assert(remove_directory(paths[0]) == 0);
+    }
+    path_kind_controlled = special_path = false;
+    return pass;
+}
+static void path_kind_cases(void)
+{
+    const size_t sizes[] = {0, 1024, 1025};
+    for (unsigned book = 0; book < sizeof(ebook_defaults) / sizeof(ebook_defaults[0]); book++) {
+        for (unsigned special = 0; special < 2; special++) for (unsigned i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+            char name[96]; assert(snprintf(name, sizeof(name), "path-kind-%u-%s-%zu", book,
+                special ? "nonregular-model" : "directory", sizes[i]) > 0);
+            bool pass = reject_path_kind(book, sizes[i], special != 0);
+            report(name, pass, last_kind_saved);
+        }
+        bool pass = true;
+        for (unsigned i = 0; i < 25; i++) {
+            pass = reject_path_kind(book, 1025, i % 2 != 0) && pass;
+            /* The fixture owner removes its empty directory or native model file. */
+            if (i % 2) assert(remove(paths[0]) == 0);
+            bool saved = ebook_download_default(&ebook_defaults[book]);
+            pass = pass && saved && reports == 1 && !clients && !handles && publications == 1;
+            pass = pass && matches(0, body, sizeof(body)) && matches(1, NULL, 0);
+            unsigned previous_inits = init_calls;
+            saved = ebook_download_default(&ebook_defaults[book]);
+            pass = pass && saved && init_calls == previous_inits && matches(0, body, sizeof(body)) && !clients && !handles;
+        }
+        char name[96]; assert(snprintf(name, sizeof(name), "path-kind-%u-recovery-25", book) > 0);
+        report(name, pass, true);
+    }
+}
 int main(void)
 {
     for (unsigned i = 0; i < 2; i++) {
@@ -348,6 +412,7 @@ int main(void)
     failed_write("first-full-write-cleanup", 2, false, true, true, true);
     failed_write("first-full-write-no-errno-cleanup", 2, true, true, true, true);
     failed_write_retry();
+    path_kind_cases();
     for (unsigned i = 0; i < 2; i++) if (remove(paths[i]) != 0) assert(errno == ENOENT);
     printf("%s %u ebook download cases failures=%u clients=%u handles=%u (native files; controlled HTTP/I/O)\n", failures ? "FAIL" : "PASS", cases, failures, clients, handles);
     return failures ? 1 : 0;

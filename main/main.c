@@ -4410,6 +4410,10 @@ static bool ebook_default_installed(const ebook_default_t *book)
         if (!errno) errno = EIO;
         return false;
     }
+    if (!S_ISREG(info.st_mode)) {
+        errno = S_ISDIR(info.st_mode) ? EISDIR : EINVAL;
+        return false;
+    }
     errno = 0;
     return info.st_size > 1024;
 }

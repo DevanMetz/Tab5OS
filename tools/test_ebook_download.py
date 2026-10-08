@@ -69,6 +69,7 @@ def main():
         "executableSha256": digest(executable.read_bytes()), "exitCode": result.returncode,
         "actualFunctionsCompiled": 3, "actualTypesCompiled": 2 if has_state else 1, "actualStorageSourceCompiled": True,
         "nativeFileBytesChecked": True, "ioFaultsControlled": True, "httpEventsAndClientResultsControlled": True,
+        "nativeDirectoriesChecked": True, "directorySizesAndSpecialPathKindsControlled": True,
         "laterEventsDeliveredDespiteCallbackFailure": True, "actualSdkOrUiExecuted": False,
         "physicalSdOrTlsVerified": False,
     }, indent=2) + "\n", encoding="utf-8")
