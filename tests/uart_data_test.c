@@ -39,7 +39,7 @@ int main(void)
     for (size_t length = 1; length <= UART_TX_MAX_BYTES; length++) {
         for (size_t i = 0; i < length; i++) {
             if (i) draft[i * 3 - 1] = ' ';
-            snprintf(draft + i * 3, 3, "%02X", (unsigned)i);
+            snprintf(draft + i * 3, 3, "%02X", (unsigned)(uint8_t)i);
         }
         assert(uart_tx_parse(draft, UART_TX_HEX, UART_TX_END_NONE, &data) == UART_TX_OK);
         assert(data.length == length);
