@@ -4690,21 +4690,34 @@ static void show_ebooks(void)
         lv_list_add_text(list, message);
         return;
     }
+    int welcome_error = 0;
     if (created) {
         const char *temporary = SD_PATH "/BOOKS/WELCOME.TMP";
         const char *final = SD_PATH "/BOOKS/WELCOME.TXT";
+        errno = 0;
         FILE *welcome = fopen(temporary, "wb");
         if (welcome) {
-            if (fputs("Welcome to Tab5 Books!\n\nCopy .txt ebooks into the BOOKS folder on the SD card. Use Next and Prev to move through the book, and Text to change the reading size.\n", welcome) < 0) {
-                int error = errno ? errno : EIO;
+            errno = 0;
+            if (fputs("Welcome to Tab5 Books!\n\nCopy .txt ebooks into the BOOKS folder on the SD card. Use Next and Prev to move through the book, and Text to change the reading size.\n", welcome) < 0 || ferror(welcome)) {
+                welcome_error = errno ? errno : EIO;
+                errno = 0;
                 fclose(welcome);
+                welcome = NULL;
+                errno = 0;
                 remove(temporary);
-                sd_record_error(error);
-            } else if (storage_commit_new_file(&welcome, temporary, final) != 0) {
-                sd_record_error(errno ? errno : EIO);
+            } else {
+                errno = 0;
+                if (storage_commit_new_file(&welcome, temporary, final) != 0)
+                    welcome_error = errno ? errno : EIO;
             }
         } else {
-            sd_record_error(errno ? errno : EIO);
+            welcome_error = errno ? errno : EIO;
+        }
+        if (welcome_error) {
+            sd_record_error(welcome_error);
+            char message[96];
+            snprintf(message, sizeof(message), "Could not create WELCOME.TXT: %s", strerror(welcome_error));
+            lv_list_add_text(list, message);
         }
     }
     errno = 0;
@@ -4767,7 +4780,7 @@ static void show_ebooks(void)
         snprintf(message, sizeof(message), "Skipped %u book paths that exceed the path limit", (unsigned)skipped);
         lv_list_add_text(list, message);
     }
-    if (!file_path_count && !error && !skipped) lv_list_add_text(list, "Copy .txt books into /sdcard/BOOKS");
+    if (!file_path_count && !error && !skipped && !welcome_error) lv_list_add_text(list, "Copy .txt books into /sdcard/BOOKS");
     if (ebook_download_busy) {
         lv_list_add_text(list, "Downloading free classics...");
     } else if (ebook_defaults_missing()) {

@@ -276,6 +276,7 @@ jobs:
             build/ebook-library/source.json
             build/ebook-library/ebook_library.inc
             build/ebook-library/ebook_library_config.inc
+            build/ebook-library/storage_source.inc
           if-no-files-found: warn
           retention-days: 14
 

@@ -28,6 +28,8 @@ def main():
         start = source.index(begin)
         sections.append(source[start:source.index(end, start)])
     code = "".join(sections)
+    storage = (ROOT / "main/storage_io.c").read_text(encoding="utf-8")
+    header = (ROOT / "main/storage_io.h").read_text(encoding="utf-8")
     capacity = re.search(r"^static char file_paths\[(\d+)\]\[(\d+)\];", source, re.MULTILINE)
     assert capacity and tuple(map(int, capacity.groups())) == (64, 256)
     assert '#define SD_PATH "/sdcard"' in source
@@ -35,13 +37,14 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     (output / "main_source.c").write_text(source, encoding="utf-8")
     (output / "ebook_library.inc").write_text(code, encoding="utf-8")
+    (output / "storage_source.inc").write_text(storage, encoding="utf-8")
     (output / "ebook_library_config.inc").write_text('#define BOOKS_CAPACITY 64\n#define BOOKS_PATH_BYTES 256\n#define SD_PATH "/sdcard"\n')
     temporary = output / "temp"
     temporary.mkdir(exist_ok=True)
     env = os.environ.copy()
     env.update(TEMP=str(temporary), TMP=str(temporary), TMPDIR=str(temporary))
     executable = output / ("ebook_library_test.exe" if os.name == "nt" else "ebook_library_test")
-    command = [args.compiler, "-std=c11", "-Wall", "-Wextra", "-Werror", "-pedantic", "-I", str(output),
+    command = [args.compiler, "-std=c11", "-Wall", "-Wextra", "-Werror", "-pedantic", "-I", str(output), "-I", str(ROOT / "main"),
                str(ROOT / "tests/ebook_library_test.c"), "-o", str(executable)]
     if os.name == "nt":
         command.append("-lkernel32")
@@ -56,12 +59,15 @@ def main():
     (output / "source.json").write_text(json.dumps({
         "mainSource": str(args.main_source.resolve()), "compiler": args.compiler,
         "mainSourceSha256": digest(source.encode()), "functionSourceSha256": digest(code.encode()),
+        "storageSourceSha256": digest(storage.encode()), "headerSourceSha256": digest(header.encode()),
         "testSourceSha256": digest((ROOT / "tests/ebook_library_test.c").read_text(encoding="utf-8").encode()),
         "executableSha256": digest(executable.read_bytes()), "exitCode": result.returncode,
         "actualFunctionsCompiled": 3, "entryCapacity": 64, "pathCapacity": 256,
         "nativeDirectoryAndFileBytesChecked": True, "uiTimersAndSdErrorApisControlled": True,
         "logicalMountMappingControlled": True, "directoryStatAndNameFaultsControlled": True,
-        "welcomeCreationBranchExecuted": False, "downloadHelpersOrTimerTickExecuted": False,
+        "welcomeCreationBranchExecuted": True, "actualStorageSourceCompiled": True,
+        "welcomeNativeFileBytesAndHandlesChecked": True, "welcomeWriteAndCommitFaultsControlled": True,
+        "downloadHelpersOrTimerTickExecuted": False,
         "sdkMountsOrPhysicalSdPanelVerified": False,
     }, indent=2) + "\n", encoding="utf-8")
     print(log, end="", flush=True)

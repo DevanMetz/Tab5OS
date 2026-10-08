@@ -1,4 +1,4 @@
-/* Actual library/extension callbacks; existing native BOOKS directory only. */
+/* Actual library/extension callbacks; native BOOKS listing and welcome files. */
 #if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <direct.h>
 #include <process.h>
+#include <io.h>
 #define fixture_pid _getpid
 #define make_directory(path) _mkdir(path)
 #define remove_directory(path) _rmdir(path)
@@ -33,6 +34,7 @@
 #define S_ISREG(mode) (((mode) & _S_IFMT) == _S_IFREG)
 #endif
 #include "ebook_library_config.inc"
+#include "storage_io.h"
 
 typedef enum { NORMAL, MKDIR_FAIL, MKDIR_NO_ERRNO, OPEN_FAIL, OPEN_NO_ERRNO,
     READ_FIRST, READ_LATER, READ_CLOSE, CLOSE_FAIL, CLOSE_NO_ERRNO,
@@ -55,12 +57,44 @@ typedef struct {
 } fixture_dir_t;
 static fixture_dir_t directory;
 static struct fixture_dirent entry;
-static void sd_record_error(int error) { reports++; reported_error = error; }
+typedef enum { W_OPEN, W_WRITE, W_FLUSH, W_SYNC, W_CLOSE, W_PROBE, W_RENAME, W_REMOVE, W_OPERATIONS } welcome_operation_t;
+typedef struct { bool enabled; int error; } welcome_fault_t;
+static welcome_fault_t welcome_faults[W_OPERATIONS];
+static bool welcome_run, welcome_create, welcome_collision, welcome_write_flag, welcome_flush_flag, welcome_stream_error;
+static FILE *welcome_stream;
+static unsigned file_handles, welcome_writes, welcome_flushes, welcome_syncs, welcome_closes, welcome_probes, welcome_renames, welcome_removes;
+static const char welcome_text[] = "Welcome to Tab5 Books!\n\nCopy .txt ebooks into the BOOKS folder on the SD card. Use Next and Prev to move through the book, and Text to change the reading size.\n";
+static const char previous_welcome[] = "previous complete welcome\n";
+static void welcome_path(const char *logical, char *actual, size_t capacity)
+{
+    const char *prefix = SD_PATH "/BOOKS/"; size_t length = strlen(prefix);
+    assert(welcome_run && owns_directory && !strncmp(logical, prefix, length));
+    const char *leaf = logical + length;
+    assert(!strcmp(leaf, "WELCOME.TMP") || !strcmp(leaf, "WELCOME.TXT"));
+    int size = snprintf(actual, capacity, "%s/%s", physical, leaf); assert(size > 0 && (size_t)size < capacity);
+}
+static bool welcome_fault(welcome_operation_t operation, int incoming)
+{
+    if (!welcome_faults[operation].enabled) return false;
+    errno = welcome_faults[operation].error ? welcome_faults[operation].error : incoming;
+    return true;
+}
+static void sd_record_error(int error) { reports++; reported_error = error; errno = EPERM; }
 static int fixture_mkdir(const char *path, int mode)
 {
     assert(owns_directory && !strcmp(path, SD_PATH "/BOOKS") && mode == 0775); mkdirs++;
     if (fault == MKDIR_FAIL || fault == MKDIR_NO_ERRNO) { errno = fault == MKDIR_FAIL ? EROFS : 0; return -1; }
-    int result = make_directory(physical); assert(result != 0 && errno == EEXIST); return result;
+    int result = make_directory(physical);
+    if (welcome_run && welcome_create) {
+        assert(result == 0); welcome_create = false;
+        if (welcome_collision) {
+            char path[128]; welcome_path(SD_PATH "/BOOKS/WELCOME.TXT", path, sizeof(path));
+            FILE *file = fopen(path, "wb"); assert(file);
+            assert(fwrite(previous_welcome, 1, strlen(previous_welcome), file) == strlen(previous_welcome) && fclose(file) == 0);
+        }
+        errno = EROFS;
+    } else assert(result != 0 && errno == EEXIST);
+    return result;
 }
 static fixture_dir_t *fixture_open(const char *path)
 {
@@ -125,13 +159,104 @@ int fixture_stat(const char *path, struct stat *info)
     if (fault == STALE_STAT) errno = ENOSPC;
     return result;
 }
-/* The unchanged welcome-writing branch must not run for an existing directory. */
-static FILE *fixture_fopen(const char *path, const char *mode) { (void)path; (void)mode; assert(false); return NULL; }
-static int fixture_fputs(const char *text, FILE *file) { (void)text; (void)file; assert(false); return EOF; }
-static int fixture_fclose(FILE *file) { (void)file; assert(false); return EOF; }
-static int fixture_remove(const char *path) { (void)path; assert(false); return -1; }
-static int storage_commit_new_file(FILE **file, const char *temporary, const char *final)
-{ (void)file; (void)temporary; (void)final; assert(false); return -1; }
+static FILE *fixture_fopen(const char *path, const char *mode)
+{
+    char actual[128]; welcome_path(path, actual, sizeof(actual));
+    assert(!strcmp(path, SD_PATH "/BOOKS/WELCOME.TMP") && !strcmp(mode, "wb") && !file_handles && !welcome_stream);
+    int incoming = errno; if (welcome_fault(W_OPEN, incoming)) return NULL;
+    welcome_stream = fopen(actual, mode); assert(welcome_stream); file_handles++; welcome_stream_error = false;
+    errno = EACCES; return welcome_stream;
+}
+static int fixture_fputs(const char *text, FILE *file)
+{
+    assert(file == welcome_stream && file_handles == 1 && !strcmp(text, welcome_text)); welcome_writes++;
+    int incoming = errno;
+    if (welcome_faults[W_WRITE].enabled) {
+        assert(fwrite(text, 1, 9, file) == 9); (void)welcome_fault(W_WRITE, incoming); return EOF;
+    }
+    int result = fputs(text, file); assert(result >= 0);
+    if (welcome_write_flag) {
+        welcome_stream_error = true;
+        errno = welcome_faults[W_WRITE].error ? welcome_faults[W_WRITE].error : incoming;
+    } else errno = ERANGE;
+    return result;
+}
+static int fixture_ferror(FILE *file)
+{ assert(file == welcome_stream && file_handles == 1); return welcome_stream_error || ferror(file); }
+static int fixture_fflush(FILE *file)
+{
+    assert(file == welcome_stream && file_handles == 1); welcome_flushes++; int incoming = errno;
+    if (welcome_fault(W_FLUSH, incoming)) return EOF;
+    int result = fflush(file); assert(result == 0);
+    if (welcome_flush_flag) welcome_stream_error = true;
+    errno = ERANGE; return result;
+}
+static int fixture_sync(int descriptor)
+{
+#ifdef _WIN32
+    assert(welcome_stream && descriptor == _fileno(welcome_stream));
+#else
+    assert(welcome_stream && descriptor == fileno(welcome_stream));
+#endif
+    assert(file_handles == 1); welcome_syncs++; int incoming = errno;
+    if (welcome_fault(W_SYNC, incoming)) return -1;
+#ifdef _WIN32
+    int result = _commit(descriptor);
+#else
+    int result = fsync(descriptor);
+#endif
+    assert(result == 0); errno = ERANGE; return result;
+}
+static int fixture_fclose(FILE *file)
+{
+    assert(file == welcome_stream && file_handles == 1); welcome_closes++; int incoming = errno;
+    assert(fclose(file) == 0); welcome_stream = NULL; file_handles--; welcome_stream_error = false;
+    if (welcome_fault(W_CLOSE, incoming)) return EOF;
+    errno = ERANGE; return 0;
+}
+static int fixture_remove(const char *path)
+{
+    char actual[128]; welcome_path(path, actual, sizeof(actual)); welcome_removes++; int incoming = errno;
+    if (welcome_fault(W_REMOVE, incoming)) return -1;
+    int result = remove(actual); if (result == 0) errno = ERANGE; return result;
+}
+static int fixture_welcome_stat(const char *path, struct stat *info)
+{
+    char actual[128]; welcome_path(path, actual, sizeof(actual)); welcome_probes++; int incoming = errno;
+    if (welcome_fault(W_PROBE, incoming)) return -1;
+    int result = stat(actual, info); if (result == 0) errno = ERANGE; return result;
+}
+static int fixture_rename(const char *from, const char *to)
+{
+    char source[128], target[128]; welcome_path(from, source, sizeof(source)); welcome_path(to, target, sizeof(target));
+    welcome_renames++; int incoming = errno; if (welcome_fault(W_RENAME, incoming)) return -1;
+    int result = rename(source, target); assert(result == 0); errno = ERANGE; return result;
+}
+#define fopen fixture_fopen
+#define ferror fixture_ferror
+#define fflush fixture_fflush
+#define fclose fixture_fclose
+#define remove fixture_remove
+#define stat(path, info) fixture_welcome_stat(path, info)
+#define rename fixture_rename
+#ifdef _WIN32
+#define _commit fixture_sync
+#else
+#define fsync fixture_sync
+#endif
+#include "storage_source.inc"
+#undef fopen
+#undef ferror
+#undef fflush
+#undef fclose
+#undef remove
+#undef stat
+#undef rename
+#ifdef _WIN32
+#undef _commit
+#else
+#undef fsync
+#endif
 
 #define LV_SYMBOL_LEFT "LEFT"
 #define LV_SYMBOL_FILE "FILE"
@@ -174,6 +299,7 @@ static void lv_obj_add_event_cb(lv_obj_t *object, lv_event_cb_t callback, int ev
 #define stat(path, info) fixture_stat(path, info)
 #define fopen fixture_fopen
 #define fputs fixture_fputs
+#define ferror fixture_ferror
 #define fclose fixture_fclose
 #define remove fixture_remove
 #include "ebook_library.inc"
@@ -186,15 +312,24 @@ static void lv_obj_add_event_cb(lv_obj_t *object, lv_event_cb_t callback, int ev
 #undef stat
 #undef fopen
 #undef fputs
+#undef ferror
 #undef fclose
 #undef remove
 
 static void clean_files(void)
 {
-    assert(owns_directory && !handles); char name[128];
+    assert(owns_directory && !handles && !file_handles && !welcome_stream); char name[128];
     for (unsigned i = 0; i < files; i++) { snprintf(name, sizeof(name), "%s/%s", physical, names[i]); assert(remove(name) == 0); }
     if (dirs) { snprintf(name, sizeof(name), "%s/FOLDER.TXT", physical); assert(remove_directory(name) == 0); }
     files = dirs = 0;
+    if (welcome_run) {
+        const char *leaves[] = {"WELCOME.TMP", "WELCOME.TXT"};
+        for (unsigned i = 0; i < 2; i++) {
+            snprintf(name, sizeof(name), "%s/%s", physical, leaves[i]); struct stat info;
+            if (stat(name, &info) == 0) { assert(S_ISREG(info.st_mode)); assert(remove(name) == 0); }
+            else assert(errno == ENOENT);
+        }
+    }
 }
 static void add_file(const char *leaf)
 {
@@ -205,6 +340,9 @@ static void add_file(const char *leaf)
 static void prepare(unsigned count, bool child)
 {
     clean_files();
+    welcome_run = welcome_create = welcome_collision = welcome_write_flag = welcome_flush_flag = welcome_stream_error = false;
+    memset(welcome_faults, 0, sizeof(welcome_faults));
+    welcome_writes = welcome_flushes = welcome_syncs = welcome_closes = welcome_probes = welcome_renames = welcome_removes = 0;
     for (unsigned i = 0; i < count; i++) { char leaf[32]; snprintf(leaf, sizeof(leaf), "B%02u.TXT", i); add_file(leaf); }
     if (child) { char path[128]; snprintf(path, sizeof(path), "%s/FOLDER.TXT", physical); assert(make_directory(path) == 0); dirs = 1; }
     fault = NORMAL; sd_ready = true; ebook_download_busy = defaults_missing = false;
@@ -256,6 +394,99 @@ static void failure_case(const char *name, fault_t injected, int error, unsigned
     report(name, books() == expected_books && error_message(prefix, error) && reports == 1 && !text_contains("Copy .txt books into /sdcard/BOOKS") &&
         opens == (unsigned)!setup && closes == (unsigned)(!setup && !opening) && timer_handles == (unsigned)(!setup && !opening));
 }
+static void prepare_welcome(void)
+{
+    prepare(0, false); assert(remove_directory(physical) == 0); welcome_run = welcome_create = true;
+}
+static bool welcome_bytes(const char *leaf, const char *expected, size_t size)
+{
+    char path[128]; snprintf(path, sizeof(path), "%s/%s", physical, leaf); FILE *file = fopen(path, "rb");
+    if (!expected) { if (file) { assert(fclose(file) == 0); return false; } return errno == ENOENT; }
+    if (!file) return false;
+    char buffer[sizeof(welcome_text)]; size_t length = fread(buffer, 1, sizeof(buffer), file);
+    bool pass = length == size && !ferror(file) && !memcmp(buffer, expected, size); assert(fclose(file) == 0); return pass;
+}
+static void report_welcome(const char *name, bool pass, int expected_error, const char *final, size_t final_size, const char *temporary, size_t temporary_size)
+{
+    bool same = welcome_bytes("WELCOME.TXT", final, final_size) && welcome_bytes("WELCOME.TMP", temporary, temporary_size);
+    bool warning = text_contains("Could not create WELCOME.TXT:");
+    bool cause = !expected_error ? !reports && !warning : reports == 1 && error_message("Could not create WELCOME.TXT", expected_error);
+    pass = pass && same && cause && !file_handles && !welcome_stream && !handles && paths_valid() &&
+           !text_contains("Copy .txt books into /sdcard/BOOKS");
+    cases++; failures += !pass;
+    printf("%s %s books=%u error=%d reports=%u writes=%u flushes=%u syncs=%u file_closes=%u probes=%u renames=%u removes=%u handles=%u file_handles=%u bytes=%d\n",
+        pass ? "PASS" : "FAIL", name, books(), reported_error, reports, welcome_writes, welcome_flushes, welcome_syncs,
+        welcome_closes, welcome_probes, welcome_renames, welcome_removes, handles, file_handles, same);
+}
+static void welcome_failure_case(const char *name, welcome_operation_t operation, int cause)
+{
+    prepare_welcome(); welcome_faults[operation] = (welcome_fault_t){true, cause}; show_ebooks();
+    bool wrote = operation != W_OPEN, commit = wrote && operation != W_WRITE;
+    bool pass = !books() && welcome_writes == (unsigned)wrote && welcome_closes == (unsigned)wrote &&
+                welcome_flushes == (unsigned)commit && welcome_syncs == (unsigned)(commit && operation != W_FLUSH) &&
+                welcome_probes == (unsigned)(operation == W_PROBE || operation == W_RENAME) &&
+                welcome_renames == (unsigned)(operation == W_RENAME) && welcome_removes == (unsigned)(operation == W_WRITE);
+    report_welcome(name, pass, cause ? cause : EIO, NULL, 0, commit ? welcome_text : NULL, commit ? strlen(welcome_text) : 0);
+}
+static void welcome_cases(void)
+{
+    prepare_welcome(); show_ebooks();
+    report_welcome("welcome-created", books() == 1 && welcome_writes == 1 && welcome_flushes == 1 && welcome_syncs == 1 && welcome_closes == 1 && welcome_probes == 1 && welcome_renames == 1 && !welcome_removes,
+                   0, welcome_text, strlen(welcome_text), NULL, 0);
+    show_ebooks();
+    report_welcome("welcome-existing-reopen", books() == 1 && welcome_writes == 1 && welcome_closes == 1 && !welcome_removes,
+                   0, welcome_text, strlen(welcome_text), NULL, 0);
+    const welcome_operation_t operations[] = {W_OPEN, W_WRITE, W_FLUSH, W_SYNC, W_CLOSE, W_PROBE, W_RENAME};
+    const char *labels[] = {"open", "write", "flush", "sync", "close", "probe", "publish"};
+    const int errors[] = {EACCES, ENOSPC, ENOSPC, EIO, EACCES, EACCES, EACCES};
+    for (unsigned i = 0; i < sizeof(operations) / sizeof(operations[0]); i++) {
+        char name[64]; snprintf(name, sizeof(name), "welcome-%s", labels[i]); welcome_failure_case(name, operations[i], errors[i]);
+        snprintf(name, sizeof(name), "welcome-%s-no-errno", labels[i]); welcome_failure_case(name, operations[i], 0);
+    }
+    for (unsigned missing = 0; missing < 2; missing++) {
+        prepare_welcome(); welcome_write_flag = true; welcome_faults[W_WRITE].error = missing ? 0 : ENOSPC; show_ebooks();
+        report_welcome(missing ? "welcome-positive-write-flag-no-errno" : "welcome-positive-write-flag",
+                       !books() && !welcome_flushes && !welcome_syncs && !welcome_probes && !welcome_renames && welcome_removes == 1 && welcome_closes == 1,
+                       missing ? EIO : ENOSPC, NULL, 0, NULL, 0);
+    }
+    prepare_welcome(); welcome_flush_flag = true; show_ebooks();
+    report_welcome("welcome-positive-flush-flag", !books() && welcome_flushes == 1 && !welcome_syncs && !welcome_probes && !welcome_renames && welcome_closes == 1,
+                   ERANGE, NULL, 0, welcome_text, strlen(welcome_text));
+    prepare_welcome(); welcome_collision = true; show_ebooks();
+    report_welcome("welcome-final-collision", books() == 1 && welcome_probes == 1 && !welcome_renames && !welcome_removes,
+                   EEXIST, previous_welcome, strlen(previous_welcome), welcome_text, strlen(welcome_text));
+    for (unsigned flagged = 0; flagged < 2; flagged++) for (unsigned missing = 0; missing < 2; missing++) {
+        prepare_welcome(); welcome_write_flag = flagged != 0;
+        welcome_faults[W_WRITE] = (welcome_fault_t){!flagged, missing ? 0 : ENOSPC};
+        welcome_faults[W_CLOSE] = (welcome_fault_t){true, EPERM}; welcome_faults[W_REMOVE] = (welcome_fault_t){true, EACCES}; show_ebooks();
+        char name[64]; snprintf(name, sizeof(name), "welcome-first-%s-error%s", flagged ? "flag" : "write", missing ? "-no-errno" : "");
+        report_welcome(name, !books() && !welcome_flushes && !welcome_syncs && !welcome_probes && !welcome_renames && welcome_removes == 1 && welcome_closes == 1,
+                       missing ? EIO : ENOSPC, NULL, 0, welcome_text, flagged ? strlen(welcome_text) : 9);
+    }
+    prepare_welcome(); welcome_faults[W_WRITE] = (welcome_fault_t){true, ENOSPC}; welcome_faults[W_CLOSE] = (welcome_fault_t){true, EPERM};
+    show_ebooks();
+    report_welcome("welcome-write-failed-close", !books() && !welcome_flushes && !welcome_syncs && welcome_removes == 1 && welcome_closes == 1,
+                   ENOSPC, NULL, 0, NULL, 0);
+    prepare_welcome(); welcome_faults[W_SYNC] = (welcome_fault_t){true, EIO}; welcome_faults[W_CLOSE] = (welcome_fault_t){true, EACCES}; show_ebooks();
+    report_welcome("welcome-sync-before-close", !books() && welcome_flushes == 1 && welcome_syncs == 1 && welcome_closes == 1 && !welcome_probes && !welcome_renames,
+                   EIO, NULL, 0, welcome_text, strlen(welcome_text));
+    bool pass = true;
+    for (unsigned i = 0; i < 25; i++) {
+        prepare_welcome(); welcome_write_flag = true; welcome_faults[W_WRITE].error = ENOSPC;
+        welcome_faults[W_CLOSE] = (welcome_fault_t){true, EPERM}; welcome_faults[W_REMOVE] = (welcome_fault_t){true, EACCES}; show_ebooks();
+        pass = pass && !books() && reports == 1 && reported_error == ENOSPC && !file_handles && !handles && !welcome_stream &&
+               !welcome_flushes && !welcome_syncs && !welcome_renames && error_message("Could not create WELCOME.TXT", ENOSPC) &&
+               welcome_bytes("WELCOME.TXT", NULL, 0) && welcome_bytes("WELCOME.TMP", welcome_text, strlen(welcome_text));
+        memset(welcome_faults, 0, sizeof(welcome_faults)); welcome_write_flag = false; show_ebooks();
+        pass = pass && !books() && reports == 1 && !text_contains("Could not create WELCOME.TXT:") && welcome_writes == 1 &&
+               welcome_closes == 1 && welcome_removes == 1 && !file_handles && !handles && !welcome_stream &&
+               welcome_bytes("WELCOME.TMP", welcome_text, strlen(welcome_text));
+        prepare_welcome(); show_ebooks(); show_ebooks();
+        pass = pass && books() == 1 && !reports && welcome_writes == 1 && welcome_closes == 1 && welcome_flushes == 1 && welcome_syncs == 1 &&
+               !file_handles && !handles && !welcome_stream && welcome_bytes("WELCOME.TXT", welcome_text, strlen(welcome_text)) && welcome_bytes("WELCOME.TMP", NULL, 0);
+    }
+    report_welcome("welcome-failure-recreation-reopen-25", pass, 0, welcome_text, strlen(welcome_text), NULL, 0);
+}
 int main(void)
 {
     snprintf(physical, sizeof(physical), ".ebook_library_%d", fixture_pid()); struct stat existing;
@@ -290,7 +521,8 @@ int main(void)
         fault = NORMAL; sd_ready = true; show_ebooks(); pass = pass && books() == 3 && no_listing_warning() && reports == i + 1;
     }
     report("cycles-25", pass && mkdirs == 75 && opens == 75 && closes == 75 && reads == 300 && clears == 75 && timer_creates == 75 && timer_handles == 1);
+    welcome_cases();
     clear_content(); clean_files(); assert(remove_directory(physical) == 0); owns_directory = false;
-    printf("%s %u ebook library cases failures=%u handles=%u timers=%u (native directories/files; controlled UI/timers/mount/faults)\n", failures ? "FAIL" : "PASS", cases, failures, handles, timer_handles);
+    printf("%s %u ebook library cases failures=%u handles=%u file_handles=%u timers=%u (native directories/files; controlled UI/timers/mount/faults)\n", failures ? "FAIL" : "PASS", cases, failures, handles, file_handles, timer_handles);
     return failures ? 1 : 0;
 }
