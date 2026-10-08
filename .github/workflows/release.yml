@@ -187,7 +187,7 @@ jobs:
           tar -xzf build/native-ui-sources.tar.gz
           if ($LASTEXITCODE) { throw 'Native UI source extraction failed.' }
           Get-Content build/native-ui-sources.json
-      - name: Test offline apps and MQTT
+      - name: Test offline apps and network consoles
         shell: pwsh
         run: ./tools/test_native_ui_ci.ps1
       - uses: actions/upload-artifact@v4
@@ -196,12 +196,17 @@ jobs:
           name: native-ui-logs
           path: |
             build/offline-ui/ci.log
+            build/native-ui.log
             build/mqtt-ui/*.log
             build/mqtt-ui/wire-fixtures/
             build/mqtt-network/*.log
             build/mqtt-network/*-wire.json
             build/mqtt-network/client-checks.json
             build/mqtt-network/storage-app-*/MQTTLOG.CSV
+            build/http-network/*.log
+            build/http-network/storage-*/HTTP/HTTPLOG.CSV
+            build/network-ui/ci.log
+            build/network-ui/dns-*/*.log
             build/native-ui-sources.json
           if-no-files-found: warn
           retention-days: 14

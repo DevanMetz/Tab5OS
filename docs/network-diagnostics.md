@@ -20,6 +20,8 @@ IPv4 options up to the full 60-byte header are accepted when the complete echo r
 
 ## Host checks
 
+The native CI job runs all 34 worker/resolver/UI scenarios with both one-address and four-address DNS configurations after the HTTP suite. It reuses the job's Debug LVGL library and retains each configuration's case logs. This adds 68 Diagnostics checks to the existing Linux ping-worker checks; the synthetic service boundaries remain separate from hardware validation.
+
 ```powershell
 ./tools/test_network_ping.ps1
 ./tools/test_network_ui.ps1

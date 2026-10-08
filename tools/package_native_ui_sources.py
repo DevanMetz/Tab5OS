@@ -32,6 +32,13 @@ SDK_FILES = (
     "components/tcp_transport/include/esp_transport_ssl.h",
     "components/tcp_transport/include/esp_transport_ws.h",
     "components/tcp_transport/private_include/esp_transport_internal.h",
+    "components/esp_http_client/esp_http_client.c",
+    "components/esp_http_client/include/esp_http_client.h",
+    "components/esp_http_client/lib/http_header.c",
+    "components/esp_http_client/lib/http_utils.c",
+    "components/esp_http_client/lib/include/http_header.h",
+    "components/esp_http_client/lib/include/http_utils.h",
+    "components/esp_http_client/lib/include/http_auth.h",
 )
 LVGL_INPUTS = (
     "src", "lvgl.h", "lvgl_private.h", "lv_version.h", ".component_hash",

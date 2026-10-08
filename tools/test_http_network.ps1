@@ -21,8 +21,12 @@ if ($env:OS -ne 'Windows_NT') { throw 'This focused service adapter requires Win
 if (-not $IdfPath -and (Test-Path -LiteralPath (Join-Path $root '.idf-path'))) {
     $IdfPath = (Get-Content -LiteralPath (Join-Path $root '.idf-path') -Raw).Trim()
 }
-if (-not $IdfPath -or -not (Test-Path -LiteralPath (Join-Path $IdfPath 'components/esp_http_client/esp_http_client.c'))) {
-    throw 'Set IDF_PATH or .idf-path to the pinned ESP-IDF 5.4.2 source checkout.'
+$httpSources = @('esp_http_client.c', 'include/esp_http_client.h', 'lib/http_header.c', 'lib/http_utils.c',
+                 'lib/include/http_header.h', 'lib/include/http_utils.h', 'lib/include/http_auth.h')
+foreach ($source in $httpSources) {
+    if (-not $IdfPath -or -not (Test-Path -LiteralPath (Join-Path $IdfPath "components/esp_http_client/$source"))) {
+        throw "Missing pinned HTTP client source: $source. Set IDF_PATH or .idf-path to ESP-IDF 5.4.2, or pass -IdfPath for the CI source bundle."
+    }
 }
 $versionHeader = Get-Content -LiteralPath (Join-Path $IdfPath 'components/esp_common/include/esp_idf_version.h') -Raw
 if ($versionHeader -notmatch '(?m)^#define ESP_IDF_VERSION_MAJOR\s+5\s*$' -or
