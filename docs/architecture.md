@@ -91,6 +91,8 @@ Ring's saved heart-rate timestamp becomes loaded only after incomplete-tail repa
 
 Ebooks reads up to 8 KiB into its existing cached PSRAM buffer. Page text, current/next byte positions, navigation state and scroll position change only after successful seek, read and close. Failure preserves the confirmed page and positions, reports the first error and allows retry when storage is available. Reader initialization clears both offsets and disables navigation until loading succeeds. Callbacks recheck disabled state and screen pointers; negative positions and additions beyond the platform's `long` range are rejected. Native files and controlled UI/heap/SD boundaries verify the transitions; physical SD and panel behavior remain open.
 
+The Scope/I2C capture and saved serial CSV viewers require a successful close before constructing their graph or row-copy controls. A read or close failure after format recognition shows an error and releases the viewer buffers immediately. Empty recognized captures also release their row buffer. Real LVGL checks cover error/reopen transitions and stable memory in the unchanged 96 KiB pool; filesystem faults and PSRAM allocation are controlled host boundaries, with physical SD and panel checks still open.
+
 See [Storage and compatibility contract](compatibility.md) and [Data formats](data-formats.md).
 
 ## Network and radio

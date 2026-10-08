@@ -15,6 +15,7 @@ Python 3 and Node.js are needed for the quick checks. The configuration checks a
 | Ride history loading or summary appends | [Ride history storage](#ride-history-storage) and a firmware build. |
 | Ring heart-rate logging, saved timestamps or queue processing | [Ring history storage](#ring-history-storage) and a firmware build. |
 | Ebook page loading or navigation | [Ebook pages](#ebook-pages) and a firmware build. |
+| Scope/I2C capture or saved serial CSV viewers | [CSV viewer storage and UI](#csv-viewer-storage-and-ui), existing serial-copy checks and a firmware build. |
 | Offline apps, SPI or I2C editor/result flows | [Offline and peripheral UI](#offline-and-peripheral-ui). |
 | Serial, saved serial logs or RTU Frames | [Serial and RTU UI](#serial-and-rtu-ui). |
 | Modbus TCP, NTP, Wake-on-LAN, UDP or HTTP fixtures | [Network fixtures and UI](#network-fixtures-and-ui). |
@@ -149,6 +150,18 @@ This portable runner compiles the three actual ebook load/Prev/Next callbacks ex
 Retry cases use the actual navigation callbacks after storage availability is restored. Disabled clicks and invalid next positions perform no new reads. Twenty-five forward/back cycles keep one reused 8,193-byte buffer with every file handle closed; process teardown frees the fixture's buffer. Every executed case independently checks the original file bytes. UI, heap and SD APIs and I/O errors are controlled; no real LVGL or physical card is used. The tests do not establish rendering, PSRAM allocation, device timing or physical removal behavior. A short error-free EOF remains a valid final page; the fixture does not claim to detect concurrent file changes that supply no I/O error.
 
 Reader initialization is retained and checked as source, including zero offsets and initially disabled controls; it is not compiled into the native fixture. The firmware build checks its real UI declarations. Full main/function/initialization/test hashes, generated callback/config/initialization source and compile/result logs stay under `build/ebook-pages/`. Linux CI retains these files as `ebook-pages-logs`, including compiler/test failures. These 44 cases are separate from the Windows native total.
+
+## CSV viewer storage and UI
+
+```powershell
+python tools/test_csv_viewer.py --compiler 'C:/path/to/clang.exe' --lvgl-library build/offline-ui/out/lvgl_host.lib
+```
+
+This Windows runner reuses the cached Debug LVGL library and compiles both complete viewer/parser pairs plus the actual shared clipboard. Its 36 real UI/native-file cases check Scope and I2C graph values/gaps, serial copy-control admission, the 2,048/512-row limits, empty captures/logs, unsupported formats, open/allocation/seek failures, parser-header and row read faults, and close failures including missing errno and combined read/close faults. The preceding viewers fail 15 controls: close failures still construct a graph or copyable timeline, and capture buffers remain allocated on empty/failed loads.
+
+Every case checks the original file fingerprint and retained clipboard bytes. Failed loads must release external row/text allocations before teardown. Both viewers also run 25 success/error/success cycles (75 opens/closes each) with unchanged LVGL free bytes and allocation counts in the existing 96 KiB pool. Heap and I/O failures are controlled; widgets, parsers, graph arrays and UI cleanup use real LVGL. Open/probe fallback retains its existing API contract; the new failure rule applies after header recognition. These checks do not establish physical SD, PSRAM, panel, latency or power-loss behavior.
+
+Complete viewer/parser/clipboard snapshots, their source/header hashes, the I/O adapter/test hashes and compiler/runtime logs are retained under `build/csv-viewer/`. Windows CI runs these 36 checks after the original 820 native checks and retains `csv-viewer-logs`; this is separate from the Linux fixtures. Use `tools/test_serial_log_ui.ps1` for the existing row-copy/filter/page/inspector checks.
 
 ## OTA manifests
 

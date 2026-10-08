@@ -288,6 +288,25 @@ jobs:
       - name: Test Notes with real LVGL
         shell: pwsh
         run: python tools/test_notes_io.py --compiler clang --lvgl-library build/offline-ui/out/lvgl_host.lib --output build/notes-ui
+      - name: Test CSV viewers with real LVGL
+        shell: pwsh
+        run: python tools/test_csv_viewer.py --compiler clang --lvgl-library build/offline-ui/out/lvgl_host.lib --output build/csv-viewer-ci
+      - name: Retain CSV viewer UI evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: csv-viewer-logs
+          path: |
+            build/csv-viewer-ci/compile.log
+            build/csv-viewer-ci/result.log
+            build/csv-viewer-ci/source.json
+            build/csv-viewer-ci/capture_viewer.c
+            build/csv-viewer-ci/capture_data.c
+            build/csv-viewer-ci/serial_log_viewer.c
+            build/csv-viewer-ci/serial_log_data.c
+            build/csv-viewer-ci/payload_clipboard.c
+          if-no-files-found: warn
+          retention-days: 14
       - name: Retain Notes UI test evidence
         uses: actions/upload-artifact@v4
         if: always()

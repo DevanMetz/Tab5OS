@@ -29,6 +29,8 @@ Files opens published Scope and I2C `.CSV` captures as graphs when their headers
 
 Files also opens published UART and RS-485 `.CSV` logs as a timestamped RX/TX timeline. The viewer loads up to the first 512 well-formed rows, shows eight rows per page, and lets you filter by direction or switch between hex and escaped ASCII without changing the file. Unpublished `.TMP` files retain the text preview.
 
+After a supported capture or serial header is recognized, seek/read/close failures show an error instead of a graph or copyable timeline. The viewers release their row/text buffers immediately on failed or empty loads. The original file remains unchanged; a successful reopen can display it again. These boundaries are checked with real LVGL and native files under controlled I/O failures; physical SD behavior remains open.
+
 Choose a record from the current page and tap **COPY ROW** to put its original 1-128 bytes on the shared RAM clipboard. The selector and timeline use the same record numbers: positions among loaded valid rows, not physical CSV line numbers. Page/filter changes select the first matching record on the new page; changing Hex/ASCII preserves the selection. Rows of 129-256 bytes remain viewable but cannot be partially copied. Empty filters and failed copies preserve the clipboard. Record bytes can then be pasted into Byte Lab or RTU Frames; a logged RX/TX chunk may split or combine protocol frames, so a record is not a guarantee of a complete message. Copy changes neither the CSV nor the displayed byte values.
 
 ## CSV conventions

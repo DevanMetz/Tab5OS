@@ -292,7 +292,7 @@ bool serial_log_viewer_show(lv_obj_t *parent, const char *path)
                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     page_text = heap_caps_malloc(VIEWER_TEXT_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     bool loaded = rows && page_text && serial_log_read(file, rows, VIEWER_MAX_ROWS, &data);
-    fclose(file);
+    if (fclose(file) != 0) loaded = false;
 
     const char *name = strrchr(path, '/');
     name = name ? name + 1 : path;

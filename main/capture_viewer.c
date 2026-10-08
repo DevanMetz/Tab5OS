@@ -174,7 +174,7 @@ bool capture_viewer_show(lv_obj_t *parent, const char *path)
 
     rows = heap_caps_malloc(VIEWER_MAX_ROWS * sizeof(*rows), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     bool loaded = rows && capture_data_read(file, rows, VIEWER_MAX_ROWS, &data);
-    fclose(file);
+    if (fclose(file) != 0) loaded = false;
 
     const char *name = strrchr(path, '/');
     name = name ? name + 1 : path;
@@ -183,10 +183,12 @@ bool capture_viewer_show(lv_obj_t *parent, const char *path)
     lv_label_set_text_fmt(title, "%s  |  %s", format == CAPTURE_FORMAT_SCOPE ? "Scope" : "I2C watch", name);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
     if (!loaded || !data.count) {
+        const char *error = !rows ? "Not enough memory to open capture" :
+                            !loaded ? "Could not read capture" : "No readable capture rows in this file";
+        capture_viewer_stop();
         lv_obj_t *message = lv_label_create(parent);
         lv_obj_set_width(message, 640);
-        lv_label_set_text(message, !rows ? "Not enough memory to open capture" :
-                          !loaded ? "Could not read capture" : "No readable capture rows in this file");
+        lv_label_set_text(message, error);
         return true;
     }
 
