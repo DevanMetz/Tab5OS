@@ -103,6 +103,8 @@ The ebook library verifies regular-file metadata before offering a `.txt` entry,
 
 Scope captures the first rejected header/row write before cleanup and closes an invalid temporary stream without attempting publication. I2C uses a shared finish path for explicit Stop and error cleanup: known row/flush/sync/SD failures close and release recording ownership, preserve the first cause, and report once; only a healthy Stop attempts publication. This prevents a successful retry during cleanup from turning an earlier failure into a Saved result. Native bytes and closed handles are checked with controlled UI/data/time/fault boundaries; sampling, drivers and physical SD behavior remain separate gates.
 
+Scope and I2C constructors clear errno before each directory/metadata/open/stream boundary and stop on a non-collision failure. Scope closes the descriptor, attempts to remove its new empty TMP and reports a failed stream conversion without another filename attempt. I2C retains that empty file, and clears capture paths/ownership after a rejected header. Its watch flag is enabled only after an accepted header. Native constructor checks verify both 100-name bounds, retained-TMP restart, first errors and closed handles; existing path buffers, sample data, CSV formats and watch timing remain unchanged.
+
 See [Storage and compatibility contract](compatibility.md) and [Data formats](data-formats.md).
 
 ## Network and radio

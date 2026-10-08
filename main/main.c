@@ -2211,6 +2211,7 @@ static void scope_capture_clicked(lv_event_t *event)
         lv_label_set_text_fmt(scope_capture_status, "SD unavailable: %s", strerror(error ? error : ENODEV));
         return;
     }
+    errno = 0;
     if (mkdir(SCOPE_PATH, 0775) != 0 && errno != EEXIST) {
         int error = errno ? errno : EIO;
         sd_record_error(error);
@@ -2225,6 +2226,7 @@ static void scope_capture_clicked(lv_event_t *event)
     strftime(date, sizeof(date), "%y%m%d", &local);
     strftime(clock, sizeof(clock), "%H%M%S", &local);
     snprintf(directory, sizeof(directory), SCOPE_PATH "/%s", date);
+    errno = 0;
     if (mkdir(directory, 0775) != 0 && errno != EEXIST) {
         int error = errno ? errno : EIO;
         sd_record_error(error);
@@ -2240,22 +2242,26 @@ static void scope_capture_clicked(lv_event_t *event)
         snprintf(temporary_path, sizeof(temporary_path), "%s/%s.TMP", directory, stem);
         snprintf(final_path, sizeof(final_path), "%s/%s.CSV", directory, stem);
         struct stat info;
+        errno = 0;
         if (stat(final_path, &info) == 0) continue;
         if (errno != ENOENT) {
             create_error = errno ? errno : EIO;
             break;
         }
+        errno = 0;
         int descriptor = open(temporary_path, O_WRONLY | O_CREAT | O_EXCL, 0664);
         if (descriptor < 0) {
             if (errno == EEXIST) continue;
             create_error = errno ? errno : EIO;
             break;
         }
+        errno = 0;
         file = fdopen(descriptor, "wb");
         if (!file) {
             create_error = errno ? errno : EIO;
             close(descriptor);
             remove(temporary_path);
+            break;
         }
     }
     if (!file) {
@@ -5935,6 +5941,7 @@ static bool i2c_capture_start(void)
         return false;
     }
 
+    errno = 0;
     if (mkdir(SD_PATH "/I2C", 0775) != 0 && errno != EEXIST) {
         int error = errno ? errno : EIO;
         sd_record_error(error);
@@ -5951,6 +5958,7 @@ static bool i2c_capture_start(void)
     strftime(date, sizeof(date), "%y%m%d", &local);
     strftime(clock, sizeof(clock), "%H%M%S", &local);
     snprintf(directory, sizeof(directory), SD_PATH "/I2C/%s", date);
+    errno = 0;
     if (mkdir(directory, 0775) != 0 && errno != EEXIST) {
         int error = errno ? errno : EIO;
         sd_record_error(error);
@@ -5970,11 +5978,13 @@ static bool i2c_capture_start(void)
         snprintf(i2c_capture_final_path, sizeof(i2c_capture_final_path),
                  "%s/%s.CSV", directory, stem);
         struct stat info;
+        errno = 0;
         if (stat(i2c_capture_final_path, &info) == 0) continue;
         if (errno != ENOENT) {
             create_error = errno ? errno : EIO;
             break;
         }
+        errno = 0;
         int descriptor = open(i2c_capture_temporary_path, O_WRONLY | O_CREAT | O_EXCL, 0664);
         if (descriptor < 0) {
             if (errno == EEXIST) continue;
@@ -5982,6 +5992,7 @@ static bool i2c_capture_start(void)
             break;
         }
         temporary_created = true;
+        errno = 0;
         i2c_capture_file = fdopen(descriptor, "wb");
         if (!i2c_capture_file) {
             create_error = errno ? errno : EIO;
@@ -6005,6 +6016,7 @@ static bool i2c_capture_start(void)
         return false;
     }
 
+    errno = 0;
     if (fputs("unix_time,address,register,value,status,speed_khz\n", i2c_capture_file) < 0) {
         int error = errno ? errno : EIO;
         fclose(i2c_capture_file);

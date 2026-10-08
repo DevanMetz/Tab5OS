@@ -22,7 +22,7 @@ def main():
     source = args.main_source.read_text(encoding="utf-8")
     finish = "static bool i2c_capture_finish(int error)\n{"
     sections = [("static void scope_capture_clicked(lv_event_t *event)\n{", "static uint8_t bcd("),
-                (finish if finish in source else "static bool i2c_capture_stop(void)\n{", "static bool i2c_capture_start("),
+                (finish if finish in source else "static bool i2c_capture_stop(void)\n{", "static void i2c_capture_log("),
                 ("static void i2c_capture_log(esp_err_t transaction_error, uint8_t value)\n{", "static void i2c_address_step_clicked(")]
     code = ""
     for begin, end in sections:
@@ -60,8 +60,9 @@ def main():
         "testSourceSha256": digest((ROOT / "tests/capture_write_test.c").read_text(encoding="utf-8").encode()),
         "executableSha256": digest(executable.read_bytes()), "exitCode": result.returncode,
         "actualFunctionsCompiled": code.count("static "), "actualStorageSourceCompiled": True,
-        "scopeChartPoints": 300, "nativeFileBytesChecked": True, "uiClockTicksSamplesAndSdControlled": True,
-        "ioFaultsControlled": True, "timezoneConversionUsesUtc": True, "i2cStartOrBusOrAdcExecuted": False,
+        "scopeChartPoints": 300, "nativeFileBytesChecked": True, "nativeDirectoriesAndDescriptorsUsed": True,
+        "uiClockTicksSamplesAndSdControlled": True, "ioFaultsControlled": True, "timezoneConversionUsesUtc": True,
+        "i2cStartExecuted": True, "busOrAdcExecuted": False,
         "physicalSdOrPanelVerified": False,
     }, indent=2) + "\n", encoding="utf-8")
     print(log, end="", flush=True)
