@@ -62,6 +62,7 @@ Phase 1 software progress is also underway:
 
 - [x] System reports the firmware/commit, reset reason, uptime, panel, heap, storage capacity, current OTA state, and persistent last OTA result.
 - [x] Notes and ride summaries use recoverable backup replacement; rides publish only after durable sync, and health logs repair incomplete final rows.
+- [x] Shared CSV tail recovery now scans backwards in 512-byte blocks. Eight previous-source controls exceed stdio seek budgets; a 64 KiB partial tail drops from 65,538 seeks to 130 with the same retained prefix. All 32 native byte/boundary/fault cases, original storage checks and five MQTT/HTTP logging cases pass with closed modeled handles. The unflashed firmware builds with unchanged configuration. Linux CI retains source hashes and compilation/result logs; physical SD timing and power cuts remain open.
 - [x] Built-in SD paths, timestamps, units, 8.3-safe collision names, `.TMP`, and `.BAK` behavior are documented.
 - [x] Persisted brightness choices, a dimmed two-minute screen, and configurable 5/10/30-minute or Never screen-off behavior are implemented.
 - [x] ST7121 UI and boot logs verify 100/75/50/25% brightness persistence plus the two-minute dim, five-minute off, and first-tap-only wake path without a watchdog or panic.

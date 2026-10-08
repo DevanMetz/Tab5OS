@@ -10,6 +10,7 @@ Python 3 and Node.js are needed for the quick checks. The configuration checks a
 | --- | --- |
 | SDK setup, board selection or root CMake | [Firmware configuration](#firmware-configuration). |
 | Relay, parsers, calculations, clipboard or file formats | [Core command reference](#core-command-reference); choose the affected module and any independent reference test. |
+| Storage writes or incomplete CSV rows | [Core command reference](#core-command-reference), [CSV tail recovery](#csv-tail-recovery) and a firmware build. |
 | Offline apps, SPI or I2C editor/result flows | [Offline and peripheral UI](#offline-and-peripheral-ui). |
 | Serial, saved serial logs or RTU Frames | [Serial and RTU UI](#serial-and-rtu-ui). |
 | Modbus TCP, NTP, Wake-on-LAN, UDP or HTTP fixtures | [Network fixtures and UI](#network-fixtures-and-ui). |
@@ -82,6 +83,18 @@ python tests\http_fixture_test.py
 git diff --check
 .\tools\build_idf.ps1
 ```
+
+## CSV tail recovery
+
+```powershell
+python tools/test_storage_csv_tail.py --compiler 'C:/path/to/clang.exe'
+```
+
+This portable fixture compiles the actual `storage_io.c` against native files, counting stdio calls and controlling seek/read/truncate/sync/close faults. Its 32 cases check exact retained bytes, empty/missing files, LF/CRLF, binary tails, the latest complete row, 511/512/513- and 1023/1024/1025-byte boundaries, and two long unfinished rows. Recovery scans backwards using a 512-byte scratch buffer. Eight controls against the preceding source exceed the seek budgets; a 65,536-byte partial tail drops from 65,538 stdio seeks to 130 while retaining the same complete prefix. Complete files require no block reads or truncation.
+
+Seek/read failures preserve all bytes, including a short read without a supplied errno. Truncate, sync and close failures report the first error and leave every modeled handle closed. Sync/close failures can follow a completed truncation, so those cases check the retained prefix without promising rollback or power-loss durability. Original storage checks and five existing MQTT/HTTP logging cases also pass. These checks use the host filesystem and controlled fault boundaries; physical FAT/SD timing, removal and power cuts remain in the hardware matrix.
+
+Generated source, full storage/header/test hashes and compile/result logs stay under `build/storage-csv-tail/`. Linux CI runs the fixture and retains those files as `storage-csv-tail-logs`, including compiler/test failures. Its 32 cases are separate from the seven-suite Windows native total.
 
 ## OTA manifests
 

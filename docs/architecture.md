@@ -81,6 +81,8 @@ The serial log viewer loads at most 512 validated rows and closes the file befor
 - Internal `storage` is SPIFFS for built-in state. Only provably blank flash auto-initializes.
 - FAT microSD stores user files and evidence. Writers use durable sync, unique `.TMP` publication, recoverable `.BAK` replacement, or incomplete-tail repair according to the data type.
 
+CSV tail repair uses a 512-byte scratch buffer and scans backwards by blocks before truncating at the most recent LF. HTTP, MQTT and Ring health logging share this helper with serialized writers. A seek/read failure prevents truncation; later truncate/sync/close failures preserve the first error. Native checks verify retained bytes and reduced stdio call counts, while physical FAT/SD latency and power-loss durability remain device checks.
+
 See [Storage and compatibility contract](compatibility.md) and [Data formats](data-formats.md).
 
 ## Network and radio

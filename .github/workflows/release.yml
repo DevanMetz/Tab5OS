@@ -29,6 +29,8 @@ jobs:
         run: |
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/storage_io.c tests/storage_io_test.c -o "$RUNNER_TEMP/storage_io_test"
           "$RUNNER_TEMP/storage_io_test"
+      - name: Test CSV tail recovery
+        run: python3 tools/test_storage_csv_tail.py --compiler cc
       - name: Test capture reader
         run: |
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/capture_data.c tests/capture_data_test.c -o "$RUNNER_TEMP/capture_data_test"
@@ -96,6 +98,19 @@ jobs:
             build/ota-result/result.log
             build/ota-result/source.json
             build/ota-result/ota_result.inc
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Retain CSV recovery test evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: storage-csv-tail-logs
+          path: |
+            build/storage-csv-tail/compile.log
+            build/storage-csv-tail/result.log
+            build/storage-csv-tail/source.json
+            build/storage-csv-tail/storage_source.inc
           if-no-files-found: warn
           retention-days: 14
 

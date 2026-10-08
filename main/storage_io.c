@@ -237,19 +237,24 @@ int storage_repair_csv_tail(const char *path)
                 remember_errno(&first_error);
             } else if (last_byte != '\n') {
                 repaired_length = 0;
-                for (long offset = length - 2; offset >= 0; --offset) {
+                unsigned char buffer[512];
+                long offset = length - 1;
+                while (offset > 0 && repaired_length == 0) {
+                    size_t count = offset > (long)sizeof(buffer) ? sizeof(buffer) : (size_t)offset;
+                    offset -= (long)count;
                     if (fseek(file, offset, SEEK_SET) != 0) {
                         remember_errno(&first_error);
                         break;
                     }
-                    int byte = fgetc(file);
-                    if (byte == EOF) {
+                    if (fread(buffer, 1, count, file) != count) {
                         remember_errno(&first_error);
                         break;
                     }
-                    if (byte == '\n') {
-                        repaired_length = offset + 1;
-                        break;
+                    for (size_t i = count; i > 0; --i) {
+                        if (buffer[i - 1] == '\n') {
+                            repaired_length = offset + (long)i;
+                            break;
+                        }
                     }
                 }
             }
