@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -518,8 +519,8 @@ static bool scope_chart_ready;
 static char scope_capture_notice[128];
 static void (*active_app_leave)(void);
 static TaskHandle_t ota_task_handle;
-static volatile bool ota_busy;
-static volatile bool ota_done;
+static atomic_bool ota_busy;
+static atomic_bool ota_done;
 static bool ota_ok;
 static bool ota_health_window_elapsed;
 static char ota_error[96];
@@ -5200,12 +5201,13 @@ static void ota_update_task(void *argument)
             ESP_LOGI("tab5-os", "Installing verified OTA manifest version %s", manifest.version);
             error = ota_manifest_install(&manifest, ota_error, sizeof(ota_error));
         }
-        ota_ok = error == ESP_OK;
-        if (!ota_ok && !ota_error[0])
+        bool success = error == ESP_OK;
+        ota_ok = success;
+        if (!success && !ota_error[0])
             snprintf(ota_error, sizeof(ota_error), "Update failed: %s", esp_err_to_name(error));
-        if (!ota_ok) ota_busy = false;
         ota_done = true;
-        if (ota_ok) {
+        if (!success) ota_busy = false;
+        if (success) {
             const esp_partition_t *installed = esp_ota_get_boot_partition();
             esp_app_desc_t installed_description;
             if (installed && esp_ota_get_partition_description(installed, &installed_description) == ESP_OK)
@@ -5251,7 +5253,7 @@ static void ota_clicked(lv_event_t *event)
 static void ota_tick(lv_timer_t *timer)
 {
     (void)timer;
-    if (!ota_done || !ota_status) return;
+    if (!ota_done || !ota_status || (!ota_ok && ota_busy)) return;
     ota_done = false;
     lv_label_set_text(ota_status, ota_ok ? "Installed. Restarting..." : ota_error);
     if (!ota_ok) {
@@ -7642,6 +7644,7 @@ static void show_launcher(void)
 
 static void validate_running_ota(void)
 {
+    if (ota_busy) return;
     const esp_partition_t *running = esp_ota_get_running_partition();
     esp_ota_img_states_t state;
     if (esp_ota_get_state_partition(running, &state) != ESP_OK) return;
@@ -7671,8 +7674,12 @@ static void validate_running_ota(void)
 
 static void confirm_running_ota(lv_timer_t *timer)
 {
-    lv_timer_delete(timer);
     ota_health_window_elapsed = true;
+    if (ota_busy) {
+        lv_timer_set_period(timer, 250);
+        return;
+    }
+    lv_timer_delete(timer);
     validate_running_ota();
 }
 

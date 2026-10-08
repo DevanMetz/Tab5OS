@@ -1,4 +1,4 @@
-"""Compile the actual OTA result/health functions with controlled native APIs."""
+"""Compile actual OTA result, health and worker callbacks with controlled APIs."""
 import argparse
 import hashlib
 import json
@@ -27,6 +27,12 @@ def main():
     assert health.count("static void ") == 2
     assert "static void confirm_running_ota(lv_timer_t *timer)" in health
     code += health
+    worker_start = source.index("static void ota_update_task(void *argument)\n{")
+    worker = source[worker_start:source.index("static const char *reset_reason_name(", worker_start)]
+    assert worker.count("static void ") == 3
+    assert "static void ota_clicked(lv_event_t *event)" in worker
+    assert "static void ota_tick(lv_timer_t *timer)" in worker
+    code += worker
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "ota_result.inc").write_text(code, encoding="utf-8")
     executable = args.output.resolve() / ("ota_result_test.exe" if os.name == "nt" else "ota_result_test")
@@ -47,10 +53,13 @@ def main():
     (args.output / "result.log").write_text(log)
     (args.output / "source.json").write_text(json.dumps({
         "mainSource": str(args.main_source.resolve()), "compiler": args.compiler,
+        "mainSourceSha256": hashlib.sha256(source.encode()).hexdigest(),
+        "testSourceSha256": hashlib.sha256((ROOT / "tests/ota_result_test.c").read_text(encoding="utf-8").encode()).hexdigest(),
         "functionSourceSha256": hashlib.sha256(code.encode()).hexdigest(),
         "executableSha256": hashlib.sha256(executable.read_bytes()).hexdigest(),
         "exitCode": result.returncode, "nvsAndOtaStateApisControlled": True,
-        "validationAndTimerApisControlled": True, "actualFunctionsCompiled": 5,
+        "validationAndTimerApisControlled": True, "workerApisAndSignalAccessControlled": True,
+        "actualFunctionsCompiled": 8,
         "physicalFlashVerified": False,
     }, indent=2) + "\n")
     print(log, end="", flush=True)

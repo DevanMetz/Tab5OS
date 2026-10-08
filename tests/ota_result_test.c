@@ -1,8 +1,10 @@
-/* Actual main.c result/health functions; SDK and timer calls are controlled. */
+/* Actual main.c OTA callbacks; SDK, UI, scheduling and signal access are controlled. */
 #include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdarg.h>
+#include <setjmp.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -16,6 +18,14 @@ typedef enum { NVS_READONLY, NVS_READWRITE } nvs_open_mode_t;
 typedef struct { unsigned id; } esp_partition_t;
 typedef struct { char version[32]; } esp_app_desc_t;
 typedef struct { unsigned id; } lv_timer_t;
+typedef struct { unsigned id; } lv_event_t;
+typedef struct { char text[96]; unsigned states; } lv_obj_t;
+typedef struct { char version[32]; } ota_manifest_t;
+typedef void *TaskHandle_t;
+enum { pdTRUE = 1, pdPASS = 1, LV_STATE_DISABLED = 1 };
+#define portMAX_DELAY UINT32_MAX
+#define pdMS_TO_TICKS(ms) (ms)
+#define OTA_MANIFEST_URL "controlled manifest URL"
 
 static esp_err_t nvs_init_error;
 static char ota_last_result[64];
@@ -31,6 +41,38 @@ static bool internal_ready, ota_health_window_elapsed;
 static esp_err_t storage_init_error, validation_error;
 static unsigned validation_calls, timer_deletes, info_logs, error_logs;
 static lv_timer_t health_timer = {1};
+static atomic_bool ota_busy, done_storage;
+static bool ota_ok, wifi_connected;
+static TaskHandle_t ota_task_handle;
+static char ota_error[96];
+static lv_obj_t status_object, button_object;
+static lv_obj_t *ota_status = &status_object, *ota_button = &button_object;
+static const char *blocker_text;
+static unsigned task_token, create_calls, notify_calls, fetch_calls, check_calls, install_calls;
+static unsigned delay_calls, restart_calls, wait_calls, activity_calls, screensaver_calls;
+static int create_result;
+static esp_err_t fetch_error, check_error, install_error;
+static bool fetch_error_text, worker_active, publication_observed, publication_busy;
+static bool click_at_publication, health_during_fetch, health_during_delay;
+static unsigned health_writes_during_worker;
+static unsigned health_timer_period, timer_period_changes;
+static jmp_buf worker_exit;
+static const esp_partition_t installed_partition = {3};
+static esp_app_desc_t installed_description;
+static void ota_update_task(void *argument);
+static void ota_clicked(lv_event_t *event);
+static void confirm_running_ota(lv_timer_t *timer);
+/* Observe the publication lvalue before its store; source bodies are unchanged. */
+static atomic_bool *fixture_done_access(void)
+{
+    if (worker_active && !publication_observed) {
+        publication_observed = true;
+        publication_busy = ota_busy;
+        if (click_at_publication) ota_clicked(NULL);
+    }
+    return &done_storage;
+}
+#define ota_done (*fixture_done_access())
 static unsigned cases, failures;
 
 static const char *esp_err_to_name(esp_err_t error) { return error == ESP_OK ? "ESP_OK" : "controlled error"; }
@@ -109,22 +151,92 @@ static const esp_partition_t *esp_ota_get_last_invalid_partition(void)
 { return invalid_present ? &invalid_partition : NULL; }
 static esp_err_t esp_ota_get_partition_description(const esp_partition_t *partition, esp_app_desc_t *description)
 {
-    assert(partition == &invalid_partition);
+    assert(partition == &invalid_partition || partition == &installed_partition);
     if (description_error) return description_error;
-    *description = invalid_description;
+    *description = partition == &installed_partition ? installed_description : invalid_description;
     return ESP_OK;
 }
 static esp_err_t esp_ota_mark_app_valid_cancel_rollback(void)
 {
-    assert(running_state == ESP_OTA_IMG_PENDING_VERIFY && ota_health_window_elapsed);
+    assert(running_state == ESP_OTA_IMG_PENDING_VERIFY && ota_health_window_elapsed && !ota_busy);
     validation_calls++;
     if (validation_error == ESP_OK) running_state = ESP_OTA_IMG_VALID;
     return validation_error;
 }
 static void lv_timer_delete(lv_timer_t *timer)
 {
-    assert(timer == &health_timer && !timer_deletes && !ota_health_window_elapsed);
+    assert(timer == &health_timer && !timer_deletes && !ota_busy);
     timer_deletes++;
+}
+static void lv_timer_set_period(lv_timer_t *timer, uint32_t period)
+{
+    assert(timer == &health_timer && !timer_deletes && period == 250);
+    health_timer_period = period;
+    timer_period_changes++;
+}
+static const esp_partition_t *esp_ota_get_boot_partition(void) { return &installed_partition; }
+static esp_err_t ota_manifest_fetch(const char *url, ota_manifest_t *manifest, char *error, size_t size)
+{
+    assert(!strcmp(url, OTA_MANIFEST_URL) && ota_busy && !done_storage);
+    fetch_calls++;
+    strcpy(manifest->version, installed_description.version);
+    if (health_during_fetch) {
+        unsigned writes_before = write_opens;
+        confirm_running_ota(&health_timer);
+        health_writes_during_worker += write_opens - writes_before;
+    }
+    if (fetch_error && fetch_error_text) snprintf(error, size, "Controlled manifest failure");
+    return fetch_error;
+}
+static esp_err_t ota_manifest_check(const ota_manifest_t *manifest, const char *running, char *error, size_t size)
+{
+    (void)error; (void)size;
+    assert(!strcmp(manifest->version, installed_description.version) && !strcmp(running, running_description.version));
+    check_calls++;
+    return check_error;
+}
+static esp_err_t ota_manifest_install(const ota_manifest_t *manifest, char *error, size_t size)
+{
+    (void)error; (void)size;
+    assert(!strcmp(manifest->version, installed_description.version));
+    install_calls++;
+    return install_error;
+}
+static void vTaskDelay(unsigned ticks)
+{
+    assert(ticks == 2000 && ota_busy && ota_ok && done_storage);
+    delay_calls++;
+    if (health_during_delay) {
+        unsigned writes_before = write_opens;
+        confirm_running_ota(&health_timer);
+        health_writes_during_worker += write_opens - writes_before;
+    }
+}
+static void esp_restart(void) { restart_calls++; longjmp(worker_exit, 1); }
+static unsigned ulTaskNotifyTake(unsigned clear, uint32_t ticks)
+{
+    assert(clear == pdTRUE && ticks == portMAX_DELAY);
+    wait_calls++;
+    longjmp(worker_exit, 1);
+}
+static const char *restart_blocker(void) { return blocker_text; }
+static void lv_label_set_text(lv_obj_t *object, const char *text)
+{
+    assert(object && strlen(text) < sizeof(object->text));
+    strcpy(object->text, text);
+}
+static void lv_obj_add_state(lv_obj_t *object, unsigned state) { assert(object); object->states |= state; }
+static void lv_obj_remove_state(lv_obj_t *object, unsigned state) { assert(object); object->states &= ~state; }
+static void lv_display_trigger_activity(void *display) { assert(!display); activity_calls++; }
+static void screensaver_close(void) { screensaver_calls++; }
+static void xTaskNotifyGive(TaskHandle_t handle) { assert(handle == &task_token); notify_calls++; }
+static int xTaskCreate(void (*function)(void *), const char *name, unsigned stack,
+                       void *argument, unsigned priority, TaskHandle_t *handle)
+{
+    assert(function == ota_update_task && !strcmp(name, "ota") && stack == 6144 && !argument && priority == 4);
+    create_calls++;
+    if (create_result == pdPASS) *handle = &task_token;
+    return create_result;
 }
 
 #include "ota_result.inc"
@@ -135,6 +247,18 @@ static void reset(void)
     readonly_opens = write_opens = sets = erases = commits = state_reads = warnings = 0;
     validation_calls = timer_deletes = info_logs = error_logs = 0;
     state_read_fail_at = 0;
+    ota_busy = done_storage = ota_ok = worker_active = publication_observed = publication_busy = false;
+    click_at_publication = health_during_fetch = health_during_delay = false;
+    health_writes_during_worker = 0;
+    health_timer_period = 30000; timer_period_changes = 0;
+    ota_task_handle = NULL; ota_error[0] = '\0'; blocker_text = NULL;
+    wifi_connected = true; create_result = pdPASS; fetch_error = check_error = install_error = ESP_OK;
+    fetch_error_text = true;
+    create_calls = notify_calls = fetch_calls = check_calls = install_calls = 0;
+    delay_calls = restart_calls = wait_calls = activity_calls = screensaver_calls = 0;
+    memset(&status_object, 0, sizeof(status_object)); memset(&button_object, 0, sizeof(button_object));
+    ota_status = &status_object; ota_button = &button_object;
+    strcpy(installed_description.version, "v0.8.0-87654321");
     internal_ready = true;
     ota_health_window_elapsed = false;
     storage_init_error = validation_error = ESP_OK;
@@ -167,6 +291,25 @@ static void check_health(const char *name, const char *message, bool retain_pend
     printf("HEALTH %s timer_deletes=%u window_elapsed=%u validations=%u warnings=%u errors=%u info=%u\n",
            name, timer_deletes, (unsigned)ota_health_window_elapsed, validation_calls, warnings, error_logs, info_logs);
     check(name, message, retain_pending, writes, reads);
+}
+static void run_worker(void)
+{
+    assert(ota_busy && ota_task_handle == &task_token);
+    worker_active = true;
+    if (!setjmp(worker_exit)) ota_update_task(NULL);
+    worker_active = false;
+}
+static void worker_case(const char *name, bool pass)
+{
+    assert(!handles);
+    cases++; failures += !pass;
+    printf("%s %s busy=%u done=%u ok=%u publish_busy=%u notifications=%u fetch=%u check=%u install=%u delay=%u restart=%u wait=%u health_writes=%u pending=%u writes=%u handles=%u state_reads=%u validations=%u timer_deletes=%u timer_period=%u period_changes=%u button_disabled=%u pending_version=\"%s\" result=\"%s\" status=\"%s\"\n",
+           pass ? "PASS" : "FAIL", name, (unsigned)ota_busy, (unsigned)done_storage, (unsigned)ota_ok,
+           (unsigned)publication_busy, notify_calls, fetch_calls, check_calls, install_calls, delay_calls,
+           restart_calls, wait_calls, health_writes_during_worker, (unsigned)has_pending, write_opens, handles,
+           state_reads, validation_calls, timer_deletes, health_timer_period, timer_period_changes,
+           (unsigned)(ota_button && (ota_button->states & LV_STATE_DISABLED)),
+           saved_pending, ota_last_result, status_object.text);
 }
 
 int main(void)
@@ -296,6 +439,95 @@ int main(void)
     reset(); strcpy(saved_pending, "v0.7.0-123456789012345678901234"); strcpy(running_description.version, saved_pending);
     running_state = ESP_OTA_IMG_PENDING_VERIFY; ota_load_result(); confirm_running_ota(&health_timer);
     check_health("health-maximum-version", "Installed v0.7.0-123456789012345678901234", false, 1, 2, 1);
+    const char *worker_error_names[] = {"worker-fetch-failure", "worker-check-failure", "worker-install-failure", "worker-fallback-error"};
+    for (unsigned i = 0; i < 4; i++) {
+        reset();
+        if (i == 1) check_error = ESP_FAIL; else if (i == 2) install_error = ESP_FAIL; else fetch_error = ESP_FAIL;
+        if (i == 3) fetch_error_text = false;
+        ota_clicked(NULL); run_worker();
+        worker_case(worker_error_names[i], publication_busy && !ota_busy && done_storage && !ota_ok &&
+            fetch_calls == 1 && check_calls == (unsigned)(i == 1 || i == 2) && install_calls == (unsigned)(i == 2) &&
+            wait_calls == 1 && !delay_calls && !restart_calls && !write_opens &&
+            !strcmp(ota_error, i == 0 ? "Controlled manifest failure" : "Update failed: controlled error"));
+    }
+    reset(); fetch_error = ESP_FAIL; click_at_publication = true;
+    ota_clicked(NULL); run_worker();
+    worker_case("worker-publication-click", publication_busy && !ota_busy && done_storage && !ota_ok &&
+        create_calls == 1 && !notify_calls && activity_calls == 1 && wait_calls == 1);
+    const char *success_names[] = {"worker-success", "worker-success-health-window", "worker-success-offscreen-health"};
+    for (unsigned i = 0; i < 3; i++) {
+        reset(); has_pending = false; saved_pending[0] = '\0'; strcpy(ota_last_result, saved_result);
+        health_during_delay = i != 0;
+        ota_clicked(NULL);
+        if (i == 2) { ota_status = NULL; ota_button = NULL; }
+        run_worker();
+        worker_case(success_names[i], publication_busy && ota_busy && done_storage && ota_ok &&
+            fetch_calls == 1 && check_calls == 1 && install_calls == 1 && delay_calls == 1 && restart_calls == 1 && !wait_calls &&
+            !health_writes_during_worker && has_pending && !strcmp(saved_pending, installed_description.version) &&
+            !strcmp(ota_last_result, "Previous result") && write_opens == 1 && sets == 1 && !erases && commits == 1 &&
+            !timer_deletes && !validation_calls && timer_period_changes == (unsigned)(i != 0) &&
+            health_timer_period == (i ? 250U : 30000U));
+    }
+    reset(); ota_busy = done_storage = true; strcpy(ota_error, "Controlled manifest failure");
+    strcpy(status_object.text, "Waiting for updater"); button_object.states = LV_STATE_DISABLED;
+    ota_tick(NULL);
+    worker_case("worker-tick-before-release", ota_busy && done_storage && !strcmp(status_object.text, "Waiting for updater") &&
+        button_object.states == LV_STATE_DISABLED && !activity_calls && !state_reads);
+    reset(); fetch_error = ESP_FAIL; ota_clicked(NULL); run_worker(); ota_tick(NULL);
+    worker_case("worker-tick-failure", !ota_busy && !done_storage && !ota_ok &&
+        !strcmp(status_object.text, "Controlled manifest failure") && !button_object.states && activity_calls == 2 && !state_reads);
+    reset(); state_error = ESP_FAIL; ota_load_result(); state_error = ESP_OK;
+    fetch_error = ESP_FAIL; health_during_fetch = true; ota_clicked(NULL); run_worker();
+    bool held_metadata = !health_writes_during_worker && has_pending && !write_opens && !strcmp(ota_last_result, unavailable);
+    ota_tick(NULL);
+    confirm_running_ota(&health_timer);
+    worker_case("worker-failure-after-health-window", held_metadata && !ota_busy && !done_storage && !has_pending &&
+        !strcmp(ota_last_result, installed) && write_opens == 1 && state_reads == 3 && !validation_calls &&
+        timer_deletes == 1 && timer_period_changes == 1 && health_timer_period == 250 &&
+        !strcmp(status_object.text, "Controlled manifest failure"));
+    reset(); state_error = ESP_FAIL; ota_load_result(); state_error = ESP_OK;
+    fetch_error = ESP_FAIL; health_during_fetch = true; ota_clicked(NULL); ota_status = NULL; ota_button = NULL; run_worker();
+    held_metadata = !health_writes_during_worker && has_pending && !write_opens && !timer_deletes;
+    confirm_running_ota(&health_timer);
+    worker_case("worker-failure-offscreen-health", held_metadata && !ota_busy && done_storage && !has_pending &&
+        !strcmp(ota_last_result, installed) && write_opens == 1 && state_reads == 3 && !validation_calls &&
+        timer_deletes == 1 && timer_period_changes == 1 && health_timer_period == 250 && !ota_status);
+    reset(); running_state = ESP_OTA_IMG_PENDING_VERIFY; ota_load_result();
+    fetch_error = ESP_FAIL; health_during_fetch = true; ota_clicked(NULL); run_worker();
+    held_metadata = !health_writes_during_worker && !validation_calls && has_pending && !write_opens && !timer_deletes;
+    confirm_running_ota(&health_timer);
+    worker_case("worker-pending-health-after-failure", held_metadata && !ota_busy && done_storage && !has_pending &&
+        !strcmp(ota_last_result, installed) && write_opens == 1 && state_reads == 2 && validation_calls == 1 &&
+        timer_deletes == 1 && timer_period_changes == 1 && health_timer_period == 250);
+    reset(); fetch_error = ESP_FAIL; ota_clicked(NULL); ota_status = NULL; ota_button = NULL; run_worker(); ota_tick(NULL);
+    bool held_completion = !ota_busy && done_storage && activity_calls == 1 && !state_reads;
+    ota_status = &status_object; ota_button = &button_object; ota_tick(NULL);
+    worker_case("worker-offscreen-failure", held_completion && !ota_busy && !done_storage && !button_object.states &&
+        !strcmp(status_object.text, "Controlled manifest failure") && activity_calls == 2 && !state_reads);
+    reset(); create_result = 0; ota_clicked(NULL);
+    worker_case("worker-task-create-error", !ota_busy && !done_storage && !ota_task_handle && create_calls == 1 &&
+        !fetch_calls && !notify_calls && !button_object.states && !strcmp(status_object.text, "Could not start updater"));
+    reset(); fetch_error = ESP_FAIL;
+    bool retries_pass = true;
+    for (unsigned i = 0; i < 25; i++) {
+        publication_observed = publication_busy = false;
+        ota_clicked(NULL); run_worker();
+        retries_pass = retries_pass && publication_busy && !ota_busy && done_storage && !ota_ok;
+        ota_tick(NULL);
+        retries_pass = retries_pass && !done_storage && !button_object.states && ota_task_handle == &task_token && !handles;
+    }
+    worker_case("worker-retained-retry", retries_pass && create_calls == 1 && notify_calls == 24 &&
+        fetch_calls == 25 && wait_calls == 25 && !check_calls && !install_calls && !write_opens && activity_calls == 50);
+    reset(); ota_busy = true; ota_clicked(NULL);
+    worker_case("worker-busy-click", ota_busy && !done_storage && !create_calls && !notify_calls && !activity_calls);
+    reset(); ota_busy = true; validate_running_ota();
+    worker_case("worker-busy-validation", ota_busy && !state_reads && !write_opens && !readonly_opens && !validation_calls);
+    reset(); wifi_connected = false; ota_clicked(NULL);
+    worker_case("worker-disconnected-click", !ota_busy && !done_storage && !create_calls && !notify_calls && !activity_calls &&
+        !strcmp(status_object.text, "Connect to Wi-Fi first"));
+    reset(); blocker_text = "Controlled active session"; ota_clicked(NULL);
+    worker_case("worker-restart-blocker", !ota_busy && !done_storage && !create_calls && !notify_calls && !activity_calls &&
+        !strcmp(status_object.text, blocker_text));
     printf("%s %u OTA result cases failures=%u handles=%u (controlled NVS/state APIs)\n",
            failures ? "FAIL" : "PASS", cases, failures, handles);
     return failures ? 1 : 0;
