@@ -87,6 +87,8 @@ Notes uses a temporary PSRAM buffer to load an entire file of up to 65,535 bytes
 
 Ride history shows totals only after recovery, reading and closing the summary succeed; a missing index is valid empty history. Storage errors display an unavailable message and update the shared SD error. Appending checks known SD availability, directory creation and temporary-file removal before copying. A failed read chunk is rejected before writing, and the first read/write/open error survives source/destination close and temporary cleanup failures. The existing replacement helper still owns sync, backup, publication and rollback. Native tests verify exact file bytes and closed modeled handles; physical FAT/SD and panel behavior remain open.
 
+Ring's saved heart-rate timestamp becomes loaded only after incomplete-tail repair, seek/size checks, the expected bounded tail read and close succeed. Read or close errors leave the checkpoint unchanged and retryable. Its existing health timer retains queued samples and defers history requests until that load succeeds, then filters timestamps against the recovered checkpoint. Known SD unavailability blocks queue processing even when a checkpoint is cached; timeout state still advances before the storage gate. Appends preserve the first error through close and tail repair. Native files and controlled queue/timer/SD boundaries verify this behavior; physical SD, BLE and scheduling remain open.
+
 See [Storage and compatibility contract](compatibility.md) and [Data formats](data-formats.md).
 
 ## Network and radio

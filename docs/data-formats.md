@@ -59,6 +59,8 @@ Heart-rate header:
 unix_time,local_time,bpm
 ```
 
+Ring loads its saved timestamp from the repaired final 512 bytes only after successful seek, size, complete read and close checks. A failed checkpoint load leaves queued samples pending and defers history requests until recovery; known SD unavailability also blocks a previously cached checkpoint. Directory and append failures preserve the first error through close and tail repair. An unconfirmed flush/sync/close can leave a complete row; a failed write or repair can retain an unfinished suffix. A retry can repeat a row whose persistence was unconfirmed, so consumers should use `unix_time` when handling duplicates. Native checks cover file bytes and controlled queue/error behavior; physical SD and BLE remain hardware checks.
+
 I2C watch header:
 
 ```text

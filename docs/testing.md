@@ -13,6 +13,7 @@ Python 3 and Node.js are needed for the quick checks. The configuration checks a
 | Storage writes or incomplete CSV rows | [Core command reference](#core-command-reference), [CSV tail recovery](#csv-tail-recovery) and a firmware build. |
 | Notes loading, saving or lifecycle | [Notes storage and UI](#notes-storage-and-ui) and a firmware build. |
 | Ride history loading or summary appends | [Ride history storage](#ride-history-storage) and a firmware build. |
+| Ring heart-rate logging, saved timestamps or queue processing | [Ring history storage](#ring-history-storage) and a firmware build. |
 | Offline apps, SPI or I2C editor/result flows | [Offline and peripheral UI](#offline-and-peripheral-ui). |
 | Serial, saved serial logs or RTU Frames | [Serial and RTU UI](#serial-and-rtu-ui). |
 | Modbus TCP, NTP, Wake-on-LAN, UDP or HTTP fixtures | [Network fixtures and UI](#network-fixtures-and-ui). |
@@ -123,6 +124,18 @@ This portable fixture compiles the two actual ride-history callbacks extracted f
 The preceding callbacks fail 24 controls, including misleading totals after recovery/read/close errors, ignored SD/preparation errors and lost first errors during cleanup. Compounded read/copy/open failures retain their original error when later closes or removal fail. Missing read/write errno falls back to `EIO`; a successful earlier history read cannot supply a stale errno for a later failure. Multi-block and full-count read-error cases reject the failed chunk before copying. Cleanup failure can retain an unpublished partial temporary file, and publication/rollback failures can retain recovery generations. These checks do not validate every CSV field or prove physical FAT/SD latency, removal, power cuts or panel rendering.
 
 Generated callbacks/storage source, full main/function/storage/header/test hashes and compile/result logs stay under `build/ride-history/`. Linux CI runs the fixture and retains these files as `ride-history-logs`, including diagnostics when compilation or execution fails. Its 50 cases are separate from the Windows native total.
+
+## Ring history storage
+
+```powershell
+python tools/test_ring_history.py --compiler 'C:/path/to/clang.exe'
+```
+
+This portable fixture compiles the three actual Ring append/checkpoint/health-timer callbacks extracted from `main/main.c` and the complete `storage_io.c`. Its 59 cases use native files to check exact headers/rows, missing/empty logs, bounded long-tail loads, incomplete-tail repair, seek/size/read/close failures, short reads without an error flag, full-count reads with an error flag, stored SD errors and directory/append/flush/sync/close/repair faults. Every case verifies exact file bytes with no remaining modeled file handles. Twenty-five checkpoint reopens retain the same bytes and close every read.
+
+The preceding callbacks fail 32 controls, including prematurely caching failed reads, consuming samples against an uncertain checkpoint, ignoring directory errors and losing seek/tell/header/row errors during close. Timer cases retain queued samples and stop history requests after failed loads, retry successfully without appending historical duplicates, clear recovered errors, retain a failed append for retry and update timeout state while storage is blocked. A cached checkpoint cannot bypass known SD unavailability. Missing I/O errno falls back to `EIO`, and an earlier successful seek cannot supply stale errno for a failed read. Sync/close errors can follow a complete append; repair failure can retain an unfinished suffix. These checks do not promise rollback, exactly-once logging or power-loss durability.
+
+Queue/timer and SD error APIs are controlled, time conversion uses UTC for independently expected rows, and no BLE traffic occurs. They do not run FreeRTOS/NimBLE or establish physical SD removal/full-card behavior, radio delivery, scheduling or panel rendering. Generated callbacks/storage source, full main/function/storage/header/test hashes and compile/result logs stay under `build/ring-history/`. Linux CI retains these files as `ring-history-logs`, including compiler/test failures; the 59 cases are separate from the Windows native total.
 
 ## OTA manifests
 

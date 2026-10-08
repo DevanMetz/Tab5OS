@@ -1019,13 +1019,20 @@ static bool ring_hr_append_log(time_t sample_time, int heart_rate)
         errno = error ? error : ENODEV;
         return false;
     }
-    mkdir(HEALTH_PATH, 0775);
+    errno = 0;
+    if (mkdir(HEALTH_PATH, 0775) != 0 && errno != EEXIST) {
+        int error = errno ? errno : EIO;
+        sd_record_error(error);
+        errno = error;
+        return false;
+    }
     if (storage_repair_csv_tail(HEART_RATE_LOG) != 0) {
         int error = errno ? errno : EIO;
         sd_record_error(error);
         errno = error;
         return false;
     }
+    errno = 0;
     FILE *file = fopen(HEART_RATE_LOG, "ab+");
     if (!file) {
         int error = errno ? errno : EIO;
@@ -1033,71 +1040,112 @@ static bool ring_hr_append_log(time_t sample_time, int heart_rate)
         errno = error;
         return false;
     }
-    bool ok = fseek(file, 0, SEEK_END) == 0;
-    long size = ok ? ftell(file) : -1;
-    if (size < 0) ok = false;
-    if (ok && size == 0) ok = fputs("unix_time,local_time,bpm\n", file) >= 0;
+    int write_error = 0;
+    errno = 0;
+    if (fseek(file, 0, SEEK_END) != 0) write_error = errno ? errno : EIO;
+    long size = -1;
+    if (!write_error) {
+        errno = 0;
+        size = ftell(file);
+        if (size < 0) write_error = errno ? errno : EIO;
+    }
+    if (!write_error && size == 0) {
+        errno = 0;
+        if (fputs("unix_time,local_time,bpm\n", file) < 0) write_error = errno ? errno : EIO;
+    }
     struct tm local;
     char timestamp[24];
     localtime_r(&sample_time, &local);
     strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &local);
-    if (ok) ok = fprintf(file, "%lld,%s,%d\n", (long long)sample_time, timestamp, heart_rate) >= 0;
-    int write_error = 0;
-    if (ok && storage_sync_file(file) != 0) {
-        write_error = errno ? errno : EIO;
-        ok = false;
+    if (!write_error) {
+        errno = 0;
+        if (fprintf(file, "%lld,%s,%d\n", (long long)sample_time, timestamp, heart_rate) < 0)
+            write_error = errno ? errno : EIO;
     }
-    if (fclose(file) != 0) {
-        if (!write_error) write_error = errno ? errno : EIO;
-        ok = false;
+    if (!write_error) {
+        errno = 0;
+        if (storage_sync_file(file) != 0) write_error = errno ? errno : EIO;
     }
-    if (!ok) {
-        if (!write_error) write_error = errno ? errno : EIO;
+    errno = 0;
+    if (fclose(file) != 0 && !write_error) write_error = errno ? errno : EIO;
+    if (write_error) {
         storage_repair_csv_tail(HEART_RATE_LOG);
         sd_record_error(write_error);
         errno = write_error;
     }
-    return ok;
+    return write_error == 0;
 }
 
-static void ring_hr_load_last_saved(void)
+static bool ring_hr_load_last_saved(void)
 {
-    if (ring_hr_last_saved_loaded) return;
+    if (!sd_ready) {
+        int error = sd_error_snapshot();
+        errno = error ? error : ENODEV;
+        return false;
+    }
+    if (ring_hr_last_saved_loaded) return true;
     if (storage_repair_csv_tail(HEART_RATE_LOG) != 0) {
-        sd_record_error(errno ? errno : EIO);
-        return;
+        int error = errno ? errno : EIO;
+        sd_record_error(error);
+        errno = error;
+        return false;
     }
-    ring_hr_last_saved_loaded = true;
+    errno = 0;
     FILE *file = fopen(HEART_RATE_LOG, "rb");
-    if (!file) return;
+    if (!file) {
+        if (errno == ENOENT) {
+            ring_hr_last_saved_loaded = true;
+            return true;
+        }
+        int error = errno ? errno : EIO;
+        sd_record_error(error);
+        errno = error;
+        return false;
+    }
     char tail[513];
-    if (fseek(file, 0, SEEK_END) != 0) {
-        fclose(file);
-        return;
+    int error = 0;
+    errno = 0;
+    if (fseek(file, 0, SEEK_END) != 0) error = errno ? errno : EIO;
+    long end = 0, offset = 0;
+    if (!error) {
+        errno = 0;
+        end = ftell(file);
+        if (end < 0) error = errno ? errno : EIO;
+        else offset = end > (long)sizeof(tail) - 1 ? end - ((long)sizeof(tail) - 1) : 0;
     }
-    long end = ftell(file);
-    long offset = end > (long)sizeof(tail) - 1 ? end - ((long)sizeof(tail) - 1) : 0;
-    if (end < 0 || fseek(file, offset, SEEK_SET) != 0) {
-        fclose(file);
-        return;
+    if (!error) {
+        errno = 0;
+        if (fseek(file, offset, SEEK_SET) != 0) error = errno ? errno : EIO;
     }
-    size_t length = fread(tail, 1, sizeof(tail) - 1, file);
+    size_t length = 0;
+    if (!error) {
+        errno = 0;
+        length = fread(tail, 1, (size_t)(end - offset), file);
+        if (ferror(file) || length != (size_t)(end - offset)) error = errno ? errno : EIO;
+    }
+    errno = 0;
+    if (fclose(file) != 0 && !error) error = errno ? errno : EIO;
+    if (error) {
+        sd_record_error(error);
+        errno = error;
+        return false;
+    }
     tail[length] = '\0';
-    fclose(file);
     char *line = tail;
     if (offset) {
         line = strchr(line, '\n');
-        if (!line) return;
-        line++;
+        if (line) line++;
     }
     long long timestamp;
-    while (*line) {
+    while (line && *line) {
         if (sscanf(line, "%lld,", &timestamp) == 1 && timestamp > ring_hr_last_saved)
             ring_hr_last_saved = (time_t)timestamp;
         line = strchr(line, '\n');
         if (!line) break;
         line++;
     }
+    ring_hr_last_saved_loaded = true;
+    return true;
 }
 
 static int ring_request_history(void)
@@ -1161,7 +1209,12 @@ static void ring_health_tick(lv_timer_t *timer)
     }
     portEXIT_CRITICAL(&ring_lock);
 
-    ring_hr_load_last_saved();
+    if (!ring_hr_load_last_saved()) {
+        snprintf(ring_storage_error, sizeof(ring_storage_error),
+                 "Heart-rate log not saved: %s", strerror(errno));
+        return;
+    }
+    ring_storage_error[0] = '\0';
     ring_hr_sample_t sample;
     while (ring_hr_samples && xQueuePeek(ring_hr_samples, &sample, 0) == pdTRUE) {
         if (sample.timestamp > ring_hr_last_saved) {
