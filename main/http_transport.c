@@ -62,6 +62,8 @@ static int poll_ms(int64_t limit)
     return ms < HTTP_POLL_MS ? (int)ms : HTTP_POLL_MS;
 }
 
+static void reset_response(http_transport_t *state);
+
 static bool resolve_host(http_transport_t *state, const char *host, char address[64], int64_t limit)
 {
     if (strlen(host) >= sizeof(state->host)) { errno = EINVAL; return false; }
@@ -81,6 +83,7 @@ static int connect_guarded(esp_transport_handle_t transport, const char *host, i
     http_transport_t *state = esp_transport_get_context_data(transport);
     int64_t limit = operation_deadline(state, timeout_ms);
     if (stopped(state)) return -1;
+    reset_response(state);
     char address[64];
     state->connect_error = 0;
     bool resolved = resolve_host(state, host, address, limit);
@@ -141,6 +144,13 @@ static void reset_parser(http_transport_t *state)
     state->parser.data = state;
     state->message_complete = false;
     state->reading_trailers = false;
+}
+
+static void reset_response(http_transport_t *state)
+{
+    state->received = state->delivered = state->safe_until = 0;
+    state->headers_complete = false;
+    reset_parser(state);
 }
 
 static size_t block_end(const char *buffer, size_t length, bool trailers)
@@ -279,6 +289,9 @@ static int read_guarded(esp_transport_handle_t transport, char *buffer, int leng
 static int write_guarded(esp_transport_handle_t transport, const char *buffer, int length, int timeout_ms)
 {
     http_transport_t *state = esp_transport_get_context_data(transport);
+    /* Automatic redirects may reuse the connection after draining a response. */
+    if (state->message_complete && !state->reading_trailers && !state->safe_until)
+        reset_response(state);
     int64_t limit = operation_deadline(state, timeout_ms);
     do {
         if (stopped(state)) return -1;

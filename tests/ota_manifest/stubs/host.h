@@ -10,6 +10,7 @@ typedef int esp_err_t;
 #define ESP_ERR_NO_MEM 0x101
 #define ESP_ERR_INVALID_ARG 0x102
 #define ESP_ERR_INVALID_SIZE 0x104
+#define ESP_ERR_TIMEOUT 0x107
 #define ESP_ERR_INVALID_RESPONSE 0x108
 #define ESP_ERR_INVALID_CRC 0x109
 #define ESP_ERR_INVALID_VERSION 0x10a
@@ -42,6 +43,7 @@ typedef struct {
     int buffer_size_tx;
     int max_redirection_count;
     bool keep_alive_enable;
+    void *transport;
 } esp_http_client_config_t;
 typedef void *esp_http_client_handle_t;
 esp_http_client_handle_t esp_http_client_init(const esp_http_client_config_t *config);

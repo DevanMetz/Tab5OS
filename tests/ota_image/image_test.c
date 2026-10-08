@@ -5,6 +5,7 @@
 #include "ota_manifest.h"
 #include "mbedtls/sha256.h"
 #include "mbedtls/platform_util.h"
+#include "dns_adapter.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,7 +18,6 @@ _Static_assert(offsetof(esp_app_desc_t, version) == 16, "P4 application version 
 #define assert(condition) do { if (!(condition)) { \
     fprintf(stderr, "Requirement failed: %s (%s:%d)\n", #condition, __FILE__, __LINE__); exit(3); } } while (0)
 
-char http_host_last_peer[64], http_host_tls_name[256];
 static esp_partition_t slot = {.subtype = 16, .size = 0x600000};
 static const char *mode;
 static unsigned char expected[32768], written[32768];
@@ -134,9 +134,11 @@ int main(int argc, char **argv)
     esp_err_t expected_error = (esp_err_t)strtol(argv[5], NULL, 0);
     WSADATA sockets;
     assert(!WSAStartup(MAKEWORD(2, 2), &sockets));
+    http_dns_test_init(mode);
     char message[128] = {0};
     bool fetching = !strncmp(mode, "manifest-", 9);
-    unsigned cycles = !strcmp(mode, "repeat") || !strcmp(mode, "manifest-repeat") ? 26 : 1;
+    unsigned cycles = !strcmp(mode, "repeat") || !strcmp(mode, "manifest-repeat") ||
+                      !strcmp(mode, "manifest-metadata-repeat") ? 26 : 1;
     DWORD handles_before = 0, handles_after = 0;
     esp_err_t error = ESP_OK;
     for (unsigned cycle = 0; cycle < cycles; cycle++) {
@@ -146,8 +148,17 @@ int main(int argc, char **argv)
         response_length = 0;
         response_complete = false;
         response_finished = false;
+        if (!strcmp(mode, "manifest-transport-allocation")) InterlockedExchange(&http_host_fail_allocation, 1);
+        if (!strcmp(mode, "manifest-transport-init")) InterlockedExchange(&http_host_fail_transport, 1);
+        int64_t started = esp_timer_get_time();
         error = fetching ? ota_manifest_fetch(request_url, &manifest, message, sizeof(message)) :
                            ota_manifest_install(&manifest, message, sizeof(message));
+        int64_t elapsed = esp_timer_get_time() - started;
+        if (!strcmp(mode, "manifest-header-deadline") || !strcmp(mode, "manifest-body-deadline") ||
+            !strcmp(mode, "manifest-header-trickle")) {
+            assert(elapsed >= 14000000 && elapsed < 17000000);
+            printf("DEADLINE %s elapsed_ms=%lld\n", mode, (long long)(elapsed / 1000));
+        }
         if (error != expected_error) {
             fprintf(stderr, "FAIL %s actual=%d expected=%d image_events=%lld non_image_events=%lld redirect_events=%u message=%s\n",
                     mode, error, expected_error, (long long)image_event_bytes, (long long)non_image_event_bytes,
@@ -164,7 +175,7 @@ int main(int argc, char **argv)
                 assert(!strcmp(manifest.url, "https://github.com/DevanMetz/Tab5OS/releases/download/v0.6.0/tab5_os.bin"));
                 assert(ota_manifest_check(&manifest, "v0.5.1", message, sizeof(message)) == ESP_OK);
                 if (!strcmp(mode, "manifest-close-delimited"))
-                    assert(response_length == -1 && !response_complete);
+                    assert(response_length == -1 && response_complete);
             } else {
                 assert(message[0]);
             }
@@ -196,6 +207,7 @@ int main(int argc, char **argv)
            cycles, (unsigned long)handles_before, (unsigned long)handles_after);
     if (fetching && response_finished) printf("HTTP_RESPONSE %s content_length=%lld complete=%u\n",
                                               mode, (long long)response_length, (unsigned)response_complete);
+    http_dns_test_close();
     WSACleanup();
     return 0;
 }

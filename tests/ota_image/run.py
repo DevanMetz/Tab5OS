@@ -24,14 +24,22 @@ FETCH_MODES = (
     "manifest-truncated-json", "manifest-exact-cap", "manifest-overflow", "manifest-nul-suffix",
     "manifest-http-error", "manifest-repeat",
     "manifest-large-length", "manifest-max-length",
+    "manifest-informational", "manifest-trailer", "manifest-partial-header", "manifest-header-overflow",
+    "manifest-trailer-truncated", "manifest-header-deadline", "manifest-body-deadline", "manifest-metadata-repeat",
+    "manifest-header-trickle", "manifest-transport-allocation", "manifest-transport-init",
 )
 ERRORS = {"wrong-hash": 0x109, "wrong-size": 0x104, "wrong-version": 0x10a,
           "corrupt-image": 0x109, "long-image": 0x109, "wrong-chip": 0x10a,
           "long-image-matching-hash": 0x109, "short-image-matching-hash": 0x109,
           "manifest-incomplete-length": 0x104, "manifest-incomplete-chunked": 0x104,
           "manifest-truncated-json": 0x108, "manifest-overflow": 0x104, "manifest-nul-suffix": 0x108,
-          "manifest-large-length": 0x104, "manifest-max-length": 0x7004}
-SUCCESSES = MODES[:8] + ("repeat",) + FETCH_MODES[:6] + ("manifest-exact-cap", "manifest-repeat")
+          "manifest-large-length": 0x104, "manifest-max-length": 0x108,
+          "manifest-partial-header": 0x7004, "manifest-header-overflow": 0x108,
+          "manifest-trailer-truncated": 0x104,
+          "manifest-header-deadline": 0x107, "manifest-body-deadline": 0x107,
+          "manifest-header-trickle": 0x107, "manifest-transport-allocation": 0x101, "manifest-transport-init": 0x101}
+SUCCESSES = MODES[:8] + ("repeat",) + FETCH_MODES[:6] + (
+    "manifest-exact-cap", "manifest-repeat", "manifest-informational", "manifest-trailer", "manifest-metadata-repeat")
 
 
 def image():
@@ -96,15 +104,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 body.append(0)
             elif mode == "short-image-matching-hash":
                 body = body[:-1]
-            if kind == "http-error":
+            if kind in ("partial-header", "header-deadline"):
+                response = b"HTTP/1.1 200 OK\r\nX-Probe: unfinished-value"
+            elif kind == "header-overflow":
+                response = (b"HTTP/1.1 200 OK\r\nX-Probe: " + b"x" * 9000 +
+                            f"\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode() + body)
+            elif kind == "http-error":
                 response = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            elif kind in ("chunked", "incomplete-chunked", "long-image", "long-image-matching-hash", "short-image-matching-hash"):
+            elif kind in ("chunked", "incomplete-chunked", "long-image", "long-image-matching-hash", "short-image-matching-hash",
+                          "trailer", "trailer-truncated", "metadata-repeat"):
                 transfer_name = b"tRaNsFeR-EnCoDiNg" if kind == "incomplete-chunked" else b"Transfer-Encoding"
                 response = b"HTTP/1.1 200 OK\r\n" + transfer_name + b": chunked\r\nConnection: close\r\n\r\n"
                 for offset in range(0, len(body), 173):
                     chunk = body[offset:offset + 173]
                     response += f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n"
-                if kind != "incomplete-chunked":
+                if kind in ("trailer", "metadata-repeat"):
+                    response += b"0\r\nX-Probe: trailing-value\r\n\r\n"
+                elif kind == "trailer-truncated":
+                    response += b"0\r\nX-Probe: unfinished-value"
+                elif kind != "incomplete-chunked":
                     response += b"0\r\n\r\n"
             elif kind == "close-delimited":
                 response = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n" + body
@@ -119,16 +137,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if mode == "truncated":
                     body = body[:2049]
                 response = (f"HTTP/1.1 200 OK\r\nContent-Length: {declared}\r\n"
-                            "Connection: close\r\n\r\n").encode() + body
+                            "Connection: close\r\n\r\n").encode() + (body[:10] if kind == "body-deadline" else body)
+            if kind in ("informational", "metadata-repeat"):
+                response = b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 103 Early Hints\r\nLink: </probe>\r\n\r\n" + response
         server.responses.append({"path": self.path, "wireBytes": len(response),
                                  "sha256": hashlib.sha256(response).hexdigest(), "redirect": redirected})
         with contextlib.suppress(OSError):
-            if kind in ("fragmented", "redirect-fragmented"):
+            if kind == "header-trickle":
+                for byte in response:
+                    self.connection.sendall(bytes((byte,)))
+                    time.sleep(0.3)
+            elif kind in ("informational", "metadata-repeat"):
+                final = response.index(b"HTTP/1.1 200 OK")
+                self.connection.sendall(response[:final])
+                time.sleep(0.025)
+                self.connection.sendall(response[final:])
+            elif kind in ("fragmented", "redirect-fragmented"):
                 for offset in range(0, len(response), 37):
                     self.connection.sendall(response[offset:offset + 37])
                     time.sleep(0.001)
             else:
                 self.connection.sendall(response)
+            if kind in ("header-deadline", "body-deadline"):
+                time.sleep(16)
         self.close_connection = not redirected
 
 
@@ -166,7 +197,8 @@ def run_case(executable, output, mode, data):
         print(log, end="", flush=True)
         assert completed.returncode == 0, mode
         kind = mode.removeprefix("manifest-")
-        assert len(server.requests) == (26 if kind == "repeat" else 3 if kind == "redirect-chain" else 2 if kind.startswith("redirect-") else 1)
+        assert len(server.requests) == (0 if kind in ("transport-allocation", "transport-init") else
+            26 if kind in ("repeat", "metadata-repeat") else 3 if kind == "redirect-chain" else 2 if kind.startswith("redirect-") else 1)
         return evidence
 
 

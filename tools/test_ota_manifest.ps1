@@ -30,6 +30,7 @@ try {
     $env:TMP = $otaTemporaryPath
     $executable = Join-Path $build 'manifest_test.exe'
     & $Compiler -std=c11 -Wall -Wextra -Werror -pedantic -D_CRT_SECURE_NO_WARNINGS `
+        -DCONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT=1 -DCONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS=1 `
         -I (Join-Path $root 'tests/ota_manifest/stubs') -I (Join-Path $root 'main') `
         -I (Join-Path $IdfPath 'components/json/cJSON') `
         (Join-Path $root 'main/ota_manifest.c') (Join-Path $IdfPath 'components/json/cJSON/cJSON.c') `

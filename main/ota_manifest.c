@@ -14,6 +14,8 @@
 #include "esp_http_client.h"
 #include "esp_https_ota.h"
 #include "esp_ota_ops.h"
+#include "esp_timer.h"
+#include "http_transport.h"
 #include "mbedtls/sha256.h"
 
 #define OTA_MANIFEST_SCHEMA 1
@@ -21,6 +23,11 @@
 #define OTA_HARDWARE "m5stack-tab5"
 #define OTA_CHANNEL "stable"
 #define OTA_IMAGE_URL_PREFIX "https://github.com/DevanMetz/Tab5OS/releases/download/"
+#define OTA_MANIFEST_REQUEST_MS 15000
+
+#if !CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT || !CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS
+#error "OTA manifests require the guarded HTTP transport and HTTPS support"
+#endif
 
 typedef struct {
     char body[OTA_MANIFEST_JSON_MAX + 1];
@@ -211,6 +218,12 @@ static esp_err_t manifest_event(esp_http_client_event_t *event)
     return ESP_OK;
 }
 
+static bool manifest_not_cancelled(void *context)
+{
+    (void)context;
+    return false;
+}
+
 esp_err_t ota_manifest_fetch(const char *manifest_url, ota_manifest_t *manifest,
                              char *message, size_t message_size)
 {
@@ -219,18 +232,22 @@ esp_err_t ota_manifest_fetch(const char *manifest_url, ota_manifest_t *manifest,
         set_message(message, message_size, "Manifest buffer allocation failed");
         return ESP_ERR_NO_MEM;
     }
+    esp_transport_handle_t transport = http_transport_init(!strncmp(manifest_url, "https://", 8),
+        esp_timer_get_time() + (int64_t)OTA_MANIFEST_REQUEST_MS * 1000, manifest_not_cancelled, NULL);
     esp_http_client_config_t config = {
         .url = manifest_url,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .event_handler = manifest_event,
         .user_data = response,
-        .timeout_ms = 15000,
+        .timeout_ms = OTA_MANIFEST_REQUEST_MS,
         .buffer_size = 1024,
         .buffer_size_tx = 1024,
         .max_redirection_count = 5,
+        .transport = transport,
     };
-    esp_http_client_handle_t client = esp_http_client_init(&config);
+    esp_http_client_handle_t client = transport ? esp_http_client_init(&config) : NULL;
     if (!client) {
+        if (transport) esp_transport_destroy(transport);
         free(response);
         set_message(message, message_size, "Could not initialize manifest request");
         return ESP_ERR_NO_MEM;
@@ -238,13 +255,19 @@ esp_err_t ota_manifest_fetch(const char *manifest_url, ota_manifest_t *manifest,
     esp_http_client_set_header(client, "User-Agent", "Tab5OS/1.0");
     esp_err_t error = esp_http_client_perform(client);
     int status = esp_http_client_get_status_code(client);
+    http_transport_stop_t stopped = http_transport_stop_reason(transport);
+    if (stopped == HTTP_TRANSPORT_DEADLINE) error = ESP_ERR_TIMEOUT;
+    else if (stopped == HTTP_TRANSPORT_INVALID_HEADERS || stopped == HTTP_TRANSPORT_INVALID_BODY)
+        error = ESP_ERR_INVALID_RESPONSE;
     bool complete = false;
     if (error == ESP_OK) {
-        /* perform() can succeed after a truncated body. The SDK reports
-         * close-delimited EOF as incomplete, so apply its check to framing. */
-        complete = !response->framed || esp_http_client_is_complete_data_received(client);
+        /* perform() can succeed after a truncated body. Check the guard's
+         * framing/real EOF result and the SDK's framed-response completion. */
+        complete = http_transport_response_complete(transport) &&
+                   (!response->framed || esp_http_client_is_complete_data_received(client));
     }
     esp_http_client_cleanup(client);
+    esp_transport_destroy(transport);
     if (error == ESP_OK && status != 200) {
         set_message(message, message_size, "Manifest server did not return HTTP 200");
         error = ESP_FAIL;

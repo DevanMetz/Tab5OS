@@ -75,8 +75,9 @@ set(MBEDTLS "${SDK}/mbedtls/mbedtls")
 set(SDK_SOURCES "${HTTP}/esp_http_client.c" "${HTTP}/lib/http_header.c" "${HTTP}/lib/http_utils.c"
     "${SDK}/http_parser/http_parser.c" "${TRANSPORT}/transport.c" "${TRANSPORT}/transport_internal.c"
     "${SDK}/esp_https_ota/src/esp_https_ota.c" "${SDK}/json/cJSON/cJSON.c" "${MBEDTLS}/library/sha256.c")
-add_executable(image_test "${TESTS}/image_test.c" "${HTTP_TESTS}/adapter.c"
-    "${TAB5_ROOT}/tests/modbus_network/host.c" "${TAB5_ROOT}/main/ota_manifest.c" ${SDK_SOURCES})
+add_executable(image_test "${TESTS}/image_test.c" "${HTTP_TESTS}/adapter.c" "${HTTP_TESTS}/dns_adapter.c"
+    "${TAB5_ROOT}/tests/modbus_network/host.c" "${TAB5_ROOT}/main/ota_manifest.c"
+    "${TAB5_ROOT}/main/http_transport.c" "${TAB5_ROOT}/main/network_resolver.c" ${SDK_SOURCES})
 target_include_directories(image_test PRIVATE "${TESTS}/stubs" "${HTTP_TESTS}/stubs" "${HTTP_TESTS}"
     "${TAB5_ROOT}/tests/modbus_network/stubs" "${TAB5_ROOT}/tests/modbus_network" "${TAB5_ROOT}/main"
     "${HTTP}/include" "${HTTP}/lib/include" "${SDK}/http_parser" "${TRANSPORT}/include"

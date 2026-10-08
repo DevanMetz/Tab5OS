@@ -2,6 +2,7 @@
 #include "ota_manifest.h"
 #include "cJSON.h"
 #include "host.h"
+#include "http_transport.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,6 +18,9 @@ static size_t body_size, chunk_size, allocations, allocation_calls;
 static size_t fail_allocation = SIZE_MAX;
 static bool redirect_response, fail_init;
 static bool response_complete = true;
+static bool transport_complete = true, fail_transport;
+static int transports;
+static http_transport_stop_t transport_stopped;
 static int status = 200, clients, checks, failures;
 static esp_err_t request_error;
 static esp_http_client_config_t request;
@@ -38,9 +42,26 @@ static void json_free(void *memory)
 
 const char *esp_err_to_name(esp_err_t error) { (void)error; return "fixture error"; }
 esp_err_t esp_crt_bundle_attach(void *configuration) { (void)configuration; return ESP_OK; }
+int64_t esp_timer_get_time(void) { return 1234; }
+esp_transport_handle_t http_transport_init(bool secure, int64_t deadline_us,
+                                          http_transport_cancel_cb_t cancelled, void *context)
+{
+    assert(secure && deadline_us == 15001234 && cancelled && !cancelled(context));
+    assert(!transports && !clients);
+    if (fail_transport) return NULL;
+    transports++;
+    return &transports;
+}
+http_transport_stop_t http_transport_stop_reason(esp_transport_handle_t transport)
+{ assert(transport == &transports && transports == 1 && clients == 1); return transport_stopped; }
+bool http_transport_response_complete(esp_transport_handle_t transport)
+{ assert(transport == &transports && transports == 1 && clients == 1); return transport_complete; }
+esp_err_t esp_transport_destroy(esp_transport_handle_t transport)
+{ assert(transport == &transports && transports == 1 && !clients); transports--; return ESP_OK; }
 esp_http_client_handle_t esp_http_client_init(const esp_http_client_config_t *config)
 {
     assert(!clients && config->crt_bundle_attach == esp_crt_bundle_attach);
+    assert(config->transport == &transports && transports == 1);
     assert(config->timeout_ms == 15000 && config->max_redirection_count == 5);
     if (fail_init) return NULL;
     request = *config;
@@ -122,7 +143,7 @@ static void result(const char *name, esp_err_t actual, esp_err_t expected)
         printf("FAIL %s actual=%d expected=%d\n", name, actual, expected);
         failures++;
     }
-    assert(!clients && !allocations);
+    assert(!clients && !allocations && !transports);
 }
 static ota_manifest_t fetch(const char *name, const char *json, size_t size, esp_err_t expected)
 {
@@ -202,6 +223,21 @@ int main(void)
     fail_init = true;
     fetch("client-allocation-error", valid_json, strlen(valid_json), ESP_ERR_NO_MEM);
     fail_init = false;
+    fail_transport = true;
+    fetch("transport-allocation-error", valid_json, strlen(valid_json), ESP_ERR_NO_MEM);
+    fail_transport = false;
+    transport_complete = false;
+    fetch("incomplete-transport", valid_json, strlen(valid_json), ESP_ERR_INVALID_SIZE);
+    transport_complete = true;
+    transport_stopped = HTTP_TRANSPORT_DEADLINE;
+    request_error = ESP_FAIL;
+    fetch("transport-deadline", valid_json, strlen(valid_json), ESP_ERR_TIMEOUT);
+    transport_stopped = HTTP_TRANSPORT_INVALID_HEADERS;
+    fetch("invalid-headers", valid_json, strlen(valid_json), ESP_ERR_INVALID_RESPONSE);
+    transport_stopped = HTTP_TRANSPORT_INVALID_BODY;
+    fetch("invalid-body", valid_json, strlen(valid_json), ESP_ERR_INVALID_RESPONSE);
+    transport_stopped = HTTP_TRANSPORT_RUNNING;
+    request_error = ESP_OK;
 
     char hidden[sizeof(valid_json) + 8];
     memcpy(hidden, valid_json, sizeof(valid_json));
