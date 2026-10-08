@@ -18,6 +18,7 @@ Python 3 and Node.js are needed for the quick checks. The configuration checks a
 | Ebook page loading or navigation | [Ebook pages](#ebook-pages) and a firmware build. |
 | Ebook library enumeration | [Ebook library](#ebook-library) and a firmware build. |
 | Default ebook downloads or their file publication | [Ebook downloads](#ebook-downloads) and a firmware build. |
+| Default ebook worker admission, completion or restart ownership | [Ebook worker](#ebook-worker), library/download regressions and a firmware build. |
 | Scope/I2C CSV writes or publication | [Capture writers](#capture-writers) and a firmware build. |
 | Scope/I2C capture or saved serial CSV viewers | [CSV viewer storage and UI](#csv-viewer-storage-and-ui), existing serial-copy checks and a firmware build. |
 | Files fallback text previews | [Files text previews](#files-text-previews) and a firmware build. |
@@ -221,6 +222,18 @@ The portable runner compiles the actual `ebook_http_event`, `ebook_default_insta
 The preceding callbacks fail 32 controls. The transport adapter delivers all three data chunks even after the callback returns failure, matching the ignored data-callback return in the pinned SDK's body parser. The download keeps its first write cause in per-download state, stops later file writes and rejects publication even if the modeled client returns success. Cleanup cannot replace that cause; failed removal can leave a partial TMP. Separate init/transport/status cleanup controls report close/removal failures with their own cause, preserving the first close failure when removal also fails. Probe/preparation failures stop before a writer/client is opened, preserving existing files. Successful commit behavior, default URLs, TLS bundle, User-Agent, 30-second I/O timeout and 1,024-byte SDK buffer stay the same. An existing small final is preserved and leaves the completed download as an unpublished TMP when new-file publication refuses the collision.
 
 Files are native; SDK types, events, status/transport results, SD error reporting and I/O faults are controlled. This fixture does not execute the SDK client, the download worker/timer, LVGL, Wi-Fi/TLS, physical SD or power-loss behavior. The unflashed firmware build checks the callback/config interface against the actual SDK. Generated callbacks/types/config/storage source, full input/executable hashes and compile/result logs stay under `build/ebook-download/`. Linux CI retains `ebook-download-logs`, including available failure diagnostics. These 58 cases are separate from the Windows native total.
+
+## Ebook worker
+
+```powershell
+python tools/test_ebook_worker.py --compiler 'C:/path/to/clang.exe'
+```
+
+The portable runner compiles the actual ebook task, timer, missing-default probe, task admission and restart guard, together with the actual book type, profiles and signal declarations. Its 42 cases check missing-SD/installed/busy admission, task-creation failure, duplicate and interleaved admission, and completion before task creation returns. Worker cases use both 100 Hz and 1,000 Hz clocks: connection before/at/after the 30-second initial wait, timeout, tick wrap, known SD loss during the wait or between books, Wi-Fi loss between books and an isolated download failure. The actual restart guard stays closed during ownership and clears after the worker finishes when other owners are idle. Timer cases check pending completion, consumption after release and one-time rendering; 25 timeout/retry/consume pairs leave no controlled task allocations.
+
+The preceding source fails 37 controls. A baseline that keeps waiting is stopped by the adapter after 30.5 modeled seconds and remains classified as unfinished. Native C atomics perform the new admission claim; lvalue access hooks schedule a second admission immediately before that claim and inspect completion publication. Task creation can execute the worker before returning to reproduce a stale output-handle race. The worker requests no output handle, publishes completion before releasing busy, and uses `vTaskDeleteWithCaps` as required by the pinned SDK's `xTaskCreateWithCaps` contract. Task adapters use owned native allocations to model the separately owned stack/TCB; ordinary deletion retains them, and caps deletion frees them. These counts describe the adapter's allocations. Source inspection establishes the pinned SDK's allocation/deletion contract, and the unflashed firmware build checks the actual API interface. Physical scheduling and memory recovery remain open.
+
+Wi-Fi/SD state, default-download results, clocks, task APIs, timers, rendering and other restart owners are controlled. No SDK scheduler, HTTP client, LVGL or physical SD/Wi-Fi is executed by this runner. Real scheduling latency, kernel cleanup, in-flight transport completion and TLS remain hardware checks. HTTP transfers retain the existing SDK I/O timeout and finish before worker ownership is released. Separate 55-case library and 58-case download regressions verify their existing behavior. Generated callbacks/types/signals/config, full input/executable hashes and compile/result logs stay under `build/ebook-worker/`. Linux CI retains `ebook-worker-logs`, including available failure diagnostics. These 42 cases are separate from the Windows native total.
 
 ## Capture writers
 

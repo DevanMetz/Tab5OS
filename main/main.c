@@ -460,9 +460,8 @@ static long ebook_offset;
 static long ebook_next_offset;
 static bool ebook_large_text;
 static lv_timer_t *ebook_timer;
-static TaskHandle_t ebook_download_task_handle;
-static volatile bool ebook_download_busy;
-static volatile bool ebook_download_done;
+static atomic_bool ebook_download_busy;
+static atomic_bool ebook_download_done;
 static lv_obj_t *ota_status;
 static lv_obj_t *ota_button;
 static lv_obj_t *system_ota_info;
@@ -4491,20 +4490,23 @@ static bool ebook_download_default(const ebook_default_t *book)
 static void ebook_download_task(void *argument)
 {
     (void)argument;
-    while (!wifi_connected) vTaskDelay(pdMS_TO_TICKS(500));
+    TickType_t started = xTaskGetTickCount();
+    while (!wifi_connected && sd_ready &&
+            (TickType_t)(xTaskGetTickCount() - started) < pdMS_TO_TICKS(30000))
+        vTaskDelay(pdMS_TO_TICKS(500));
     for (size_t i = 0; i < sizeof(ebook_defaults) / sizeof(ebook_defaults[0]); ++i) {
+        if (!wifi_connected || !sd_ready) break;
         ebook_download_default(&ebook_defaults[i]);
     }
-    ebook_download_busy = false;
     ebook_download_done = true;
-    ebook_download_task_handle = NULL;
-    vTaskDelete(NULL);
+    ebook_download_busy = false;
+    vTaskDeleteWithCaps(NULL);
 }
 
 static void ebook_download_tick(lv_timer_t *timer)
 {
     (void)timer;
-    if (ebook_download_done) {
+    if (ebook_download_done && !ebook_download_busy) {
         ebook_download_done = false;
         show_ebooks();
     }
@@ -4520,11 +4522,14 @@ static bool ebook_defaults_missing(void)
 
 static void ebook_start_default_downloads(void)
 {
-    if (!sd_ready || !ebook_defaults_missing() || ebook_download_busy) return;
-    ebook_download_busy = true;
+    if (!sd_ready || atomic_load(&ebook_download_busy) || !ebook_defaults_missing()) return;
+    if (atomic_exchange(&ebook_download_busy, true)) return;
     ebook_download_done = false;
-    if (xTaskCreateWithCaps(ebook_download_task, "ebooks", 10240, NULL, 4, &ebook_download_task_handle,
-            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) ebook_download_busy = false;
+    if (xTaskCreateWithCaps(ebook_download_task, "ebooks", 10240, NULL, 4, NULL,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+        ebook_download_done = true;
+        ebook_download_busy = false;
+    }
 }
 
 static void ebook_load_page(long offset)

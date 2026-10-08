@@ -17,6 +17,7 @@ Use current-limited power and 3.3 V signals. Disconnect external loads before bo
 ## Missing and present peripherals
 
 - [ ] Boot without an SD card; Notes, logs, and Ebooks report the missing card without hanging or claiming success.
+- [ ] Boot with a writable SD card and unavailable Wi-Fi; verify the default-book worker ends its initial wait after the 30-second budget and releases the OTA admission guard. Repeat with connection near the deadline and known SD/Wi-Fi loss between book attempts; verify completed books remain readable. Record PSRAM/internal heap before and after worker cleanup and repeat with a ready network after reboot. Native 42-case clock/task checks and an unflashed SDK build pass; physical scheduling, caps-task cleanup and transport timing remain unchecked.
 - [ ] Insert a writable SD card, save/read/delete a disposable file, reboot, and confirm it remains readable.
 - [ ] Fill a disposable card, then try Notes, a ride, an ebook download, and ring logging; each reports failure and no partial file appears as complete.
 - [ ] Remove the card during a ride and during heart-rate logging; the writer stops, System reports removed/unresponsive, and no auto-unmount/remount race occurs. Reinsert and reboot before writing again.

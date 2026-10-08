@@ -51,6 +51,9 @@ jobs:
         run: python3 tools/test_ebook_library.py --compiler cc
       - name: Test ebook downloads
         run: python3 tools/test_ebook_download.py --compiler cc
+
+      - name: Test ebook worker lifecycle
+        run: python3 tools/test_ebook_worker.py --compiler cc
       - name: Test capture writers
         run: python3 tools/test_capture_write.py --compiler cc
       - name: Test serial log writers
@@ -293,6 +296,22 @@ jobs:
             build/ebook-download/ebook_download_types.inc
             build/ebook-download/ebook_download_config.inc
             build/ebook-download/storage_source.inc
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Retain ebook worker evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ebook-worker-logs
+          path: |
+            build/ebook-worker/compile.log
+            build/ebook-worker/result.log
+            build/ebook-worker/source.json
+            build/ebook-worker/ebook_worker.inc
+            build/ebook-worker/ebook_worker_types.inc
+            build/ebook-worker/ebook_worker_signals.inc
+            build/ebook-worker/ebook_worker_config.inc
           if-no-files-found: warn
           retention-days: 14
 
