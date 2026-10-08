@@ -47,6 +47,7 @@ jobs:
           python3 tools/remote_desktop.py --self-test
           python3 tools/modbus_test_server.py --self-test
           python3 tools/udp_device_fixture.py --self-test
+          python3 tools/test_ota_result.py --compiler cc
           python3 tests/http_fixture_test.py
           python3 tests/dns_fixture_test.py
           python3 tests/board_config_test.py
@@ -84,6 +85,19 @@ jobs:
           python3 tests/subnet_reference_test.py "$RUNNER_TEMP/subnet_data_test"
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/resistor_data.c tests/resistor_data_test.c -lm -o "$RUNNER_TEMP/resistor_data_test"
           "$RUNNER_TEMP/resistor_data_test"
+
+      - name: Retain OTA result test evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ota-result-logs
+          path: |
+            build/ota-result/compile.log
+            build/ota-result/result.log
+            build/ota-result/source.json
+            build/ota-result/ota_result.inc
+          if-no-files-found: warn
+          retention-days: 14
 
   firmware:
     runs-on: ubuntu-latest

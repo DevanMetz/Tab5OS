@@ -16,6 +16,7 @@ Python 3 and Node.js are needed for the quick checks. The configuration checks a
 | MQTT app, packet codec or client protocol | [Lifecycle/storage](#mqtt-lifecycle-and-storage) and [client/broker fixture](#mqtt-client-and-broker-fixture). |
 | OTA manifest parsing and update eligibility | [OTA manifests](#ota-manifests) plus a firmware build. |
 | OTA downloads, redirects or image verification | [OTA images](#ota-images) plus a firmware build. |
+| OTA last-result reporting or pending-version persistence | [OTA results](#ota-results) plus a firmware build. |
 | Pins, panel, power, storage faults or OTA/recovery | [Hardware evidence](#hardware-evidence) and the manual checklist. |
 
 Generated test binaries and captures belong under ignored `build/`. For firmware memory limits, use `ninja -C build -j 1 app` for an incremental build in an activated ESP-IDF shell; the normal repository wrapper defaults to four jobs. A clean build still belongs in pre-merge verification.
@@ -134,7 +135,19 @@ The same runner includes 27 manifest fetches through the real SDK HTTP client/cJ
 
 New cases cover informational replies, complete/truncated trailers, partial/oversized headers, transport allocation/init failures, silent header/body waits and headers trickled one byte at a time. The actual guard bounds metadata at 8 KiB and shares one cooperative 15-second deadline across the request and redirects. The three wait/trickle cases end around 15 seconds, with no retained resources. A direct fetch and an informational/trailer fetch each repeat 25 times after warm-up with stable handles. Fetch cases never reach image or boot APIs. Prior-executable probes reproduce resource-check failures for partial headers/trailers and rejection of the final manifest after a separated informational reply; the guarded path passes them. All 79 HTTP Console cases pass after the shared transport gained response reset for redirects.
 
-CI runs this suite seventh and retains its evidence. A separate checkout passes all 79 cases using only the extracted hosted source bundle; the preceding 78 cases also pass in hosted CI. A seven-suite orchestration control stubs the preceding six suites, checks their order/arguments and runs the actual SDK suite. Earlier missing SHA/OTA header controls fail before compilation or archive creation, retain the final-suite error and restore the temporary environment. Full hosted execution of the new expiry-before-write case still requires verification.
+CI runs this suite seventh and retains its evidence. A separate checkout passes all 79 cases using only the extracted hosted source bundle; all 79 also pass in hosted CI. A seven-suite orchestration control stubs the preceding six suites, checks their order/arguments and runs the actual SDK suite. Earlier missing SHA/OTA header controls fail before compilation or archive creation, retain the final-suite error and restore the temporary environment.
+
+## OTA results
+
+```powershell
+python tools/test_ota_result.py --compiler 'C:/path/to/clang.exe'
+```
+
+This portable runner extracts the three existing OTA result functions from `main/main.c` and compiles their unchanged bodies with controlled NVS and image-state APIs. It needs Python and a native C11 compiler, without LVGL or SDK activation. The 28 cases cover every named image state, an unknown state, four state-read errors, rollback/non-activation, missing or unreadable pending data, unavailable NVS, write/erase/commit faults, later reconciliation and both new status strings with a 31-byte version. Every case closes its modeled NVS handles. Generated function source, its hash and compile/result logs stay under `build/ota-result/`.
+
+Nine controls against the `0f4a54e` result functions reproduce false `Installed` status and deletion of the pending record for unconfirmed/unreadable states, including loss of later reconciliation. Matching running versions now require a successful `VALID` state read before recording installation. `NEW`/`PENDING_VERIFY` keep their health-check status; other states or read errors retain pending metadata without opening a writable NVS handle. A later successful read can reconcile that record. The RAM store models immediate set/erase effects, so artificial commit errors do not promise rollback. These checks do not execute the NVS engine, a physical boot/rollback or the full System UI.
+
+The Linux `checks` job runs this fixture and retains its logs, generated function source and metadata as `ota-result-logs`. Hosted execution and failure-artifact retention for this new fixture remain to be verified.
 
 ## MQTT lifecycle and storage
 
@@ -161,6 +174,8 @@ The [guarded-image run for `9dffe34`](https://github.com/DevanMetz/Tab5OS/action
 The [stream-bound run for `6d6a42a`](https://github.com/DevanMetz/Tab5OS/actions/runs/37742944053) passes all three hosted jobs and 809 native checks: 357 existing app/network checks, 379 parser checks, 46 image cases and 27 SDK fetches. Downloaded artifacts verify all 51 SDK hashes, all seven suites and the three oversized streams stopping at 9 KiB without finalization/boot selection, including the full-body matching digest. It predates the five controlled verification-error cases.
 
 The [verification-failure run for `a9788d7`](https://github.com/DevanMetz/Tab5OS/actions/runs/37745766579) passes all three hosted jobs and 814 native checks: 357 existing app/network checks, 379 parser checks, 51 image cases and 27 SDK fetches. Downloaded artifacts verify all seven suites, all 51 SDK hashes, four injected SHA API errors and rejection of excess cached description data before the first partition write. It predates the controlled expiry-before-write case.
+
+The [deadline run for `0f4a54e`](https://github.com/DevanMetz/Tab5OS/actions/runs/37747957537) passes all three hosted jobs and 815 native checks: 357 existing app/network checks, 379 parser checks, 52 image cases and 27 SDK fetches. Downloaded artifacts verify all seven suites, all 51 SDK hashes and zero partition starts/writes for the controlled expiry after description reads. It predates the separate OTA result fixture in the Linux checks job.
 
 ```powershell
 ./tools/test_mqtt_ui.ps1

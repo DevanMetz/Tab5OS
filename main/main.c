@@ -5112,16 +5112,26 @@ static void ota_load_result(void)
     const esp_app_desc_t *running_description = esp_app_get_description();
     const esp_partition_t *running = esp_ota_get_running_partition();
     esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
-    bool running_pending = strcmp(running_description->version, pending) == 0 &&
-                           esp_ota_get_state_partition(running, &state) == ESP_OK &&
-                           (state == ESP_OTA_IMG_NEW || state == ESP_OTA_IMG_PENDING_VERIFY);
-    if (running_pending) {
-        snprintf(ota_last_result, sizeof(ota_last_result), "Installing %s; health check pending", pending);
-        return;
+    bool running_matches = strcmp(running_description->version, pending) == 0;
+    if (running_matches) {
+        esp_err_t state_error = esp_ota_get_state_partition(running, &state);
+        if (state_error != ESP_OK) {
+            snprintf(ota_last_result, sizeof(ota_last_result), "Running %s; OTA state unavailable", pending);
+            ESP_LOGW("tab5-os", "Could not read running OTA state: %s", esp_err_to_name(state_error));
+            return;
+        }
+        if (state == ESP_OTA_IMG_NEW || state == ESP_OTA_IMG_PENDING_VERIFY) {
+            snprintf(ota_last_result, sizeof(ota_last_result), "Installing %s; health check pending", pending);
+            return;
+        }
+        if (state != ESP_OTA_IMG_VALID) {
+            snprintf(ota_last_result, sizeof(ota_last_result), "Running %s; health not confirmed", pending);
+            return;
+        }
     }
 
     char result[64];
-    if (strcmp(running_description->version, pending) == 0) {
+    if (running_matches) {
         snprintf(result, sizeof(result), "Installed %s", pending);
     } else {
         const esp_partition_t *invalid = esp_ota_get_last_invalid_partition();

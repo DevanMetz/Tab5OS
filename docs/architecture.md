@@ -16,6 +16,8 @@ LVGL's fixed 96 KiB object pool is allocated once at display initialization in b
 
 System identifies the running image with the SDK's semantic version and ELF SHA-256 prefix, plus the active partition label, address and capacity. The prefix matches boot/crash logs and distinguishes incremental builds whose version text is unchanged; cached app-description timestamps are not used as build identity. Partition details describe the installed layout, which may differ from the repository's current partition table.
 
+OTA result loading requires a successful `VALID` state read before recording installation of the matching pending version. An unavailable or unconfirmed state remains visible in System and preserves the pending NVS record for later reconciliation. `NEW`/`PENDING_VERIFY` still wait for the health window, while a different running version follows the rollback/non-activation check. The native result fixture uses the actual functions with RAM NVS and state APIs; physical flash and reboot faults remain device checks.
+
 The speaker amplifier's SPK_EN output (PI4IOE1 P1) is preloaded low before configuring the expander outputs. Alarm playback configures and mutes the codec, writes silence, then unmutes and enables the amplifier only if setup succeeds. It mutes and disables the amplifier before closing the codec. Failed setup leaves a visual alarm and logs the error. This prevents deliberately enabling an uninitialized audio path; its quiet-startup and alarm behavior still need hardware verification after the reported USB brownouts. Brownout protection and charging settings remain unchanged.
 
 ## Launcher and lifecycle
