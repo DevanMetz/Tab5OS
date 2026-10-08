@@ -24,6 +24,7 @@ Python 3 and Node.js are needed for the quick checks. The configuration checks a
 | Offline apps, SPI or I2C editor/result flows | [Offline and peripheral UI](#offline-and-peripheral-ui). |
 | Serial, saved serial logs or RTU Frames | [Serial and RTU UI](#serial-and-rtu-ui). |
 | UART or RS-485 SD log writes | [Serial log writers](#serial-log-writers) and a firmware build. |
+| BLE evidence export | [BLE evidence storage](#ble-evidence-storage) and a firmware build. |
 | Modbus TCP, NTP, Wake-on-LAN, UDP or HTTP fixtures | [Network fixtures and UI](#network-fixtures-and-ui). |
 | MQTT app, packet codec or client protocol | [Lifecycle/storage](#mqtt-lifecycle-and-storage) and [client/broker fixture](#mqtt-client-and-broker-fixture). |
 | OTA manifest parsing and update eligibility | [OTA manifests](#ota-manifests) plus a firmware build. |
@@ -210,6 +211,20 @@ The actual start constructor creates native directories and files behind bounded
 UI status/control callbacks, clocks/ticks, SD admission and I/O failures are controlled. UTC supplies deterministic filenames; Windows descriptor creation adds binary mode to match SDK LF bytes. The fixtures do not execute serial drivers, real LVGL, SDK mount/error filtering, physical SD/panel, electrical timing or power cuts. The separate Serial UI runner checks the complete app against cached real LVGL and UART adapters.
 
 Full serial/function/storage/header/test hashes, generated function/config/storage source and compile/result logs stay under `build/serial-log-write/`. Linux CI retains `serial-log-write-logs`, including available failure diagnostics. These 82 cases are separate from the Windows native total.
+
+## BLE evidence storage
+
+```powershell
+python tools/test_ble_evidence.py --compiler 'C:/path/to/clang.exe'
+```
+
+This portable fixture compiles the actual BLE save callback, its status/address/property/name helpers, its three cache typedefs and the complete `storage_io.c`. Its 50 cases check exact native CSV/TMP bytes, header and each row failure, directory/probe/open/stream errors, flush/sync/close/publication failures, mixed collisions, all ten occupied names and 25 rejected-header/restart pairs. Every case checks closed streams/descriptors and balanced modeled locks. The previous callback fails 28 controls, including eight rejected writes incorrectly published as CSVs; other controls concern creation/error handling and the retained-file notice.
+
+Healthy cases cover read/notification/indication labels, empty/truncated/unavailable values, CSV name sanitization, missing peers, invalid service indexes and all eight device/16 service/32 characteristic/64 value-byte cache limits. Mutating the shared cache after the snapshot lock exits preserves the originally captured output. Maximum-cache entries repeat controlled identities to exercise capacity; this fixture does not validate live discovery identities.
+
+Cache contents, NimBLE type boundaries and 16-bit UUID conversion, locks, SD admission/error reporting, clocks and I/O faults are controlled. The snapshot is taken through the actual callback; no NimBLE, BLE traffic, real LVGL, SDK mount/error filtering, 32/128-bit UUID conversion or physical FAT/SD/panel/power behavior is executed. UTC fixes filenames, Windows descriptors use binary mode for SDK LF bytes, and cleanup removes only owned files and directories. Failed writes close without a publication retry and retain a named TMP; those bytes can be partial or complete-looking without confirmed physical durability.
+
+Full BLE/function/cache-type/storage/header/test hashes, generated function/type/config/storage source and compile/result logs stay under `build/ble-evidence/`. Linux CI retains `ble-evidence-logs`, including available failure diagnostics. These 50 cases are separate from the Windows native total and live GATT tests.
 
 ## CSV viewer storage and UI
 

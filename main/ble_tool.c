@@ -963,32 +963,46 @@ static void save_evidence_clicked(lv_event_t *event)
     strftime(day, sizeof(day), "%y%m%d", &local);
     char directory[32];
     snprintf(directory, sizeof(directory), "/sdcard/BLE/%s", day);
-    if ((mkdir("/sdcard/BLE", 0775) != 0 && errno != EEXIST) ||
-        (mkdir(directory, 0775) != 0 && errno != EEXIST)) {
-        int error = errno ? errno : EIO;
-        if (report_storage_error) report_storage_error(error);
-        set_status("Evidence directory failed: %s", strerror(error));
-        return;
+    const char *folders[] = {"/sdcard/BLE", directory};
+    for (unsigned i = 0; i < 2; i++) {
+        errno = 0;
+        if (mkdir(folders[i], 0775) != 0 && errno != EEXIST) {
+            int error = errno ? errno : EIO;
+            if (report_storage_error) report_storage_error(error);
+            set_status("Evidence directory failed: %s", strerror(error));
+            return;
+        }
     }
 
     char temporary_path[48] = "";
     char final_path[48] = "";
     int descriptor = -1;
+    int create_error = EEXIST;
     for (int collision = 0; collision < 10; collision++) {
         snprintf(temporary_path, sizeof(temporary_path), "%s/B%02d%02d%02d%d.TMP",
                  directory, local.tm_hour, local.tm_min, local.tm_sec, collision);
         snprintf(final_path, sizeof(final_path), "%s/B%02d%02d%02d%d.CSV",
                  directory, local.tm_hour, local.tm_min, local.tm_sec, collision);
+        errno = 0;
         if (access(final_path, F_OK) == 0) continue;
+        if (errno != ENOENT) {
+            create_error = errno ? errno : EIO;
+            break;
+        }
+        errno = 0;
         descriptor = open(temporary_path, O_WRONLY | O_CREAT | O_EXCL, 0664);
-        if (descriptor >= 0 || errno != EEXIST) break;
+        if (descriptor >= 0) break;
+        if (errno != EEXIST) {
+            create_error = errno ? errno : EIO;
+            break;
+        }
     }
     if (descriptor < 0) {
-        int error = errno ? errno : EEXIST;
-        if (report_storage_error) report_storage_error(error);
-        set_status("Evidence file could not be created: %s", strerror(error));
+        if (report_storage_error) report_storage_error(create_error);
+        set_status("Evidence file could not be created: %s", strerror(create_error));
         return;
     }
+    errno = 0;
     FILE *file = fdopen(descriptor, "wb");
     if (!file) {
         int error = errno ? errno : EIO;
@@ -1005,17 +1019,20 @@ static void save_evidence_clicked(lv_event_t *event)
         address_text(&device_snapshot[peer_index].address, peer_address);
         csv_text(device_snapshot[peer_index].name, peer_name, sizeof(peer_name));
     }
-    bool ok = fprintf(file, "unix_time,event,address,name,rssi,service_uuid,"
-                      "characteristic_uuid,handle,properties,value_hex\n") >= 0;
-    for (size_t i = 0; ok && i < devices_found; i++) {
+    errno = 0;
+    int error = fprintf(file, "unix_time,event,address,name,rssi,service_uuid,"
+                        "characteristic_uuid,handle,properties,value_hex\n") < 0 ? (errno ? errno : EIO) : 0;
+    for (size_t i = 0; !error && i < devices_found; i++) {
         char address[18];
         char name[33];
         address_text(&device_snapshot[i].address, address);
         csv_text(device_snapshot[i].name, name, sizeof(name));
-        ok = fprintf(file, "%lld,advertisement,%s,%s,%d,,,,,\n",
-                     (long long)now, address, name, device_snapshot[i].rssi) >= 0;
+        errno = 0;
+        if (fprintf(file, "%lld,advertisement,%s,%s,%d,,,,,\n",
+                    (long long)now, address, name, device_snapshot[i].rssi) < 0)
+            error = errno ? errno : EIO;
     }
-    for (size_t i = 0; ok && i < characteristics_found; i++) {
+    for (size_t i = 0; !error && i < characteristics_found; i++) {
         if (characteristic_snapshot[i].service_index >= services_found) continue;
         char service_uuid[BLE_UUID_STR_LEN];
         char characteristic_uuid[BLE_UUID_STR_LEN];
@@ -1024,27 +1041,35 @@ static void save_evidence_clicked(lv_event_t *event)
                         service_uuid);
         ble_uuid_to_str(&characteristic_snapshot[i].uuid.u, characteristic_uuid);
         properties_text(characteristic_snapshot[i].properties, properties);
-        ok = fprintf(file, "%lld,characteristic,%s,%s,,%s,%s,0x%04X,%s,\n",
-                     (long long)now, peer_address, peer_name, service_uuid,
-                     characteristic_uuid, characteristic_snapshot[i].val_handle,
-                     properties) >= 0;
+        errno = 0;
+        if (fprintf(file, "%lld,characteristic,%s,%s,,%s,%s,0x%04X,%s,\n",
+                    (long long)now, peer_address, peer_name, service_uuid,
+                    characteristic_uuid, characteristic_snapshot[i].val_handle,
+                    properties) < 0)
+            error = errno ? errno : EIO;
     }
-    if (ok && value_seen) {
+    if (!error && value_seen) {
         char value_hex[BLE_TOOL_VALUE_MAX * 3 + 1] = "";
         size_t used = 0;
         for (size_t i = 0; i < value_length && used < sizeof(value_hex); i++)
             used += (size_t)snprintf(value_hex + used, sizeof(value_hex) - used,
                                      "%s%02X", i ? " " : "", value_snapshot[i]);
-        ok = fprintf(file, "%lld,%s,%s,%s,,,,0x%04X,,%s%s\n", (long long)now,
-                     value_was_indication ? "indication" : value_was_notification ? "notification" : "read",
-                     peer_address, peer_name, value_handle, value_hex,
-                     value_copy_failed ? "[unavailable]" : value_total > value_length ? " ..." : "") >= 0;
+        errno = 0;
+        if (fprintf(file, "%lld,%s,%s,%s,,,,0x%04X,,%s%s\n", (long long)now,
+                    value_was_indication ? "indication" : value_was_notification ? "notification" : "read",
+                    peer_address, peer_name, value_handle, value_hex,
+                    value_copy_failed ? "[unavailable]" : value_total > value_length ? " ..." : "") < 0)
+            error = errno ? errno : EIO;
     }
-    if (!ok && !errno) errno = EIO;
-    if (storage_commit_new_file(&file, temporary_path, final_path) != 0) {
-        int error = errno ? errno : EIO;
+    if (error) fclose(file);
+    else {
+        errno = 0;
+        if (storage_commit_new_file(&file, temporary_path, final_path) != 0) error = errno ? errno : EIO;
+    }
+    if (error) {
         if (report_storage_error) report_storage_error(error);
-        set_status("Evidence save failed: %s", strerror(error));
+        const char *name = strrchr(temporary_path, '/');
+        set_status("Evidence not published; %s retained (%s)", name ? name + 1 : "TMP", strerror(error));
         return;
     }
     set_status("Evidence saved to %s", final_path);

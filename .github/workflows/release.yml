@@ -37,6 +37,8 @@ jobs:
         run: python3 tools/test_ride_history.py --compiler cc
       - name: Test ride recording
         run: python3 tools/test_ride_recording.py --compiler cc
+      - name: Test BLE evidence storage
+        run: python3 tools/test_ble_evidence.py --compiler cc
       - name: Test Ring history storage
         run: python3 tools/test_ring_history.py --compiler cc
       - name: Test ebook pages
@@ -175,6 +177,22 @@ jobs:
             build/ride-recording/ride_recording.inc
             build/ride-recording/ride_recording_config.inc
             build/ride-recording/storage_source.inc
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Retain BLE evidence storage checks
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ble-evidence-logs
+          path: |
+            build/ble-evidence/compile.log
+            build/ble-evidence/result.log
+            build/ble-evidence/source.json
+            build/ble-evidence/ble_evidence.inc
+            build/ble-evidence/ble_evidence_types.inc
+            build/ble-evidence/ble_evidence_config.inc
+            build/ble-evidence/storage_source.inc
           if-no-files-found: warn
           retention-days: 14
 
