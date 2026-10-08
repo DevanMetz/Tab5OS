@@ -14,6 +14,7 @@ Python 3 and Node.js are needed for the quick checks. The configuration checks a
 | Notes loading, saving or lifecycle | [Notes storage and UI](#notes-storage-and-ui) and a firmware build. |
 | Ride history loading or summary appends | [Ride history storage](#ride-history-storage) and a firmware build. |
 | Ring heart-rate logging, saved timestamps or queue processing | [Ring history storage](#ring-history-storage) and a firmware build. |
+| Ebook page loading or navigation | [Ebook pages](#ebook-pages) and a firmware build. |
 | Offline apps, SPI or I2C editor/result flows | [Offline and peripheral UI](#offline-and-peripheral-ui). |
 | Serial, saved serial logs or RTU Frames | [Serial and RTU UI](#serial-and-rtu-ui). |
 | Modbus TCP, NTP, Wake-on-LAN, UDP or HTTP fixtures | [Network fixtures and UI](#network-fixtures-and-ui). |
@@ -136,6 +137,18 @@ This portable fixture compiles the three actual Ring append/checkpoint/health-ti
 The preceding callbacks fail 32 controls, including prematurely caching failed reads, consuming samples against an uncertain checkpoint, ignoring directory errors and losing seek/tell/header/row errors during close. Timer cases retain queued samples and stop history requests after failed loads, retry successfully without appending historical duplicates, clear recovered errors, retain a failed append for retry and update timeout state while storage is blocked. A cached checkpoint cannot bypass known SD unavailability. Missing I/O errno falls back to `EIO`, and an earlier successful seek cannot supply stale errno for a failed read. Sync/close errors can follow a complete append; repair failure can retain an unfinished suffix. These checks do not promise rollback, exactly-once logging or power-loss durability.
 
 Queue/timer and SD error APIs are controlled, time conversion uses UTC for independently expected rows, and no BLE traffic occurs. They do not run FreeRTOS/NimBLE or establish physical SD removal/full-card behavior, radio delivery, scheduling or panel rendering. Generated callbacks/storage source, full main/function/storage/header/test hashes and compile/result logs stay under `build/ring-history/`. Linux CI retains these files as `ring-history-logs`, including compiler/test failures; the 59 cases are separate from the Windows native total.
+
+## Ebook pages
+
+```powershell
+python tools/test_ebook_pages.py --compiler 'C:/path/to/clang.exe'
+```
+
+This portable runner compiles the three actual ebook load/Prev/Next callbacks extracted from `main/main.c`. Its 44 cases check empty/small/exact/full/final pages, genuine EOF, the existing text conversion, allocation/open/seek/read/close errors, zero-byte and full-count read errors, missing/stale errno, SD availability and retained page text/positions/navigation/scroll state. Thirty-one controls fail against the earlier callbacks. Three additional offscreen/invalid-position/overflow boundaries are exercised only with the new callbacks to avoid running unsafe older paths.
+
+Retry cases use the actual navigation callbacks after storage availability is restored. Disabled clicks and invalid next positions perform no new reads. Twenty-five forward/back cycles keep one reused 8,193-byte buffer with every file handle closed; process teardown frees the fixture's buffer. Every executed case independently checks the original file bytes. UI, heap and SD APIs and I/O errors are controlled; no real LVGL or physical card is used. The tests do not establish rendering, PSRAM allocation, device timing or physical removal behavior. A short error-free EOF remains a valid final page; the fixture does not claim to detect concurrent file changes that supply no I/O error.
+
+Reader initialization is retained and checked as source, including zero offsets and initially disabled controls; it is not compiled into the native fixture. The firmware build checks its real UI declarations. Full main/function/initialization/test hashes, generated callback/config/initialization source and compile/result logs stay under `build/ebook-pages/`. Linux CI retains these files as `ebook-pages-logs`, including compiler/test failures. These 44 cases are separate from the Windows native total.
 
 ## OTA manifests
 

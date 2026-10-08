@@ -89,6 +89,8 @@ Ride history shows totals only after recovery, reading and closing the summary s
 
 Ring's saved heart-rate timestamp becomes loaded only after incomplete-tail repair, seek/size checks, the expected bounded tail read and close succeed. Read or close errors leave the checkpoint unchanged and retryable. Its existing health timer retains queued samples and defers history requests until that load succeeds, then filters timestamps against the recovered checkpoint. Known SD unavailability blocks queue processing even when a checkpoint is cached; timeout state still advances before the storage gate. Appends preserve the first error through close and tail repair. Native files and controlled queue/timer/SD boundaries verify this behavior; physical SD, BLE and scheduling remain open.
 
+Ebooks reads up to 8 KiB into its existing cached PSRAM buffer. Page text, current/next byte positions, navigation state and scroll position change only after successful seek, read and close. Failure preserves the confirmed page and positions, reports the first error and allows retry when storage is available. Reader initialization clears both offsets and disables navigation until loading succeeds. Callbacks recheck disabled state and screen pointers; negative positions and additions beyond the platform's `long` range are rejected. Native files and controlled UI/heap/SD boundaries verify the transitions; physical SD and panel behavior remain open.
+
 See [Storage and compatibility contract](compatibility.md) and [Data formats](data-formats.md).
 
 ## Network and radio

@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdatomic.h>
@@ -4439,21 +4440,46 @@ static void ebook_start_default_downloads(void)
             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) ebook_download_busy = false;
 }
 
-static void ebook_load_page(void)
+static void ebook_load_page(long offset)
 {
-    if (!ebook_buffer) ebook_buffer = heap_caps_malloc(EBOOK_PAGE_BYTES + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!ebook_buffer) {
+    if (!ebook_text || !ebook_status || !ebook_prev || !ebook_next) return;
+    int error = offset < 0 ? EINVAL : 0;
+    if (!error && !sd_ready) {
+        error = sd_error_snapshot();
+        if (!error) error = ENODEV;
+    }
+    if (!error && !ebook_buffer)
+        ebook_buffer = heap_caps_malloc(EBOOK_PAGE_BYTES + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!error && !ebook_buffer) {
         lv_label_set_text(ebook_status, "Out of memory");
         return;
     }
-    FILE *file = fopen(ebook_path, "rb");
-    if (!file || fseek(file, ebook_offset, SEEK_SET)) {
-        if (file) fclose(file);
-        lv_label_set_text(ebook_status, "Could not open book");
+    FILE *file = NULL;
+    if (!error) {
+        errno = 0;
+        file = fopen(ebook_path, "rb");
+        if (!file) error = errno ? errno : EIO;
+    }
+    if (!error) {
+        errno = 0;
+        if (fseek(file, offset, SEEK_SET) != 0) error = errno ? errno : EIO;
+    }
+    size_t raw_read = 0;
+    if (!error) {
+        errno = 0;
+        raw_read = fread(ebook_buffer, 1, EBOOK_PAGE_BYTES, file);
+        if (ferror(file)) error = errno ? errno : EIO;
+        else if (offset > LONG_MAX - (long)raw_read) error = EOVERFLOW;
+    }
+    if (file) {
+        errno = 0;
+        if (fclose(file) != 0 && !error) error = errno ? errno : EIO;
+    }
+    if (error) {
+        sd_record_error(error);
+        lv_label_set_text_fmt(ebook_status, "Could not read book: %s", strerror(error));
         return;
     }
-    size_t raw_read = fread(ebook_buffer, 1, EBOOK_PAGE_BYTES, file);
-    fclose(file);
     size_t read = 0;
     for (size_t i = 0; i < raw_read;) {
         unsigned char value = ebook_buffer[i++];
@@ -4464,6 +4490,7 @@ static void ebook_load_page(void)
         }
     }
     ebook_buffer[read] = '\0';
+    ebook_offset = offset;
     ebook_next_offset = ebook_offset + raw_read;
     ESP_LOGI("tab5-os", "Ebook loaded %u bytes at %ld from %.120s", (unsigned)raw_read, ebook_offset, ebook_path);
     lv_textarea_set_text(ebook_text, raw_read ? ebook_buffer : "End of book");
@@ -4484,15 +4511,15 @@ static void ebook_library_clicked(lv_event_t *event)
 static void ebook_prev_clicked(lv_event_t *event)
 {
     (void)event;
-    ebook_offset = ebook_offset > EBOOK_PAGE_BYTES ? ebook_offset - EBOOK_PAGE_BYTES : 0;
-    ebook_load_page();
+    if (!ebook_prev || lv_obj_has_state(ebook_prev, LV_STATE_DISABLED) || ebook_offset <= 0) return;
+    ebook_load_page(ebook_offset > EBOOK_PAGE_BYTES ? ebook_offset - EBOOK_PAGE_BYTES : 0);
 }
 
 static void ebook_next_clicked(lv_event_t *event)
 {
     (void)event;
-    ebook_offset = ebook_next_offset;
-    ebook_load_page();
+    if (!ebook_next || lv_obj_has_state(ebook_next, LV_STATE_DISABLED) || ebook_next_offset <= ebook_offset) return;
+    ebook_load_page(ebook_next_offset);
 }
 
 static void ebook_text_clicked(lv_event_t *event)
@@ -4507,6 +4534,7 @@ static void show_ebook_reader(const char *path)
 {
     snprintf(ebook_path, sizeof(ebook_path), "%s", path);
     ebook_offset = 0;
+    ebook_next_offset = 0;
     clear_content();
     lv_obj_set_style_pad_row(content, 12, 0);
 
@@ -4526,6 +4554,8 @@ static void show_ebook_reader(const char *path)
     lv_obj_t *library = button(actions, "Library", ebook_library_clicked);
     ebook_prev = button(actions, "Prev", ebook_prev_clicked);
     ebook_next = button(actions, "Next", ebook_next_clicked);
+    lv_obj_add_state(ebook_prev, LV_STATE_DISABLED);
+    lv_obj_add_state(ebook_next, LV_STATE_DISABLED);
     lv_obj_t *text_size = button(actions, ebook_large_text ? "Text: Large" : "Text: Small", ebook_text_clicked);
     lv_obj_set_size(library, 135, 64);
     lv_obj_set_size(ebook_prev, 135, 64);
@@ -4539,7 +4569,7 @@ static void show_ebook_reader(const char *path)
     lv_textarea_set_cursor_click_pos(ebook_text, false);
     lv_obj_remove_flag(ebook_text, LV_OBJ_FLAG_CLICK_FOCUSABLE);
     lv_obj_set_style_text_font(ebook_text, ebook_large_text ? &lv_font_montserrat_28 : &lv_font_montserrat_14, 0);
-    ebook_load_page();
+    ebook_load_page(0);
 }
 
 static void ebook_open_clicked(lv_event_t *event)

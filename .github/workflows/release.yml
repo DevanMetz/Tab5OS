@@ -37,6 +37,8 @@ jobs:
         run: python3 tools/test_ride_history.py --compiler cc
       - name: Test Ring history storage
         run: python3 tools/test_ring_history.py --compiler cc
+      - name: Test ebook pages
+        run: python3 tools/test_ebook_pages.py --compiler cc
       - name: Test capture reader
         run: |
           cc -std=c11 -Wall -Wextra -Werror -pedantic -I main main/capture_data.c tests/capture_data_test.c -o "$RUNNER_TEMP/capture_data_test"
@@ -160,6 +162,21 @@ jobs:
             build/ring-history/source.json
             build/ring-history/ring_history.inc
             build/ring-history/storage_source.inc
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Retain ebook page test evidence
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ebook-pages-logs
+          path: |
+            build/ebook-pages/compile.log
+            build/ebook-pages/result.log
+            build/ebook-pages/source.json
+            build/ebook-pages/ebook_pages.inc
+            build/ebook-pages/ebook_config.inc
+            build/ebook-pages/reader_initialization.inc
           if-no-files-found: warn
           retention-days: 14
 
