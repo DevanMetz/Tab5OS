@@ -113,6 +113,8 @@ esp_err_t esp_http_client_cleanup(esp_http_client_handle_t client)
 
 /* These fail closed if a manifest test ever reaches image/hash operations. */
 #define NO_IMAGE() assert(0 && "Manifest test attempted an image operation")
+void http_transport_use_streaming_reads(esp_transport_handle_t transport)
+{ (void)transport; NO_IMAGE(); }
 void mbedtls_sha256_init(mbedtls_sha256_context *context) { (void)context; NO_IMAGE(); }
 void mbedtls_sha256_free(mbedtls_sha256_context *context) { (void)context; NO_IMAGE(); }
 int mbedtls_sha256_starts(mbedtls_sha256_context *context, int is224)

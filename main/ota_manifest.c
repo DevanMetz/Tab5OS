@@ -24,6 +24,7 @@
 #define OTA_CHANNEL "stable"
 #define OTA_IMAGE_URL_PREFIX "https://github.com/DevanMetz/Tab5OS/releases/download/"
 #define OTA_MANIFEST_REQUEST_MS 15000
+#define OTA_IMAGE_REQUEST_MS (5 * 60 * 1000)
 
 #if !CONFIG_ESP_HTTP_CLIENT_ENABLE_CUSTOM_TRANSPORT || !CONFIG_ESP_HTTP_CLIENT_ENABLE_HTTPS
 #error "OTA manifests require the guarded HTTP transport and HTTPS support"
@@ -40,6 +41,8 @@ typedef struct {
     mbedtls_sha256_context context;
     size_t bytes;
     bool failed;
+    size_t expected_bytes;
+    bool bad_length;
 } image_hash_t;
 
 static void set_message(char *message, size_t size, const char *text)
@@ -218,7 +221,7 @@ static esp_err_t manifest_event(esp_http_client_event_t *event)
     return ESP_OK;
 }
 
-static bool manifest_not_cancelled(void *context)
+static bool ota_not_cancelled(void *context)
 {
     (void)context;
     return false;
@@ -233,7 +236,7 @@ esp_err_t ota_manifest_fetch(const char *manifest_url, ota_manifest_t *manifest,
         return ESP_ERR_NO_MEM;
     }
     esp_transport_handle_t transport = http_transport_init(!strncmp(manifest_url, "https://", 8),
-        esp_timer_get_time() + (int64_t)OTA_MANIFEST_REQUEST_MS * 1000, manifest_not_cancelled, NULL);
+        esp_timer_get_time() + (int64_t)OTA_MANIFEST_REQUEST_MS * 1000, ota_not_cancelled, NULL);
     esp_http_client_config_t config = {
         .url = manifest_url,
         .crt_bundle_attach = esp_crt_bundle_attach,
@@ -318,11 +321,34 @@ esp_err_t ota_manifest_check(const ota_manifest_t *manifest, const char *current
     return ESP_OK;
 }
 
+static bool image_length_matches(const char *text, size_t expected)
+{
+    if (!text) return false;
+    while (*text == ' ' || *text == '\t') text++;
+    if (!isdigit((unsigned char)*text)) return false;
+    size_t value = 0;
+    while (isdigit((unsigned char)*text)) {
+        unsigned digit = (unsigned)(*text++ - '0');
+        if (value > expected / 10 || (value == expected / 10 && digit > expected % 10))
+            return false;
+        value = value * 10 + digit;
+    }
+    while (*text == ' ' || *text == '\t') text++;
+    return !*text && value == expected;
+}
+
 static esp_err_t image_hash_event(esp_http_client_event_t *event)
 {
     image_hash_t *hash = event->user_data;
     if (!hash) return ESP_OK;
-    if (event->event_id == HTTP_EVENT_REDIRECT) {
+    if (event->event_id == HTTP_EVENT_HEADERS_SENT) {
+        hash->bad_length = false;
+    } else if (event->event_id == HTTP_EVENT_ON_HEADER &&
+               header_name_is(event->header_key, "content-length")) {
+        /* SDK OTA narrows the announced length to int. Preserve the raw check
+         * before reading the description, and reset it for each request. */
+        if (!image_length_matches(event->header_value, hash->expected_bytes)) hash->bad_length = true;
+    } else if (event->event_id == HTTP_EVENT_REDIRECT) {
         hash->bytes = 0;
         hash->failed = mbedtls_sha256_starts(&hash->context, false) != 0;
     } else if (event->event_id == HTTP_EVENT_ON_DATA && event->data_len > 0 && !hash->failed &&
@@ -338,13 +364,24 @@ static esp_err_t image_hash_event(esp_http_client_event_t *event)
 esp_err_t ota_manifest_install(const ota_manifest_t *manifest,
                                char *message, size_t message_size)
 {
-    image_hash_t hash = {0};
+    image_hash_t hash = {.expected_bytes = manifest->size};
+    esp_transport_handle_t transport = NULL;
+    esp_err_t error = ESP_FAIL;
     mbedtls_sha256_init(&hash.context);
     if (mbedtls_sha256_starts(&hash.context, false) != 0) {
         mbedtls_sha256_free(&hash.context);
         set_message(message, message_size, "Could not initialize image verification");
         return ESP_FAIL;
     }
+    int64_t deadline_us = esp_timer_get_time() + (int64_t)OTA_IMAGE_REQUEST_MS * 1000;
+    transport = http_transport_init(!strncmp(manifest->url, "https://", 8),
+                                    deadline_us, ota_not_cancelled, NULL);
+    if (!transport) {
+        error = ESP_ERR_NO_MEM;
+        set_message(message, message_size, "Could not initialize image request");
+        goto done;
+    }
+    http_transport_use_streaming_reads(transport);
     esp_http_client_config_t http = {
         .url = manifest->url,
         .crt_bundle_attach = esp_crt_bundle_attach,
@@ -355,13 +392,20 @@ esp_err_t ota_manifest_install(const ota_manifest_t *manifest,
         .buffer_size_tx = 1536,
         .keep_alive_enable = true,
         .max_redirection_count = 5,
+        .transport = transport,
     };
     esp_https_ota_config_t config = {.http_config = &http};
     esp_https_ota_handle_t handle = NULL;
-    esp_err_t error = esp_https_ota_begin(&config, &handle);
+    error = esp_https_ota_begin(&config, &handle);
     if (error != ESP_OK) {
         snprintf(message, message_size, "Image request failed: %s", esp_err_to_name(error));
         goto done;
+    }
+    int announced_size = esp_https_ota_get_image_size(handle);
+    if (hash.bad_length || (announced_size >= 0 && (size_t)announced_size != manifest->size)) {
+        set_message(message, message_size, "Image Content-Length does not match manifest");
+        error = ESP_ERR_INVALID_SIZE;
+        goto abort;
     }
     esp_app_desc_t description;
     error = esp_https_ota_get_img_desc(handle, &description);
@@ -371,16 +415,16 @@ esp_err_t ota_manifest_install(const ota_manifest_t *manifest,
         if (error == ESP_OK) error = ESP_ERR_INVALID_VERSION;
         goto abort;
     }
-    int announced_size = esp_https_ota_get_image_size(handle);
-    if (announced_size >= 0 && (size_t)announced_size != manifest->size) {
-        set_message(message, message_size, "Image Content-Length does not match manifest");
-        error = ESP_ERR_INVALID_SIZE;
-        goto abort;
-    }
     do {
         error = esp_https_ota_perform(handle);
+        if (esp_timer_get_time() >= deadline_us) {
+            error = ESP_ERR_TIMEOUT;
+            set_message(message, message_size, "Image download exceeded 5 minutes");
+            goto abort;
+        }
     } while (error == ESP_ERR_HTTPS_OTA_IN_PROGRESS);
-    if (error != ESP_OK || !esp_https_ota_is_complete_data_received(handle)) {
+    if (error != ESP_OK || !esp_https_ota_is_complete_data_received(handle) ||
+        !http_transport_response_complete(transport)) {
         if (error == ESP_OK) error = ESP_ERR_INVALID_SIZE;
         snprintf(message, message_size, "Image download failed: %s", esp_err_to_name(error));
         goto abort;
@@ -395,6 +439,11 @@ esp_err_t ota_manifest_install(const ota_manifest_t *manifest,
         error = ESP_ERR_INVALID_CRC;
         goto abort;
     }
+    if (esp_timer_get_time() >= deadline_us) {
+        error = ESP_ERR_TIMEOUT;
+        set_message(message, message_size, "Image download exceeded 5 minutes");
+        goto abort;
+    }
     error = esp_https_ota_finish(handle);
     handle = NULL;
     if (error != ESP_OK)
@@ -404,6 +453,17 @@ esp_err_t ota_manifest_install(const ota_manifest_t *manifest,
 abort:
     esp_https_ota_abort(handle);
 done:
+    if (transport) {
+        http_transport_stop_t stopped = http_transport_stop_reason(transport);
+        if (stopped == HTTP_TRANSPORT_DEADLINE) {
+            error = ESP_ERR_TIMEOUT;
+            set_message(message, message_size, "Image download exceeded 5 minutes");
+        } else if (stopped == HTTP_TRANSPORT_INVALID_HEADERS || stopped == HTTP_TRANSPORT_INVALID_BODY) {
+            error = ESP_ERR_INVALID_RESPONSE;
+            set_message(message, message_size, "Image server response was invalid");
+        }
+        esp_transport_destroy(transport);
+    }
     mbedtls_sha256_free(&hash.context);
     return error;
 }

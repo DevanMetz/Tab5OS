@@ -24,6 +24,7 @@ typedef struct {
     void *context;
     http_transport_stop_t stopped;
     bool secure;
+    bool streaming_reads;
     int connect_error;
     char host[256];
     size_t received;
@@ -239,7 +240,8 @@ static int read_guarded(esp_transport_handle_t transport, char *buffer, int leng
             return (int)count;
         }
         if (stopped(state)) return ERR_TCP_TRANSPORT_CONNECTION_FAILED;
-        if (state->message_complete && !state->reading_trailers) return 0;
+        if (state->message_complete && !state->reading_trailers)
+            return state->streaming_reads ? ERR_TCP_TRANSPORT_CONNECTION_CLOSED_BY_FIN : 0;
         int result;
         if (!state->headers_complete || state->reading_trailers) {
             int prepared = prepare_metadata(state);
@@ -271,9 +273,9 @@ static int read_guarded(esp_transport_handle_t transport, char *buffer, int leng
             if (result > 0) return frame_body(state, buffer, result);
             if (result == ERR_TCP_TRANSPORT_CONNECTION_CLOSED_BY_FIN) {
                 http_parser_execute(&state->parser, &framing_settings, "", 0);
-                /* Only an actual FIN may complete a close-delimited response.
-                 * Returning 0 lets the SDK observe EOF for its own parser. */
-                if (state->message_complete) return 0;
+                /* Only an actual FIN may complete a close-delimited response. */
+                if (state->message_complete)
+                    return state->streaming_reads ? ERR_TCP_TRANSPORT_CONNECTION_CLOSED_BY_FIN : 0;
             }
         }
         if (result != ERR_TCP_TRANSPORT_CONNECTION_TIMEOUT) return result;
@@ -390,4 +392,10 @@ bool http_transport_response_complete(esp_transport_handle_t transport)
     http_transport_t *state = esp_transport_get_context_data(transport);
     return state->headers_complete && state->message_complete &&
            !state->reading_trailers && state->safe_until == 0;
+}
+
+void http_transport_use_streaming_reads(esp_transport_handle_t transport)
+{
+    http_transport_t *state = esp_transport_get_context_data(transport);
+    state->streaming_reads = true;
 }

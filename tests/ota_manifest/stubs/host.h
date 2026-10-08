@@ -32,6 +32,7 @@ typedef struct {
     void *user_data;
     void *client;
     char *header_key;
+    char *header_value;
 } esp_http_client_event_t;
 typedef struct {
     const char *url;

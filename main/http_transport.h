@@ -24,3 +24,6 @@ esp_transport_handle_t http_transport_init(bool secure, int64_t deadline_us,
 http_transport_stop_t http_transport_stop_reason(esp_transport_handle_t transport);
 int http_transport_get_errno(esp_transport_handle_t transport);
 bool http_transport_response_complete(esp_transport_handle_t transport);
+/* The SDK streaming reader needs FIN rather than perform()'s zero EOF.
+ * Select this before initializing the client; framing validation is unchanged. */
+void http_transport_use_streaming_reads(esp_transport_handle_t transport);

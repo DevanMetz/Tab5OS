@@ -87,8 +87,10 @@ static void wait_without_ui(void)
 static void finish(void)
 {
     int64_t until = esp_timer_get_time() + 18000000;
-    while (http_tool_busy() || host_active_tasks) { assert(esp_timer_get_time() < until); pump(); }
-    pump_for(220);
+    /* The application timer consumes the result; rendering can delay a pass. */
+    while (http_tool_busy() || host_active_tasks || http_host_allocations) {
+        assert(esp_timer_get_time() < until); pump();
+    }
     if (host_open_sockets || http_host_allocations || http_host_transports || http_host_sdk_allocations)
         fprintf(stderr, "Outstanding sockets=%ld jobs=%ld transports=%ld SDK allocations=%ld\n",
                 host_open_sockets, http_host_allocations, http_host_transports, http_host_sdk_allocations);

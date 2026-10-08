@@ -88,6 +88,8 @@ target_compile_definitions(image_test PRIVATE _CRT_SECURE_NO_WARNINGS MBEDTLS_CO
 target_compile_options(image_test PRIVATE -Wall -Wextra -Werror -include "${HTTP_TESTS}/compat.h")
 set_source_files_properties(${SDK_SOURCES} PROPERTIES COMPILE_OPTIONS
     "-Wno-unused-parameter;-Wno-sign-compare;-Wno-enum-conversion;-include;${HTTP_TESTS}/track.h")
+set_source_files_properties("${TAB5_ROOT}/tests/modbus_network/host.c" PROPERTIES
+    COMPILE_DEFINITIONS "esp_timer_get_time=ota_fixture_real_time")
 target_link_libraries(image_test PRIVATE ws2_32)
 '@ | Set-Content -LiteralPath (Join-Path $build 'CMakeLists.txt')
     & $cmake -S $build -B "$build/out" -G Ninja "-DTAB5_ROOT=$($root.Replace('\', '/'))" "-DTAB5_IDF=$($IdfPath.Replace('\', '/'))" "-DCMAKE_C_COMPILER=$Compiler" "-DCMAKE_MAKE_PROGRAM=$ninja" -DCMAKE_BUILD_TYPE=Debug

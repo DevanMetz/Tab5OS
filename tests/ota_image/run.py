@@ -17,6 +17,9 @@ MODES = (
     "corrupt-image", "long-image", "bad-description", "wrong-chip", "short-header", "truncated",
     "http-error", "missing-slot", "begin-fault", "write-fault", "late-write-fault", "end-fault", "boot-fault",
     "long-image-matching-hash", "short-image-matching-hash", "repeat",
+    "informational", "trailer", "partial-header", "header-overflow", "trailer-truncated",
+    "header-trickle", "description-trickle", "body-trickle", "transport-allocation", "transport-init", "metadata-repeat",
+    "large-length", "aliased-length", "narrow-length", "max-length", "zero-padded-length",
 )
 FETCH_MODES = (
     "manifest-direct", "manifest-fragmented", "manifest-chunked", "manifest-close-delimited",
@@ -28,9 +31,13 @@ FETCH_MODES = (
     "manifest-trailer-truncated", "manifest-header-deadline", "manifest-body-deadline", "manifest-metadata-repeat",
     "manifest-header-trickle", "manifest-transport-allocation", "manifest-transport-init",
 )
-ERRORS = {"wrong-hash": 0x109, "wrong-size": 0x104, "wrong-version": 0x10a,
+ERRORS = {"wrong-hash": 0x109, "wrong-size": 0x104, "wrong-version": 0x10a, "short-header": 0x104,
           "corrupt-image": 0x109, "long-image": 0x109, "wrong-chip": 0x10a,
           "long-image-matching-hash": 0x109, "short-image-matching-hash": 0x109,
+          "header-overflow": 0x108,
+          "header-trickle": 0x107, "description-trickle": 0x107, "body-trickle": 0x107,
+          "transport-allocation": 0x101, "transport-init": 0x101,
+          "large-length": 0x104, "aliased-length": 0x104, "narrow-length": 0x104, "max-length": 0x108,
           "manifest-incomplete-length": 0x104, "manifest-incomplete-chunked": 0x104,
           "manifest-truncated-json": 0x108, "manifest-overflow": 0x104, "manifest-nul-suffix": 0x108,
           "manifest-large-length": 0x104, "manifest-max-length": 0x108,
@@ -38,7 +45,7 @@ ERRORS = {"wrong-hash": 0x109, "wrong-size": 0x104, "wrong-version": 0x10a,
           "manifest-trailer-truncated": 0x104,
           "manifest-header-deadline": 0x107, "manifest-body-deadline": 0x107,
           "manifest-header-trickle": 0x107, "manifest-transport-allocation": 0x101, "manifest-transport-init": 0x101}
-SUCCESSES = MODES[:8] + ("repeat",) + FETCH_MODES[:6] + (
+SUCCESSES = MODES[:8] + ("repeat", "informational", "trailer", "metadata-repeat", "zero-padded-length") + FETCH_MODES[:6] + (
     "manifest-exact-cap", "manifest-repeat", "manifest-informational", "manifest-trailer", "manifest-metadata-repeat")
 
 
@@ -132,8 +139,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     declared += 20
                 elif kind == "large-length":
                     declared = 1 << 63
+                elif kind == "aliased-length":
+                    declared = (1 << 63) + len(body)
+                elif kind == "narrow-length":
+                    declared = (1 << 32) + len(body)
                 elif kind == "max-length":
                     declared = (1 << 64) - 1
+                elif kind == "zero-padded-length":
+                    declared = f"000{len(body)}"
                 if mode == "truncated":
                     body = body[:2049]
                 response = (f"HTTP/1.1 200 OK\r\nContent-Length: {declared}\r\n"
@@ -147,6 +160,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 for byte in response:
                     self.connection.sendall(bytes((byte,)))
                     time.sleep(0.3)
+            elif kind in ("description-trickle", "body-trickle"):
+                header_end = response.index(b"\r\n\r\n") + 4
+                prefix = 512 if kind == "description-trickle" else 2048
+                self.connection.sendall(response[:header_end + prefix])
+                for byte in response[header_end + prefix:]:
+                    self.connection.sendall(bytes((byte,)))
+                    time.sleep(0.03)
             elif kind in ("informational", "metadata-repeat"):
                 final = response.index(b"HTTP/1.1 200 OK")
                 self.connection.sendall(response[:final])
@@ -193,6 +213,11 @@ def run_case(executable, output, mode, data):
         if framing:
             evidence["responseContentLength"] = int(framing[1])
             evidence["responseComplete"] = framing[2] == "1"
+        deadline = re.search(r"^IMAGE_DEADLINE [\w-]+ elapsed_ms=(\d+) wall_ms=(\d+) clock_scale=(\d+)$", log, re.M)
+        if deadline:
+            evidence["deadlineElapsedMs"] = int(deadline[1])
+            evidence["deadlineWallMs"] = int(deadline[2])
+            evidence["clockScale"] = int(deadline[3])
         (output / f"{mode}-wire.json").write_text(json.dumps(evidence, indent=2) + "\n")
         print(log, end="", flush=True)
         assert completed.returncode == 0, mode

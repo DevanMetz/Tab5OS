@@ -27,6 +27,9 @@ static unsigned redirect_events;
 static int64_t image_event_bytes, non_image_event_bytes, previous_non_image_bytes;
 static int64_t response_length;
 static bool response_complete, response_finished;
+static unsigned clock_scale = 1;
+int64_t ota_fixture_real_time(void);
+int64_t esp_timer_get_time(void) { return ota_fixture_real_time() * clock_scale; }
 
 esp_err_t esp_event_post(const char *base, int32_t id, const void *data, size_t size, unsigned ticks)
 {
@@ -111,6 +114,8 @@ int main(int argc, char **argv)
     unsigned port = (unsigned)strtoul(argv[1], NULL, 10);
     assert(port && port <= 65535);
     mode = argv[2];
+    if (!strcmp(mode, "header-trickle") || !strcmp(mode, "description-trickle") || !strcmp(mode, "body-trickle"))
+        clock_scale = 20;
     FILE *file = fopen(argv[3], "rb");
     assert(file);
     expected_size = fread(expected, 1, sizeof(expected), file);
@@ -138,7 +143,7 @@ int main(int argc, char **argv)
     char message[128] = {0};
     bool fetching = !strncmp(mode, "manifest-", 9);
     unsigned cycles = !strcmp(mode, "repeat") || !strcmp(mode, "manifest-repeat") ||
-                      !strcmp(mode, "manifest-metadata-repeat") ? 26 : 1;
+                      !strcmp(mode, "manifest-metadata-repeat") || !strcmp(mode, "metadata-repeat") ? 26 : 1;
     DWORD handles_before = 0, handles_after = 0;
     esp_err_t error = ESP_OK;
     for (unsigned cycle = 0; cycle < cycles; cycle++) {
@@ -148,12 +153,22 @@ int main(int argc, char **argv)
         response_length = 0;
         response_complete = false;
         response_finished = false;
-        if (!strcmp(mode, "manifest-transport-allocation")) InterlockedExchange(&http_host_fail_allocation, 1);
-        if (!strcmp(mode, "manifest-transport-init")) InterlockedExchange(&http_host_fail_transport, 1);
+        if (!strcmp(mode, "manifest-transport-allocation") || !strcmp(mode, "transport-allocation"))
+            InterlockedExchange(&http_host_fail_allocation, 1);
+        if (!strcmp(mode, "manifest-transport-init") || !strcmp(mode, "transport-init"))
+            InterlockedExchange(&http_host_fail_transport, 1);
         int64_t started = esp_timer_get_time();
         error = fetching ? ota_manifest_fetch(request_url, &manifest, message, sizeof(message)) :
                            ota_manifest_install(&manifest, message, sizeof(message));
         int64_t elapsed = esp_timer_get_time() - started;
+        if (clock_scale == 20) {
+            assert(elapsed >= 300000000 && elapsed < 304000000);
+            assert(!ends && !boots && !selected);
+            if (!strcmp(mode, "body-trickle")) assert(begins == 1 && writes && aborts == 1);
+            else assert(!begins && !writes && !aborts);
+            printf("IMAGE_DEADLINE %s elapsed_ms=%lld wall_ms=%lld clock_scale=%u\n", mode,
+                   (long long)(elapsed / 1000), (long long)(elapsed / (1000 * clock_scale)), clock_scale);
+        }
         if (!strcmp(mode, "manifest-header-deadline") || !strcmp(mode, "manifest-body-deadline") ||
             !strcmp(mode, "manifest-header-trickle")) {
             assert(elapsed >= 14000000 && elapsed < 17000000);
@@ -192,8 +207,11 @@ int main(int argc, char **argv)
             if (!strcmp(mode, "wrong-hash") || !strcmp(mode, "corrupt-image") || !strcmp(mode, "long-image") ||
                 !strcmp(mode, "long-image-matching-hash") || !strcmp(mode, "short-image-matching-hash"))
                 assert(ends == 0 && aborts == 1);
-            if (!strcmp(mode, "wrong-version") || !strcmp(mode, "wrong-size"))
+            if (!strcmp(mode, "wrong-version") || !strcmp(mode, "wrong-size") || !strcmp(mode, "large-length") ||
+                !strcmp(mode, "aliased-length") || !strcmp(mode, "narrow-length") || !strcmp(mode, "short-header"))
                 assert(begins == 0 && writes == 0 && ends == 0 && aborts == 0);
+            if (!strcmp(mode, "wrong-size") || !strcmp(mode, "large-length") || !strcmp(mode, "aliased-length") ||
+                !strcmp(mode, "narrow-length") || !strcmp(mode, "short-header")) assert(!image_event_bytes);
         }
         if (cycles > 1) {
             assert(GetProcessHandleCount(GetCurrentProcess(), &handles_after));
