@@ -416,6 +416,11 @@ esp_err_t ota_manifest_install(const ota_manifest_t *manifest,
         goto abort;
     }
     do {
+        if (esp_timer_get_time() >= deadline_us) {
+            error = ESP_ERR_TIMEOUT;
+            set_message(message, message_size, "Image download exceeded 5 minutes");
+            goto abort;
+        }
         if (hash.failed || hash.bytes > manifest->size) {
             set_message(message, message_size, hash.failed ? "Could not verify image SHA-256" :
                                                             "Downloaded image size does not match manifest");

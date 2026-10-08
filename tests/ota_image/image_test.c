@@ -28,8 +28,9 @@ static int64_t image_event_bytes, non_image_event_bytes, previous_non_image_byte
 static int64_t response_length;
 static bool response_complete, response_finished;
 static unsigned clock_scale = 1;
+static int64_t clock_offset_us;
 int64_t ota_fixture_real_time(void);
-int64_t esp_timer_get_time(void) { return ota_fixture_real_time() * clock_scale; }
+int64_t esp_timer_get_time(void) { return ota_fixture_real_time() * clock_scale + clock_offset_us; }
 
 /* Controlled API failures; normal calls reach the pinned SHA implementation. */
 static unsigned sha_injected;
@@ -49,7 +50,11 @@ int mbedtls_sha256_update(mbedtls_sha256_context *context, const unsigned char *
         sha_injected++;
         return MBEDTLS_ERR_SHA256_BAD_INPUT_DATA;
     }
-    return ota_fixture_sha256_update(context, data, size);
+    int result = ota_fixture_sha256_update(context, data, size);
+    /* Expire after description bytes arrive, before the SDK's first write. */
+    if (!strcmp(mode, "description-expired") && sha_update_bytes >= 1024 && !clock_offset_us)
+        clock_offset_us = 300000000;
+    return result;
 }
 int mbedtls_sha256_finish(mbedtls_sha256_context *context, unsigned char output[32])
 {
@@ -176,6 +181,7 @@ int main(int argc, char **argv)
     for (unsigned cycle = 0; cycle < cycles; cycle++) {
         begins = writes = ends = aborts = boots = selected = active = redirect_events = 0;
         written_size = 0;
+        clock_offset_us = 0;
         sha_injected = 0;
         sha_update_bytes = 0;
         image_event_bytes = non_image_event_bytes = previous_non_image_bytes = 0;
@@ -233,8 +239,11 @@ int main(int argc, char **argv)
         } else {
             assert(message[0] && selected == 0);
             if (strcmp(mode, "boot-fault")) assert(!boots);
-            if (!strcmp(mode, "sha-start") || !strcmp(mode, "sha-update-first") || !strcmp(mode, "small-manifest"))
+            if (!strcmp(mode, "sha-start") || !strcmp(mode, "sha-update-first") || !strcmp(mode, "small-manifest") ||
+                !strcmp(mode, "description-expired"))
                 assert(!begins && !writes && !ends && !aborts && !written_size);
+            if (!strcmp(mode, "description-expired"))
+                assert(!strcmp(message, "Image download exceeded 5 minutes") && image_event_bytes == 1024);
             if (!strcmp(mode, "sha-update-first") || !strcmp(mode, "sha-update-late"))
                 assert(!strcmp(message, "Could not verify image SHA-256"));
             if (!strcmp(mode, "sha-update-late"))
@@ -272,6 +281,11 @@ int main(int argc, char **argv)
     if (!strncmp(mode, "sha-", 4)) {
         assert(sha_injected == 1);
         printf("SHA_FAULT %s injections=%u update_bytes=%zu\n", mode, sha_injected, sha_update_bytes);
+    }
+    if (!strcmp(mode, "description-expired")) {
+        assert(clock_offset_us == 300000000 && sha_update_bytes == 1024 && !sha_injected);
+        printf("CLOCK_EXPIRY %s advance_us=%lld hashed_bytes=%zu\n", mode,
+               (long long)clock_offset_us, sha_update_bytes);
     }
     http_dns_test_close();
     WSACleanup();
