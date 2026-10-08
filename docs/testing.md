@@ -17,6 +17,7 @@ Python 3 and Node.js are needed for the quick checks. The configuration checks a
 | Ring heart-rate logging, saved timestamps or queue processing | [Ring history storage](#ring-history-storage) and a firmware build. |
 | Ebook page loading or navigation | [Ebook pages](#ebook-pages) and a firmware build. |
 | Ebook library enumeration | [Ebook library](#ebook-library) and a firmware build. |
+| Default ebook downloads or their file publication | [Ebook downloads](#ebook-downloads) and a firmware build. |
 | Scope/I2C CSV writes or publication | [Capture writers](#capture-writers) and a firmware build. |
 | Scope/I2C capture or saved serial CSV viewers | [CSV viewer storage and UI](#csv-viewer-storage-and-ui), existing serial-copy checks and a firmware build. |
 | Files fallback text previews | [Files text previews](#files-text-previews) and a firmware build. |
@@ -206,6 +207,18 @@ The portable runner compiles the actual `show_ebooks`, `ebook_supported` and `br
 Windows Find APIs and POSIX directory APIs supply the entries; native dot entries are normalized. The overlong name and operation failures are injected. UI, timers, logical mount paths, download helpers and the SD error callback are controlled. Reopen cases restore modeled SD availability and check that a successful listing clears its warning without erasing earlier error reports. The unchanged welcome-writing branch is excluded by using an existing directory and rejecting any welcome I/O. Actual LVGL cleanup, timer ticks, downloads, SDK mounts, SD callback filtering, physical SD/panel, latency and power-loss behavior remain outside this fixture. A null directory read with zero errno remains EOF.
 
 The library retains 64 stored paths of 256 bytes. The entry-limit message means those slots filled; no extra read proves that more entries exist. Generated callback/config source, full main/function/test hashes and compile/result logs stay under `build/ebook-library/`. Linux CI retains `ebook-library-logs`, including available failure diagnostics. These 28 checks are separate from the Windows native total.
+
+## Ebook downloads
+
+```powershell
+python tools/test_ebook_download.py --compiler 'C:/path/to/clang.exe'
+```
+
+The portable runner compiles the actual `ebook_http_event`, `ebook_default_installed` and `ebook_download_default` functions, their actual book/download types and default profiles, and the complete `storage_io.c`. Its 58 native-file cases check all three default profiles, the existing 1,024-byte installation boundary, 200/299 success and 199/300/404 rejection, first-probe failures with existing or absent files, TMP removal/open failures, client-init/transport failures, rejected and full-count stream-flagged writes, flush/sync/close/publication errors, missing errno and compounded cleanup failures. Every case checks exact final/TMP bytes and no remaining controlled clients or file handles. Twenty-five rejected-write/retry/installed-recheck cycles verify recovery without a redundant client.
+
+The preceding callbacks fail 32 controls. The transport adapter delivers all three data chunks even after the callback returns failure, matching the ignored data-callback return in the pinned SDK's body parser. The download keeps its first write cause in per-download state, stops later file writes and rejects publication even if the modeled client returns success. Cleanup cannot replace that cause; failed removal can leave a partial TMP. Separate init/transport/status cleanup controls report close/removal failures with their own cause, preserving the first close failure when removal also fails. Probe/preparation failures stop before a writer/client is opened, preserving existing files. Successful commit behavior, default URLs, TLS bundle, User-Agent, 30-second I/O timeout and 1,024-byte SDK buffer stay the same. An existing small final is preserved and leaves the completed download as an unpublished TMP when new-file publication refuses the collision.
+
+Files are native; SDK types, events, status/transport results, SD error reporting and I/O faults are controlled. This fixture does not execute the SDK client, the download worker/timer, LVGL, Wi-Fi/TLS, physical SD or power-loss behavior. The unflashed firmware build checks the callback/config interface against the actual SDK. Generated callbacks/types/config/storage source, full input/executable hashes and compile/result logs stay under `build/ebook-download/`. Linux CI retains `ebook-download-logs`, including available failure diagnostics. These 58 cases are separate from the Windows native total.
 
 ## Capture writers
 

@@ -209,6 +209,11 @@ typedef struct {
 } ebook_default_t;
 
 typedef struct {
+    FILE *file;
+    int error;
+} ebook_download_state_t;
+
+typedef struct {
     gpio_num_t pin;
     const char *port;
     bool input_only;
@@ -3293,9 +3298,15 @@ done:
 
 static esp_err_t ebook_http_event(esp_http_client_event_t *event)
 {
-    FILE *file = event->user_data;
-    if (event->event_id != HTTP_EVENT_ON_DATA || !file) return ESP_OK;
-    return fwrite(event->data, 1, event->data_len, file) == (size_t)event->data_len ? ESP_OK : ESP_FAIL;
+    ebook_download_state_t *download = event->user_data;
+    if (event->event_id != HTTP_EVENT_ON_DATA || !download || !download->file) return ESP_OK;
+    if (download->error) return ESP_FAIL;
+    errno = 0;
+    if (fwrite(event->data, 1, event->data_len, download->file) != (size_t)event->data_len || ferror(download->file)) {
+        download->error = errno ? errno : EIO;
+        return ESP_FAIL;
+    }
+    return ESP_OK;
 }
 
 static bool start_voice_mic(void)
@@ -4395,23 +4406,37 @@ static bool ebook_default_installed(const ebook_default_t *book)
     char path[256];
     snprintf(path, sizeof(path), SD_PATH "/BOOKS/%s", book->filename);
     struct stat info;
-    return stat(path, &info) == 0 && info.st_size > 1024;
+    errno = 0;
+    if (stat(path, &info) != 0) {
+        if (!errno) errno = EIO;
+        return false;
+    }
+    errno = 0;
+    return info.st_size > 1024;
 }
 
 static bool ebook_download_default(const ebook_default_t *book)
 {
     if (ebook_default_installed(book)) return true;
+    if (errno != 0 && errno != ENOENT) {
+        int error = errno;
+        sd_record_error(error);
+        ESP_LOGE("tab5-os", "Could not inspect %s: %s", book->filename, strerror(error));
+        return false;
+    }
     char path[256];
     char temporary[256];
     snprintf(path, sizeof(path), SD_PATH "/BOOKS/%s", book->filename);
     snprintf(temporary, sizeof(temporary), "%s", path);
     snprintf(strrchr(temporary, '.'), 5, ".TMP");
+    errno = 0;
     if (remove(temporary) != 0 && errno != ENOENT) {
         int remove_error = errno ? errno : EIO;
         sd_record_error(remove_error);
         ESP_LOGE("tab5-os", "Could not clear %s: %s", temporary, strerror(remove_error));
         return false;
     }
+    errno = 0;
     FILE *file = fopen(temporary, "wb");
     if (!file) {
         int open_error = errno ? errno : EIO;
@@ -4419,18 +4444,24 @@ static bool ebook_download_default(const ebook_default_t *book)
         ESP_LOGE("tab5-os", "Could not create %s: %s", temporary, strerror(open_error));
         return false;
     }
+    ebook_download_state_t download = {.file = file};
     esp_http_client_config_t config = {
         .url = book->url,
         .event_handler = ebook_http_event,
-        .user_data = file,
+        .user_data = &download,
         .crt_bundle_attach = esp_crt_bundle_attach,
         .timeout_ms = 30000,
         .buffer_size = 1024,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (!client) {
-        fclose(file);
-        remove(temporary);
+        int stream_error = 0;
+        errno = 0;
+        if (fclose(download.file) != 0) stream_error = errno ? errno : EIO;
+        download.file = NULL;
+        errno = 0;
+        if (remove(temporary) != 0 && errno != ENOENT && !stream_error) stream_error = errno ? errno : EIO;
+        if (stream_error) sd_record_error(stream_error);
         ESP_LOGE("tab5-os", "Could not start download for %s", book->filename);
         return false;
     }
@@ -4438,16 +4469,19 @@ static bool ebook_download_default(const ebook_default_t *book)
     esp_err_t error = esp_http_client_perform(client);
     int status = esp_http_client_get_status_code(client);
     esp_http_client_cleanup(client);
-    bool downloaded = error == ESP_OK && status >= 200 && status < 300;
+    bool downloaded = error == ESP_OK && status >= 200 && status < 300 && !download.error;
     bool saved = false;
     if (downloaded) {
-        saved = storage_commit_new_file(&file, temporary, path) == 0;
+        errno = 0;
+        saved = storage_commit_new_file(&download.file, temporary, path) == 0;
         if (!saved) sd_record_error(errno ? errno : EIO);
     } else {
-        int stream_error = ferror(file) ? (errno ? errno : EIO) : 0;
-        if (fclose(file) != 0 && !stream_error) stream_error = errno ? errno : EIO;
-        file = NULL;
-        remove(temporary);
+        int stream_error = download.error;
+        errno = 0;
+        if (fclose(download.file) != 0 && !stream_error) stream_error = errno ? errno : EIO;
+        download.file = NULL;
+        errno = 0;
+        if (remove(temporary) != 0 && errno != ENOENT && !stream_error) stream_error = errno ? errno : EIO;
         if (stream_error) sd_record_error(stream_error);
     }
     ESP_LOGI("tab5-os", "Default ebook %s: %s (%d)", book->filename, saved ? "saved" : "failed", status);
