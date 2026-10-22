@@ -462,6 +462,7 @@ void network_tool_show(lv_obj_t *parent, bool connected)
     lv_obj_set_scroll_dir(results, LV_DIR_VER);
     result_label = lv_label_create(results);
     lv_obj_set_width(result_label, LV_PCT(100));
+    lv_obj_set_style_text_color(result_label, lv_color_white(), 0);
     lv_obj_set_style_text_font(result_label, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_line_space(result_label, 6, 0);
     lv_label_set_long_mode(result_label, LV_LABEL_LONG_WRAP);
