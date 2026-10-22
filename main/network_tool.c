@@ -352,7 +352,7 @@ static bool update_link(void)
     if (dns.ip.type == ESP_IPADDR_TYPE_V4)
         snprintf(dns_text, sizeof(dns_text), IPSTR, IP2STR(&dns.ip.u_addr.ip4));
     lv_label_set_text_fmt(link_label,
-                          "%s   Ch %u   %d dBm\nIP " IPSTR "   Gateway " IPSTR "\nMask " IPSTR "   DNS %s",
+                          "%s\nCh %u   %d dBm\nIP  " IPSTR "\nGateway  " IPSTR "\nMask  " IPSTR "\nDNS  %s",
                           access_point.ssid, (unsigned)access_point.primary, access_point.rssi,
                           IP2STR(&ip.ip), IP2STR(&ip.gw), IP2STR(&ip.netmask), dns_text);
     return true;
@@ -375,7 +375,9 @@ static void network_tick(lv_timer_t *timer)
 static lv_obj_t *action_button(lv_obj_t *parent, const char *text, lv_event_cb_t callback)
 {
     lv_obj_t *control = lv_button_create(parent);
-    lv_obj_set_size(control, 110, 68);
+    lv_obj_set_size(control, 202, 72);
+    lv_obj_set_style_radius(control, 14, 0);
+    lv_obj_set_style_text_font(control, &lv_font_montserrat_28, 0);
     lv_obj_add_event_cb(control, callback, LV_EVENT_CLICKED, NULL);
     lv_obj_t *label = lv_label_create(control);
     lv_label_set_text(label, text);
@@ -410,47 +412,67 @@ void network_tool_stop(void)
 
 void network_tool_show(lv_obj_t *parent, bool connected)
 {
-    lv_obj_set_style_pad_row(parent, 16, 0);
+    lv_obj_set_style_pad_row(parent, 12, 0);
     lv_obj_t *title = lv_label_create(parent);
-    lv_label_set_text(title, "Network Diagnostics");
+    lv_label_set_text(title, "Network");
+    lv_obj_set_width(title, 640);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
 
     link_label = lv_label_create(parent);
-    lv_obj_set_size(link_label, 640, 100);
-    lv_obj_set_style_text_align(link_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_size(link_label, 640, LV_SIZE_CONTENT);
+    lv_obj_set_style_text_font(link_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_line_space(link_label, 6, 0);
+    lv_obj_set_style_bg_color(link_label, lv_color_hex(0x1f2937), 0);
+    lv_obj_set_style_bg_opa(link_label, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(link_label, 14, 0);
+    lv_obj_set_style_pad_all(link_label, 16, 0);
     bool link_connected = update_link();
     network_connected = connected && link_connected;
 
     host_area = lv_textarea_create(parent);
     lv_obj_set_size(host_area, 640, 72);
+    lv_obj_set_style_text_font(host_area, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_radius(host_area, 14, 0);
     lv_textarea_set_one_line(host_area, true);
     lv_textarea_set_max_length(host_area, NETWORK_HOST_MAX + 1);
     lv_textarea_set_text(host_area, pending_host);
     lv_textarea_set_placeholder_text(host_area, "Hostname or IP address");
 
     lv_obj_t *actions = lv_obj_create(parent);
-    lv_obj_set_size(actions, 640, 82);
-    lv_obj_set_style_pad_all(actions, 4, 0);
+    lv_obj_set_size(actions, 640, 156);
+    lv_obj_set_style_bg_opa(actions, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(actions, 0, 0);
+    lv_obj_set_style_pad_all(actions, 0, 0);
+    lv_obj_set_style_pad_gap(actions, 12, 0);
     lv_obj_clear_flag(actions, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_flex_flow(actions, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(actions, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_flow(actions, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(actions, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_START);
     operation_buttons[0] = action_button(actions, "LOOK UP", lookup_clicked);
     operation_buttons[1] = action_button(actions, "PING x4", ping_clicked);
     operation_buttons[2] = action_button(actions, "mDNS", mdns_clicked);
     action_button(actions, "REFRESH", refresh_clicked);
     cancel_button = action_button(actions, "CANCEL", cancel_clicked);
 
-    result_label = lv_label_create(parent);
-    lv_obj_set_size(result_label, 640, 220);
+    lv_obj_t *results = lv_obj_create(parent);
+    lv_obj_set_size(results, 640, 180);
+    lv_obj_set_style_bg_color(results, lv_color_hex(0x1f2937), 0);
+    lv_obj_set_style_border_width(results, 0, 0);
+    lv_obj_set_style_radius(results, 14, 0);
+    lv_obj_set_style_pad_all(results, 16, 0);
+    lv_obj_set_scroll_dir(results, LV_DIR_VER);
+    result_label = lv_label_create(results);
+    lv_obj_set_width(result_label, LV_PCT(100));
+    lv_obj_set_style_text_color(result_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(result_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_line_space(result_label, 6, 0);
     lv_label_set_long_mode(result_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_align(result_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(result_label, network_connected ? "Enter a target, then look it up or ping it" : "Connect to Wi-Fi first");
+    lv_label_set_text(result_label, network_connected ? "Ready" : "Connect to Wi-Fi first");
     if (network_tool_busy()) lv_label_set_text(result_label, "Cancelling the previous network check...");
     show_finished_operation();
     update_controls();
 
     network_keyboard = lv_keyboard_create(parent);
-    lv_obj_set_size(network_keyboard, 640, 420);
+    lv_obj_set_size(network_keyboard, 640, 360);
     lv_keyboard_set_textarea(network_keyboard, host_area);
     network_timer = lv_timer_create(network_tick, 200, NULL);
 }
