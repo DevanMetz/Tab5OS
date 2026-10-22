@@ -4591,7 +4591,7 @@ static void ebook_load_page(long offset)
     ESP_LOGI("tab5-os", "Ebook loaded %u bytes at %ld from %.120s", (unsigned)raw_read, ebook_offset, ebook_path);
     lv_textarea_set_text(ebook_text, raw_read ? ebook_buffer : "End of book");
     lv_obj_scroll_to_y(ebook_text, 0, LV_ANIM_OFF);
-    lv_label_set_text_fmt(ebook_status, "Page %lu  -  %ld KB", (unsigned long)(ebook_offset / EBOOK_PAGE_BYTES + 1), ebook_offset / 1024);
+    lv_label_set_text_fmt(ebook_status, "Page %lu", (unsigned long)(ebook_offset / EBOOK_PAGE_BYTES + 1));
     if (ebook_offset) lv_obj_remove_state(ebook_prev, LV_STATE_DISABLED);
     else lv_obj_add_state(ebook_prev, LV_STATE_DISABLED);
     if (raw_read == EBOOK_PAGE_BYTES) lv_obj_remove_state(ebook_next, LV_STATE_DISABLED);
@@ -4622,8 +4622,8 @@ static void ebook_text_clicked(lv_event_t *event)
 {
     lv_obj_t *label = lv_obj_get_child(lv_event_get_target(event), 0);
     ebook_large_text = !ebook_large_text;
-    lv_obj_set_style_text_font(ebook_text, ebook_large_text ? &lv_font_montserrat_28 : &lv_font_montserrat_14, 0);
-    lv_label_set_text(label, ebook_large_text ? "Text: Large" : "Text: Small");
+    lv_obj_set_style_text_font(ebook_text, ebook_large_text ? &lv_font_montserrat_48 : &lv_font_montserrat_28, 0);
+    lv_label_set_text(label, ebook_large_text ? "Large" : "Small");
 }
 
 static void show_ebook_reader(const char *path)
@@ -4652,19 +4652,25 @@ static void show_ebook_reader(const char *path)
     ebook_next = button(actions, "Next", ebook_next_clicked);
     lv_obj_add_state(ebook_prev, LV_STATE_DISABLED);
     lv_obj_add_state(ebook_next, LV_STATE_DISABLED);
-    lv_obj_t *text_size = button(actions, ebook_large_text ? "Text: Large" : "Text: Small", ebook_text_clicked);
+    lv_obj_t *text_size = button(actions, ebook_large_text ? "Large" : "Small", ebook_text_clicked);
     lv_obj_set_size(library, 135, 64);
     lv_obj_set_size(ebook_prev, 135, 64);
     lv_obj_set_size(ebook_next, 135, 64);
     lv_obj_set_size(text_size, 170, 64);
-    for (size_t i = 0; i < 4; ++i) lv_obj_set_style_text_font(lv_obj_get_child(lv_obj_get_child(actions, i), 0), &lv_font_montserrat_14, 0);
+    lv_obj_set_style_bg_opa(actions, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(actions, 0, 0);
+    lv_obj_set_style_pad_all(actions, 0, 0);
 
     ebook_text = lv_textarea_create(content);
     lv_obj_set_size(ebook_text, 640, 860);
     lv_textarea_set_one_line(ebook_text, false);
     lv_textarea_set_cursor_click_pos(ebook_text, false);
     lv_obj_remove_flag(ebook_text, LV_OBJ_FLAG_CLICK_FOCUSABLE);
-    lv_obj_set_style_text_font(ebook_text, ebook_large_text ? &lv_font_montserrat_28 : &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(ebook_text, ebook_large_text ? &lv_font_montserrat_48 : &lv_font_montserrat_28, 0);
+    lv_obj_set_style_pad_all(ebook_text, 24, 0);
+    lv_obj_set_style_text_line_space(ebook_text, 8, 0);
+    lv_obj_set_style_bg_color(ebook_text, lv_color_hex(0xFFFCF5), 0);
+    lv_obj_set_style_text_color(ebook_text, lv_color_hex(0x202938), 0);
     ebook_load_page(0);
 }
 
@@ -4681,8 +4687,14 @@ static void show_ebooks(void)
     lv_label_set_text(title, "Ebooks");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
     lv_obj_t *list = lv_list_create(content);
-    lv_obj_set_size(list, 640, 940);
+    lv_obj_set_size(list, 640, 1040);
+    lv_obj_set_style_text_font(list, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_pad_all(list, 12, 0);
+    lv_obj_set_style_pad_row(list, 8, 0);
+    lv_obj_set_style_radius(list, 16, 0);
     lv_obj_t *back = lv_list_add_button(list, LV_SYMBOL_LEFT, "Back to apps");
+    lv_obj_set_style_min_height(back, 72, 0);
+    lv_obj_set_style_pad_all(back, 20, 0);
     lv_obj_add_event_cb(back, home_clicked, LV_EVENT_CLICKED, NULL);
     if (!sd_ready) {
         lv_list_add_text(list, "Insert an SD card to read books");
@@ -4772,6 +4784,9 @@ static void show_ebooks(void)
             continue;
         }
         lv_obj_t *item = lv_list_add_button(list, LV_SYMBOL_FILE, entry->d_name);
+        lv_obj_set_style_min_height(item, 88, 0);
+        lv_obj_set_style_pad_all(item, 20, 0);
+        lv_obj_set_style_pad_column(item, 20, 0);
         lv_obj_add_event_cb(item, ebook_open_clicked, LV_EVENT_CLICKED, full);
     }
     errno = 0;
