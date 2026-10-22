@@ -30,7 +30,6 @@ static lv_obj_t *type_select;
 static lv_obj_t *order_select;
 static lv_obj_t *use_hex_button;
 static lv_obj_t *input_area;
-static lv_obj_t *help_label;
 static lv_obj_t *result_label;
 static lv_obj_t *preview_label;
 static lv_obj_t *keyboard;
@@ -104,10 +103,12 @@ static void render_result(void)
     }
     if (status != BYTE_DATA_OK) {
         lv_label_set_text(result_label, byte_data_error(status));
-        lv_label_set_text(preview_label, "Fix the input to calculate checksums and preview bytes.");
+        lv_label_set_text(preview_label, "");
+        lv_obj_add_flag(lv_obj_get_parent(preview_label), LV_OBJ_FLAG_HIDDEN);
         return;
     }
 
+    lv_obj_remove_flag(lv_obj_get_parent(preview_label), LV_OBJ_FLAG_HIDDEN);
     char heading[100] = "";
     if (input_mode == INPUT_NUMBER) {
         char value[32];
@@ -151,7 +152,7 @@ static void render_result(void)
                                 i + 1 == data.length ? "" : " ");
     }
     used += (size_t)snprintf(preview + used, sizeof(preview) - used,
-                            "%s\n\nASCII (non-printable = .)\n", data.length ? "" : "(empty)");
+                            "%s\n\nASCII\n", data.length ? "" : "(empty)");
     if (!data.length) {
         snprintf(preview + used, sizeof(preview) - used, "(empty)");
     } else {
@@ -162,26 +163,6 @@ static void render_result(void)
         preview[used] = '\0';
     }
     lv_label_set_text(preview_label, preview);
-}
-
-static void update_help(void)
-{
-    if (input_mode == INPUT_NUMBER) {
-        static const char *const limits[] = {
-            "0 to 255", "-128 to 127", "0 to 65535", "-32768 to 32767",
-            "0 to 4294967295", "-2147483648 to 2147483647", "decimal, exponent, NaN or +/-Inf"
-        };
-        char text[224];
-        snprintf(text, sizeof(text), "%s: %s. Up to 32 characters; no spaces or units.\n%s",
-                 number_names[number_type], limits[number_type], number_type == BYTE_NUMBER_FLOAT32 ?
-                 "Result shows the rounded Float32 value. Nonzero underflow to zero is rejected." :
-                 "Decimal integers only. Signed types use two's complement.");
-        lv_label_set_text(help_label, text);
-        return;
-    }
-    lv_label_set_text(help_label, input_mode == BYTE_DATA_HEX ?
-        "Hex byte pairs: 01 03 or 0103. Whitespace between bytes is OK. No 0x prefix. Maximum 128 bytes." :
-        "Literal 7-bit ASCII, maximum 128 bytes. Newlines count; backslash escapes are not expanded. Use hex for binary data.");
 }
 
 static void render_later(void *context)
@@ -231,13 +212,12 @@ static void apply_mode(void)
         lv_obj_add_flag(number_controls, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(use_hex_button, LV_OBJ_FLAG_HIDDEN);
     }
-    lv_obj_set_height(input_area, input_mode == INPUT_NUMBER ? 64 : 120);
-    lv_obj_set_style_text_font(preview_label, input_mode == INPUT_NUMBER ?
-                               &lv_font_montserrat_28 : &lv_font_montserrat_14, 0);
+    lv_obj_set_height(input_area, input_mode == INPUT_NUMBER ? 72 : 144);
+    lv_textarea_set_placeholder_text(input_area, input_mode == INPUT_NUMBER ? "0" :
+                                      input_mode == BYTE_DATA_HEX ? "00 01 02" : "ASCII text");
     lv_textarea_set_max_length(input_area, input_mode == INPUT_NUMBER ? BYTE_NUMBER_MAX_TEXT + 1 :
                               input_mode == BYTE_DATA_ASCII ? BYTE_DATA_MAX_BYTES + 1 : BYTE_DATA_MAX_TEXT + 1);
     update_keyboard_mode();
-    update_help();
     set_input_text(input_mode == INPUT_NUMBER ? saved_number : saved_input[input_mode]);
 }
 
@@ -253,7 +233,6 @@ static void number_changed(lv_event_t *event)
     (void)event;
     number_type = (byte_number_type_t)lv_dropdown_get_selected(type_select);
     little_endian = lv_dropdown_get_selected(order_select) != 0;
-    update_help();
     render_result();
 }
 
@@ -280,13 +259,11 @@ static void update_clipboard(void)
     if (copy) {
         lv_obj_remove_state(paste_button, LV_STATE_DISABLED);
         lv_obj_remove_state(clear_copy_button, LV_STATE_DISABLED);
-        lv_label_set_text_fmt(clipboard_label, "Byte clipboard: %u bytes in RAM. Paste replaces the Hex draft.\n"
-                              "Shared across bench tools. Copy and paste never send.", (unsigned)copy->length);
+        lv_label_set_text_fmt(clipboard_label, "Clipboard: %u bytes", (unsigned)copy->length);
     } else {
         lv_obj_add_state(paste_button, LV_STATE_DISABLED);
         lv_obj_add_state(clear_copy_button, LV_STATE_DISABLED);
-        lv_label_set_text(clipboard_label, "Byte clipboard is empty. Copy bytes to share across bench tools.\n"
-                                           "Paste replaces the Hex draft. Clipboard clears on restart.");
+        lv_label_set_text(clipboard_label, "Clipboard empty");
     }
 }
 
@@ -376,7 +353,6 @@ void byte_tool_stop(void)
     loading_input = false;
     mode_select = number_controls = type_select = order_select = use_hex_button = NULL;
     input_area = NULL;
-    help_label = NULL;
     result_label = NULL;
     preview_label = NULL;
     keyboard = NULL;
@@ -385,7 +361,7 @@ void byte_tool_stop(void)
 
 void byte_tool_show(lv_obj_t *parent)
 {
-    lv_obj_set_style_pad_row(parent, 14, 0);
+    lv_obj_set_style_pad_row(parent, 20, 0);
     lv_obj_t *title = lv_label_create(parent);
     lv_label_set_text(title, "Byte Lab");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
@@ -405,10 +381,6 @@ void byte_tool_show(lv_obj_t *parent)
     lv_obj_add_event_cb(mode_select, mode_changed, LV_EVENT_VALUE_CHANGED, NULL);
     button(controls, "EXAMPLE", example_clicked);
     button(controls, "CLEAR", clear_clicked);
-
-    help_label = lv_label_create(parent);
-    lv_obj_set_width(help_label, 640);
-    update_help();
 
     number_controls = lv_obj_create(parent);
     lv_obj_remove_style_all(number_controls);
@@ -432,7 +404,8 @@ void byte_tool_show(lv_obj_t *parent)
     lv_obj_add_event_cb(order_select, number_changed, LV_EVENT_VALUE_CHANGED, NULL);
 
     input_area = lv_textarea_create(parent);
-    lv_obj_set_size(input_area, 640, 120);
+    lv_obj_set_size(input_area, 640, 144);
+    lv_obj_set_style_pad_all(input_area, 18, 0);
     lv_obj_set_style_text_font(input_area, &lv_font_montserrat_28, 0);
     lv_obj_add_event_cb(input_area, input_changed, LV_EVENT_VALUE_CHANGED, NULL);
     lv_obj_add_event_cb(input_area, input_focused, LV_EVENT_FOCUSED, NULL);
@@ -452,7 +425,8 @@ void byte_tool_show(lv_obj_t *parent)
     lv_obj_set_width(clear_copy_button, 206);
     clipboard_label = lv_label_create(parent);
     lv_obj_set_width(clipboard_label, 640);
-    lv_obj_set_style_text_font(clipboard_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(clipboard_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(clipboard_label, lv_color_hex(0xAAB6C6), 0);
     update_clipboard();
 
     keyboard = lv_keyboard_create(parent);
@@ -465,27 +439,37 @@ void byte_tool_show(lv_obj_t *parent)
     lv_obj_add_event_cb(keyboard, keyboard_done, LV_EVENT_CANCEL, NULL);
     lv_obj_add_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
 
-    result_label = lv_label_create(parent);
-    lv_obj_set_width(result_label, 640);
-    lv_obj_set_style_text_font(result_label, &lv_font_montserrat_28, 0);
-    lv_label_set_long_mode(result_label, LV_LABEL_LONG_WRAP);
-
     lv_obj_t *preview = lv_obj_create(parent);
-    lv_obj_set_size(preview, 640, 225);
+    lv_obj_set_size(preview, 640, LV_SIZE_CONTENT);
+    lv_obj_set_style_min_height(preview, 200, 0);
+    lv_obj_set_style_max_height(preview, 320, 0);
+    lv_obj_set_style_bg_color(preview, lv_color_hex(0x202938), 0);
+    lv_obj_set_style_border_width(preview, 0, 0);
+    lv_obj_set_style_radius(preview, 16, 0);
+    lv_obj_set_style_pad_all(preview, 20, 0);
     preview_label = lv_label_create(preview);
     lv_obj_set_width(preview_label, LV_PCT(100));
+    lv_obj_set_style_text_font(preview_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(preview_label, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_line_space(preview_label, 6, 0);
     lv_label_set_long_mode(preview_label, LV_LABEL_LONG_WRAP);
 
-    use_hex_button = button(parent, "USE AS HEX (replaces Hex draft)", use_hex_clicked);
+    use_hex_button = button(parent, "Use as hex", use_hex_clicked);
     lv_obj_set_width(use_hex_button, 640);
 
-    lv_obj_t *footnote = lv_label_create(parent);
-    lv_obj_set_width(footnote, 640);
-    lv_label_set_text(footnote, "Offline calculation only. Inputs stay in RAM until restart.\n"
-                                "Tap the payload for keys; Done hides them. BE = big endian, LE = little endian.\n"
-                                "Integer views need 1, 2 or 4 bytes; IEEE 754 Float32 needs exactly 4.\n"
-                                "SUM8 wraps modulo 256; checksums cover every decoded byte.\n"
-                                "MODBUS: init FFFF, reflected A001, xor 0000.\n"
-                                "CRC-32: init/xor FFFFFFFF, reflected EDB88320.");
+    lv_obj_t *results = lv_obj_create(parent);
+    lv_obj_set_size(results, 640, LV_SIZE_CONTENT);
+    lv_obj_remove_flag(results, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(results, lv_color_hex(0x18212C), 0);
+    lv_obj_set_style_border_width(results, 0, 0);
+    lv_obj_set_style_radius(results, 16, 0);
+    lv_obj_set_style_pad_all(results, 20, 0);
+    result_label = lv_label_create(results);
+    lv_obj_set_width(result_label, LV_PCT(100));
+    lv_obj_set_style_text_font(result_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(result_label, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_line_space(result_label, 8, 0);
+    lv_label_set_long_mode(result_label, LV_LABEL_LONG_WRAP);
+
     apply_mode();
 }
