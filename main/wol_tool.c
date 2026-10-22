@@ -428,6 +428,7 @@ void wol_tool_show(lv_obj_t *parent, bool connected)
     lv_obj_remove_flag(result, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(result, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_bg_color(result, lv_color_hex(0x1F2937), 0);
+    lv_obj_set_style_text_color(result, lv_color_hex(0xe6edf3), 0);
     lv_obj_set_style_bg_opa(result, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(result, 0, 0);
     lv_obj_set_style_radius(result, 16, 0);
