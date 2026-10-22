@@ -5861,34 +5861,55 @@ static void show_gpio(void)
     lv_obj_t *title = lv_label_create(content);
     lv_label_set_text(title, "GPIO");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
-    lv_obj_t *help = lv_label_create(content);
-    lv_label_set_text(help, "Tap mode: INPUT (pull-up) -> LOW -> HIGH\n3.3V logic only. Do not connect GPIO directly to 5V.");
-    lv_obj_set_width(help, 640);
+    lv_obj_t *notice = lv_label_create(content);
+    lv_label_set_text(notice, "3.3V only  •  Never connect to 5V");
+    lv_obj_set_style_text_color(notice, lv_color_hex(0xFFB74D), 0);
+    lv_obj_set_style_text_font(notice, &lv_font_montserrat_28, 0);
 
     lv_obj_t *list = lv_obj_create(content);
-    lv_obj_set_size(list, 650, 930);
+    lv_obj_set_size(list, 664, 980);
     lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_all(list, 10, 0);
-    lv_obj_set_style_pad_row(list, 8, 0);
+    lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(list, 0, 0);
+    lv_obj_set_style_pad_all(list, 4, 0);
+    lv_obj_set_style_pad_row(list, 12, 0);
+    lv_obj_set_scroll_dir(list, LV_DIR_VER);
     for (size_t i = 0; i < GPIO_CONTROL_COUNT; i++) {
         gpio_control_t *control = &gpio_controls[i];
         control->mode = 0;
+        if (i == 0 || i == 6) {
+            lv_obj_t *heading = lv_label_create(list);
+            lv_label_set_text(heading, i == 0 ? "EXT" : "M-BUS");
+            lv_obj_set_style_text_font(heading, &lv_font_montserrat_28, 0);
+            lv_obj_set_style_text_color(heading, lv_color_hex(0xFFFFFF), 0);
+        }
         lv_obj_t *row = lv_obj_create(list);
-        lv_obj_set_size(row, 600, 66);
+        lv_obj_set_size(row, LV_PCT(100), 100);
         lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
         lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_style_pad_all(row, 6, 0);
+        lv_obj_set_style_bg_color(row, lv_color_hex(0x1F2937), 0);
+        lv_obj_set_style_text_color(row, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_font(row, &lv_font_montserrat_28, 0);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_set_style_radius(row, 16, 0);
+        lv_obj_set_style_pad_all(row, 12, 0);
         lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_t *name = lv_label_create(row);
-        lv_label_set_text_fmt(name, "%s  G%d", control->port, control->pin);
-        lv_obj_set_width(name, 220);
+        if (control->input_only)
+            lv_label_set_text_fmt(name, "G%d %s", control->pin,
+                                  control->pin == GPIO_NUM_17 ? "PB_IN" : "PB_OUT");
+        else
+            lv_label_set_text_fmt(name, "G%d", control->pin);
+        lv_obj_set_flex_grow(name, 1);
         control->level_label = lv_label_create(row);
-        lv_label_set_text(control->level_label, "1");
+        lv_obj_set_width(control->level_label, 56);
+        lv_obj_set_style_text_align(control->level_label, LV_TEXT_ALIGN_CENTER, 0);
+        lv_label_set_text(control->level_label, "0");
         lv_obj_t *mode = lv_button_create(row);
-        lv_obj_set_size(mode, 180, 50);
+        lv_obj_set_size(mode, 218, 72);
         lv_obj_add_event_cb(mode, gpio_mode_clicked, LV_EVENT_CLICKED, control);
         control->mode_label = lv_label_create(mode);
-        lv_label_set_text(control->mode_label, control->input_only ? "READ" : "SET");
+        lv_label_set_text(control->mode_label, control->input_only ? "READ" : "SET INPUT");
         lv_obj_center(control->mode_label);
     }
     gpio_timer = lv_timer_create(gpio_tick, 200, NULL);
