@@ -589,7 +589,9 @@ static lv_obj_t *action_button(lv_obj_t *parent, const char *text, int width,
                                lv_event_cb_t callback, lv_obj_t **label_out)
 {
     lv_obj_t *control = lv_button_create(parent);
-    lv_obj_set_size(control, width, 68);
+    lv_obj_set_size(control, width, 80);
+    lv_obj_set_style_radius(control, 14, 0);
+    lv_obj_set_style_text_font(control, &lv_font_montserrat_28, 0);
     lv_obj_add_event_cb(control, callback, LV_EVENT_CLICKED, NULL);
     lv_obj_t *label = lv_label_create(control);
     lv_label_set_text(label, text);
@@ -602,10 +604,14 @@ static lv_obj_t *action_button(lv_obj_t *parent, const char *text, int width,
 static lv_obj_t *row(lv_obj_t *parent)
 {
     lv_obj_t *container = lv_obj_create(parent);
-    lv_obj_set_size(container, 640, 78);
+    lv_obj_set_size(container, 640, 80);
+    lv_obj_set_style_bg_opa(container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(container, 0, 0);
+    lv_obj_set_style_pad_all(container, 0, 0);
+    lv_obj_set_style_pad_column(container, 12, 0);
     lv_obj_clear_flag(container, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(container, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(container, LV_FLEX_ALIGN_SPACE_EVENLY,
+    lv_obj_set_flex_align(container, LV_FLEX_ALIGN_START,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     return container;
 }
@@ -810,24 +816,16 @@ void http_tool_show(lv_obj_t *parent, bool connected, bool sd_available,
     storage_error_cb = error_cb;
 
     lv_obj_t *title = lv_label_create(parent);
-    lv_label_set_text(title, "HTTP Console");
+    lv_label_set_text(title, "HTTP Tool");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
 
-    lv_obj_t *help = lv_label_create(parent);
-    lv_obj_set_width(help, 640);
-    lv_obj_set_style_text_align(help, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(help, "HTTPS certificates are verified; redirects are shown but not followed.\n"
-                            "4 KiB body preview; 8 KiB response headers; four custom headers maximum.\n"
-                            "15-second request budget; Cancel/Home stops cooperatively, including DNS waits.\n"
-                            "SD logs are opt-in metadata only: no headers, bodies, queries, or response content.");
+    lv_obj_set_style_pad_row(parent, 12, 0);
 
     lv_obj_t *controls = row(parent);
-    action_button(controls, "", 110, method_clicked, &method_label);
-    action_button(controls, "", 110, log_clicked, &log_label);
-    action_button(controls, "CLEAR", 110, clear_clicked, NULL);
-    cancel_button = action_button(controls, "CANCEL", 110, cancel_clicked, NULL);
-    lv_obj_t *send = action_button(controls, "", 110, send_clicked, &send_label);
-    if (!connected) lv_obj_add_state(send, LV_STATE_DISABLED);
+    action_button(controls, "", 204, method_clicked, &method_label);
+    action_button(controls, "", 206, log_clicked, &log_label);
+    lv_obj_t *clear = action_button(controls, "CLEAR", 206, clear_clicked, NULL);
+    lv_obj_set_style_bg_color(clear, lv_color_hex(0x303b49), 0);
 
     url_area = lv_textarea_create(parent);
     lv_obj_set_size(url_area, 640, 72);
@@ -837,32 +835,51 @@ void http_tool_show(lv_obj_t *parent, bool connected, bool sd_available,
     lv_textarea_set_placeholder_text(url_area, "https://device.local/api");
 
     headers_area = lv_textarea_create(parent);
-    lv_obj_set_size(headers_area, 640, 132);
+    lv_obj_set_size(headers_area, 640, 120);
     lv_textarea_set_max_length(headers_area, HTTP_HEADERS_MAX);
-    lv_textarea_set_placeholder_text(headers_area, "Optional headers, one Name: value per line (maximum four)");
+    lv_textarea_set_placeholder_text(headers_area, "Headers (Name: value)");
 
     body_area = lv_textarea_create(parent);
-    lv_obj_set_size(body_area, 640, 170);
+    lv_obj_set_size(body_area, 640, 144);
     lv_textarea_set_max_length(body_area, HTTP_BODY_MAX);
-    lv_textarea_set_placeholder_text(body_area, "POST/PUT body (default Content-Type: application/json)");
+    lv_textarea_set_placeholder_text(body_area, "Body (POST / PUT)");
+
+    lv_obj_t *actions = row(parent);
+    cancel_button = action_button(actions, "CANCEL", 204, cancel_clicked, NULL);
+    lv_obj_set_style_bg_color(cancel_button, lv_color_hex(0x303b49), 0);
+    lv_obj_t *send = action_button(actions, "", 424, send_clicked, &send_label);
+    if (!connected) lv_obj_add_state(send, LV_STATE_DISABLED);
 
     request_label = lv_label_create(parent);
     lv_obj_set_width(request_label, 640);
     lv_label_set_long_mode(request_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_align(request_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_align(request_label, LV_TEXT_ALIGN_LEFT, 0);
     show_request(NULL);
 
     status_label = lv_label_create(parent);
     lv_obj_set_width(status_label, 640);
     lv_label_set_long_mode(status_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_align(status_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_align(status_label, LV_TEXT_ALIGN_LEFT, 0);
+    lv_obj_set_style_text_font(status_label, &lv_font_montserrat_28, 0);
     lv_label_set_text(status_label, http_tool_busy() ? "Finishing the previous request..." :
                                     connected ? "Ready" : "Connect to Wi-Fi first");
 
     response_area = lv_textarea_create(parent);
-    lv_obj_set_size(response_area, 640, 300);
+    lv_obj_set_size(response_area, 640, 280);
     lv_textarea_set_cursor_click_pos(response_area, false);
-    lv_textarea_set_placeholder_text(response_area, "Response body preview");
+    lv_textarea_set_placeholder_text(response_area, "Response");
+
+    lv_obj_t *fields[] = {url_area, headers_area, body_area, response_area};
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); ++i) {
+        lv_obj_set_style_text_font(fields[i], &lv_font_montserrat_28, 0);
+        lv_obj_set_style_bg_color(fields[i], lv_color_hex(0x1f2937), 0);
+        lv_obj_set_style_text_color(fields[i], lv_color_white(), 0);
+        lv_obj_set_style_text_color(fields[i], lv_color_hex(0xb7c3d0), LV_PART_TEXTAREA_PLACEHOLDER);
+        lv_obj_set_style_border_color(fields[i], lv_color_hex(0x526171), 0);
+        lv_obj_set_style_border_color(fields[i], lv_palette_main(LV_PALETTE_BLUE), LV_STATE_FOCUSED);
+        lv_obj_set_style_radius(fields[i], 12, 0);
+        lv_obj_set_style_pad_all(fields[i], 16, 0);
+    }
 
     keyboard = lv_keyboard_create(parent);
     lv_obj_set_size(keyboard, 640, 300);
