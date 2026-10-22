@@ -417,6 +417,7 @@ static lv_obj_t *label(lv_obj_t *parent, const char *text, bool small)
 {
     lv_obj_t *object = lv_label_create(parent);
     lv_obj_set_width(object, lv_pct(100));
+    lv_obj_set_style_text_color(object, lv_color_hex(small ? 0xAAB4C3 : 0xE6EDF3), 0);
     if (small) lv_obj_set_style_text_font(object, &lv_font_montserrat_14, 0);
     lv_label_set_long_mode(object, LV_LABEL_LONG_WRAP);
     lv_label_set_text(object, text);
@@ -438,11 +439,11 @@ static lv_obj_t *input(lv_obj_t *parent, const char *caption, const char *value,
 {
     lv_obj_t *block = lv_obj_create(parent);
     lv_obj_remove_style_all(block);
-    lv_obj_set_size(block, width, 96);
+    lv_obj_set_size(block, width, 110);
     lv_obj_remove_flag(block, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(block, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(block, 8, 0);
-    lv_obj_t *name = label(block, caption, true);
+    lv_obj_t *name = label(block, caption, false);
     lv_obj_set_width(name, width);
     lv_obj_t *area = lv_textarea_create(block);
     /* Preserve pasted newlines; validation rejects them instead of joining lines. */
@@ -495,7 +496,7 @@ void ntp_tool_show(lv_obj_t *parent, bool connected)
     lv_obj_set_style_pad_row(column, 20, 0);
     lv_obj_set_style_text_font(column, &lv_font_montserrat_28, 0);
     label(column, "NTP Lab", false);
-    lv_obj_t *destination = row(column, 96);
+    lv_obj_t *destination = row(column, 110);
     host_area = input(destination, "Server IPv4", saved_host, 430, 15);
     lv_textarea_set_placeholder_text(host_area, "192.168.1.10");
     port_area = input(destination, "UDP port", saved_port, 198, 5);
