@@ -32,13 +32,20 @@ _Static_assert(sizeof(key_map) / sizeof(key_map[0]) ==
                sizeof(key_controls) / sizeof(key_controls[0]) + 3,
                "Subnet keyboard map and controls must match");
 
+static void set_result_text(lv_obj_t *object, const char *text)
+{
+    lv_label_set_text(object, text);
+    if (*text) lv_obj_remove_flag(object, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(object, LV_OBJ_FLAG_HIDDEN);
+}
+
 static void calculate(void)
 {
     if (!result_label) return;
     subnet_data_t data;
     subnet_status_t status = subnet_calculate(inputs[0], inputs[1], inputs[2], &data);
-    lv_label_set_text(peer_label, "");
-    lv_label_set_text(note_label, "");
+    set_result_text(peer_label, "");
+    set_result_text(note_label, "");
     if (status != SUBNET_OK) {
         lv_label_set_text(result_label, subnet_error(status));
         return;
@@ -68,9 +75,9 @@ static void calculate(void)
             data.peer_role == SUBNET_BROADCAST_ADDRESS ? "inside; broadcast address" :
             "inside; host slot";
         snprintf(text, sizeof(text), "Peer %s:\n%s", inputs[2], membership);
-        lv_label_set_text(peer_label, text);
+        set_result_text(peer_label, text);
     } else {
-        lv_label_set_text(peer_label, "Enter a peer to check subnet membership.");
+        set_result_text(peer_label, "");
     }
     const char *note = data.prefix == 31 ?
         "/31: two endpoints on a point-to-point link; no directed broadcast." :
@@ -78,7 +85,7 @@ static void calculate(void)
         data.address_role == SUBNET_NETWORK_ADDRESS ? "The input is the network address, not a host slot." :
         data.address_role == SUBNET_BROADCAST_ADDRESS ? "The input is the broadcast address, not a host slot." :
         "The input falls in a host slot for this mask.";
-    lv_label_set_text(note_label, note);
+    set_result_text(note_label, note);
 }
 
 static void set_keyboard_visible(bool visible)
@@ -122,8 +129,8 @@ static void field_event(lv_event_t *event)
         unsigned index = (unsigned)(uintptr_t)lv_event_get_user_data(event);
         snprintf(inputs[index], sizeof(inputs[index]), "%s", lv_textarea_get_text(field));
         lv_label_set_text(result_label, "Inputs changed. Tap Calculate.");
-        lv_label_set_text(peer_label, "");
-        lv_label_set_text(note_label, "");
+        set_result_text(peer_label, "");
+        set_result_text(note_label, "");
     }
 }
 
@@ -145,7 +152,7 @@ static lv_obj_t *row(lv_obj_t *parent)
 {
     lv_obj_t *object = lv_obj_create(parent);
     lv_obj_remove_style_all(object);
-    lv_obj_set_size(object, 640, 64);
+    lv_obj_set_size(object, 640, 76);
     lv_obj_remove_flag(object, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(object, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(object, LV_FLEX_ALIGN_SPACE_BETWEEN,
@@ -153,12 +160,11 @@ static lv_obj_t *row(lv_obj_t *parent)
     return object;
 }
 
-static lv_obj_t *label(lv_obj_t *parent, const char *text, bool small)
+static lv_obj_t *label(lv_obj_t *parent, const char *text)
 {
     lv_obj_t *object = lv_label_create(parent);
     lv_obj_set_width(object, 640);
     lv_label_set_long_mode(object, LV_LABEL_LONG_WRAP);
-    if (small) lv_obj_set_style_text_font(object, &lv_font_montserrat_14, 0);
     lv_label_set_text(object, text);
     return object;
 }
@@ -166,7 +172,8 @@ static lv_obj_t *label(lv_obj_t *parent, const char *text, bool small)
 static lv_obj_t *button(lv_obj_t *parent, const char *text, int width, lv_event_cb_t callback)
 {
     lv_obj_t *object = lv_button_create(parent);
-    lv_obj_set_size(object, width, 60);
+    lv_obj_set_size(object, width, 72);
+    lv_obj_set_style_radius(object, 14, 0);
     lv_obj_t *caption = lv_label_create(object);
     lv_label_set_text(caption, text);
     lv_obj_center(caption);
@@ -195,19 +202,19 @@ void subnet_tool_show(lv_obj_t *parent)
     lv_obj_set_size(column, 640, LV_SIZE_CONTENT);
     lv_obj_remove_flag(column, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(column, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(column, 12, 0);
+    lv_obj_set_style_pad_row(column, 16, 0);
     lv_obj_set_style_text_font(column, &lv_font_montserrat_28, 0);
-    label(column, "Subnet Lab", false);
-    label(column, "IPv4 subnet calculator. Use a prefix (24 or /24) or netmask\n"
-                  "(255.255.255.0). Peer comparison is optional.", true);
+    label(column, "Subnet Lab");
     static const char *const names[] = {"IPv4 address", "Prefix / netmask", "Peer (optional)"};
     for (unsigned i = 0; i < 3; i++) {
         lv_obj_t *field_row = row(column);
         lv_obj_t *caption = lv_label_create(field_row);
-        lv_obj_set_width(caption, 270);
+        lv_obj_set_width(caption, 228);
         lv_label_set_text(caption, names[i]);
         fields[i] = lv_textarea_create(field_row);
-        lv_obj_set_size(fields[i], 354, 64);
+        lv_obj_set_size(fields[i], 400, 76);
+        lv_obj_set_style_radius(fields[i], 12, 0);
+        lv_obj_set_style_pad_all(fields[i], 16, 0);
         /* Preserve pasted newlines; the address/mask parser rejects them. */
         lv_textarea_set_max_length(fields[i], SUBNET_INPUT_MAX);
         lv_textarea_set_text(fields[i], inputs[i]);
@@ -226,11 +233,24 @@ void subnet_tool_show(lv_obj_t *parent)
     lv_obj_add_event_cb(keyboard, keyboard_done, LV_EVENT_READY, NULL);
     lv_obj_add_event_cb(keyboard, keyboard_done, LV_EVENT_CANCEL, NULL);
     set_keyboard_visible(false);
-    result_label = label(column, "", false);
-    peer_label = label(column, "", false);
-    note_label = label(column, "", true);
-    label(column, "Offline math only. Inputs stay in RAM until restart. Host slots do not\n"
-                  "exclude special-use addresses or confirm availability. Membership uses\n"
-                  "this mask only; routing, VLANs and the peer's settings still matter.", true);
+    lv_obj_t *results = lv_obj_create(column);
+    lv_obj_set_size(results, 640, LV_SIZE_CONTENT);
+    lv_obj_remove_flag(results, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(results, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_bg_color(results, lv_color_hex(0x1f2937), 0);
+    lv_obj_set_style_bg_opa(results, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(results, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_border_width(results, 0, 0);
+    lv_obj_set_style_radius(results, 16, 0);
+    lv_obj_set_style_pad_all(results, 20, 0);
+    lv_obj_set_style_pad_row(results, 16, 0);
+    result_label = label(results, "");
+    lv_obj_set_width(result_label, 600);
+    lv_obj_set_style_text_line_space(result_label, 10, 0);
+    peer_label = label(results, "");
+    lv_obj_set_width(peer_label, 600);
+    lv_obj_set_style_text_color(peer_label, lv_color_hex(0x64b5f6), 0);
+    note_label = label(results, "");
+    lv_obj_set_width(note_label, 600);
     calculate();
 }
