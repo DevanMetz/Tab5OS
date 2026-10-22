@@ -149,6 +149,11 @@ static lv_obj_t *lv_list_add_button(lv_obj_t *parent, const char *symbol, const 
 static void lv_list_add_text(lv_obj_t *parent, const char *text) { (void)lv_list_add_button(parent, NULL, text); }
 static void lv_obj_add_event_cb(lv_obj_t *object, lv_event_cb_t callback, int event, void *data)
 { assert(object >= rows && object < rows + row_count && event == LV_EVENT_CLICKED); object->callback = callback; object->path = data; }
+/* Rendering is controlled here; the firmware build checks the LVGL styles. */
+static void files_style_heading(lv_obj_t *object) { assert(object == &title); }
+static void files_style_list(lv_obj_t *object) { assert(object == &list); }
+#define files_add_button lv_list_add_button
+#define files_add_text lv_list_add_text
 #define DIR fixture_dir_t
 #define dirent fixture_dirent
 #define opendir fixture_open
@@ -197,7 +202,7 @@ static bool unchanged(void)
 static bool text_contains(const char *text)
 { for (unsigned i = 0; i < row_count; i++) if (strstr(rows[i].text, text)) return true; return false; }
 static unsigned entries(void)
-{ unsigned count = 0; for (unsigned i = 0; i < row_count; i++) if (rows[i].symbol && strcmp(rows[i].text, "..")) count++; return count; }
+{ unsigned count = 0; for (unsigned i = 0; i < row_count; i++) if (rows[i].symbol && strcmp(rows[i].text, "Up")) count++; return count; }
 static bool paths_valid(void)
 {
     for (unsigned i = 0; i < row_count; i++) {
@@ -206,7 +211,7 @@ static bool paths_valid(void)
         bool owned = false;
         for (size_t j = 0; j < file_path_count; j++) if (row->path == file_paths[j]) owned = true;
         if (!owned || strlen(row->path) >= FILES_PATH_BYTES) return false;
-        if (strcmp(row->text, "..")) {
+        if (strcmp(row->text, "Up")) {
             const char *name = strrchr(row->path, '/'); if (!name || strcmp(name + 1, row->text)) return false;
         }
     }
@@ -250,7 +255,7 @@ int main(void)
     snprintf(physical, sizeof(physical), ".files_directory_%d", fixture_pid());
     struct stat existing; assert(stat(physical, &existing) != 0 && errno == ENOENT);
     assert(make_directory(physical) == 0); owns_directory = true;
-    ordinary_case("empty", 0, false, NORMAL); ordinary_case("files-and-directory", 2, true, NORMAL);
+    ordinary_case("empty", 0, false, NORMAL); assert(text_contains("Empty folder")); ordinary_case("files-and-directory", 2, true, NORMAL);
     bool found_child = false;
     for (unsigned i = 0; i < row_count; i++) if (!strcmp(rows[i].text, "CHILD") && rows[i].symbol && !strcmp(rows[i].symbol, LV_SYMBOL_DIRECTORY)) found_child = true;
     assert(found_child);

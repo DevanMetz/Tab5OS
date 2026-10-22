@@ -4290,6 +4290,53 @@ static void file_clicked(lv_event_t *event)
     else open_file(path);
 }
 
+/* Files owns these styles; do not change the shared list/button defaults. */
+static void files_style_heading(lv_obj_t *heading)
+{
+    lv_obj_set_width(heading, 640);
+    lv_label_set_long_mode(heading, LV_LABEL_LONG_DOT);
+    lv_obj_set_style_text_color(heading, lv_color_hex(0xffffff), 0);
+}
+
+static void files_style_list(lv_obj_t *list)
+{
+    lv_obj_set_style_bg_color(list, lv_color_hex(0x10141f), 0);
+    lv_obj_set_style_bg_opa(list, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(list, 0, 0);
+    lv_obj_set_style_pad_all(list, 0, 0);
+    lv_obj_set_style_pad_row(list, 12, 0);
+    lv_obj_set_style_text_font(list, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(list, lv_color_hex(0xffffff), 0);
+}
+
+static lv_obj_t *files_add_button(lv_obj_t *list, const char *icon, const char *text)
+{
+    lv_obj_t *row = lv_list_add_button(list, icon, text);
+    lv_obj_set_style_min_height(row, 80, 0);
+    lv_obj_set_style_pad_all(row, 20, 0);
+    lv_obj_set_style_pad_column(row, 20, 0);
+    lv_obj_set_style_radius(row, 16, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_bg_color(row, lv_color_hex(0x20283a), 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(row, lv_color_hex(0x1565c0), LV_STATE_PRESSED);
+    lv_obj_set_style_text_color(row, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_text_font(row, &lv_font_montserrat_28, 0);
+    lv_obj_t *label = lv_obj_get_child(row, -1);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    return row;
+}
+
+static void files_add_text(lv_obj_t *list, const char *text)
+{
+    lv_obj_t *message = lv_list_add_text(list, text);
+    lv_obj_set_style_bg_opa(message, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_text_color(message, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_text_font(message, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_pad_all(message, 20, 0);
+    lv_label_set_long_mode(message, LV_LABEL_LONG_WRAP);
+}
+
 static void show_files(const char *path)
 {
     if (path) {
@@ -4300,24 +4347,26 @@ static void show_files(const char *path)
     file_path_count = 0;
 
     lv_obj_t *title = lv_label_create(content);
-    lv_label_set_text_fmt(title, "Files  %s", path ? path : "");
+    lv_label_set_text_fmt(title, "%s", path ? path : "Files");
+    files_style_heading(title);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
 
     lv_obj_t *list = lv_list_create(content);
     lv_obj_set_size(list, 640, 940);
+    files_style_list(list);
 
     if (!path) {
-        lv_obj_t *back = lv_list_add_button(list, LV_SYMBOL_LEFT, "Back to apps");
+        lv_obj_t *back = files_add_button(list, LV_SYMBOL_LEFT, "Back to apps");
         lv_obj_add_event_cb(back, home_clicked, LV_EVENT_CLICKED, NULL);
         if (internal_ready) {
-            lv_obj_t *item = lv_list_add_button(list, LV_SYMBOL_DIRECTORY, "Internal storage");
+            lv_obj_t *item = files_add_button(list, LV_SYMBOL_DIRECTORY, "Internal storage");
             lv_obj_add_event_cb(item, file_clicked, LV_EVENT_CLICKED, INTERNAL_PATH);
         }
         if (sd_ready) {
-            lv_obj_t *item = lv_list_add_button(list, LV_SYMBOL_SD_CARD, "SD card");
+            lv_obj_t *item = files_add_button(list, LV_SYMBOL_SD_CARD, "SD card");
             lv_obj_add_event_cb(item, file_clicked, LV_EVENT_CLICKED, SD_PATH);
         }
-        if (!internal_ready && !sd_ready) lv_list_add_text(list, "No storage mounted");
+        if (!internal_ready && !sd_ready) files_add_text(list, "No storage mounted");
         return;
     }
 
@@ -4326,7 +4375,7 @@ static void show_files(const char *path)
     char *slash = strrchr(parent, '/');
     if (slash && slash != parent) *slash = '\0';
     else parent[0] = '\0';
-    lv_obj_t *up = lv_list_add_button(list, LV_SYMBOL_UP, "..");
+    lv_obj_t *up = files_add_button(list, LV_SYMBOL_UP, "Up");
     if (parent[0]) {
         snprintf(file_paths[file_path_count], sizeof(file_paths[0]), "%s", parent);
         lv_obj_add_event_cb(up, file_clicked, LV_EVENT_CLICKED, file_paths[file_path_count++]);
@@ -4342,9 +4391,10 @@ static void show_files(const char *path)
         if (sd_directory) sd_record_error(error);
         char message[96];
         snprintf(message, sizeof(message), "Could not open directory: %s", strerror(error));
-        lv_list_add_text(list, message);
+        files_add_text(list, message);
         return;
     }
+    size_t first_entry = file_path_count;
     int error = 0;
     size_t skipped = 0;
     while (file_path_count < sizeof(file_paths) / sizeof(file_paths[0])) {
@@ -4368,7 +4418,7 @@ static void show_files(const char *path)
         memcpy(full + path_len + 1, entry->d_name, name_len + 1);
         struct stat info;
         bool is_dir = stat(full, &info) == 0 && S_ISDIR(info.st_mode);
-        lv_obj_t *item = lv_list_add_button(list, is_dir ? LV_SYMBOL_DIRECTORY : LV_SYMBOL_FILE, entry->d_name);
+        lv_obj_t *item = files_add_button(list, is_dir ? LV_SYMBOL_DIRECTORY : LV_SYMBOL_FILE, entry->d_name);
         lv_obj_add_event_cb(item, file_clicked, LV_EVENT_CLICKED, full);
     }
     errno = 0;
@@ -4377,14 +4427,16 @@ static void show_files(const char *path)
         if (sd_directory) sd_record_error(error);
         char message[96];
         snprintf(message, sizeof(message), "Directory listing incomplete: %s", strerror(error));
-        lv_list_add_text(list, message);
+        files_add_text(list, message);
     }
+    if (!error && !skipped && file_path_count == first_entry)
+        files_add_text(list, "Empty folder");
     if (file_path_count == sizeof(file_paths) / sizeof(file_paths[0]))
-        lv_list_add_text(list, "Directory entry limit reached");
+        files_add_text(list, "Directory entry limit reached");
     if (skipped) {
         char message[96];
         snprintf(message, sizeof(message), "Skipped %u paths that exceed the path limit", (unsigned)skipped);
-        lv_list_add_text(list, message);
+        files_add_text(list, message);
     }
 }
 
