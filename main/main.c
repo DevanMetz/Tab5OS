@@ -7208,6 +7208,7 @@ static void show_cycling(void)
     lv_obj_set_style_border_width(dashboard, 0, 0);
     lv_obj_set_style_pad_all(dashboard, 0, 0);
     lv_obj_set_style_pad_row(dashboard, 20, 0);
+    lv_obj_set_style_text_color(dashboard, lv_color_hex(0xE6EDF3), 0);
     lv_obj_clear_flag(dashboard, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(dashboard, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(dashboard, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -7215,6 +7216,7 @@ static void show_cycling(void)
     lv_label_set_text(title, "Cycling");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
     ride_status = lv_label_create(dashboard);
+    lv_obj_set_style_text_color(ride_status, lv_color_hex(0xAAB4C3), 0);
     lv_obj_set_width(ride_status, 640);
     lv_obj_set_style_text_font(ride_status, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_align(ride_status, LV_TEXT_ALIGN_CENTER, 0);
@@ -7243,6 +7245,7 @@ static void show_cycling(void)
     lv_obj_set_style_text_color(ride_hr_label, lv_color_hex(0xFF8095), 0);
 
     ride_stats = lv_label_create(dashboard);
+    lv_obj_set_style_text_color(ride_stats, lv_color_hex(0xAAB4C3), 0);
     lv_obj_set_width(ride_stats, 640);
     lv_obj_set_style_text_font(ride_stats, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_line_space(ride_stats, 14, 0);
@@ -7270,6 +7273,7 @@ static void show_cycling(void)
     lv_obj_set_size(start, 640, 88);
     ride_button_label = lv_obj_get_child(start, 0);
     ride_history = lv_label_create(dashboard);
+    lv_obj_set_style_text_color(ride_history, lv_color_hex(0xAAB4C3), 0);
     lv_obj_set_width(ride_history, 640);
     lv_obj_set_style_text_font(ride_history, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_align(ride_history, LV_TEXT_ALIGN_CENTER, 0);
