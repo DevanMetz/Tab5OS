@@ -130,19 +130,15 @@ static void render_rx_capture(void)
         else lv_obj_add_state(rx_copy_button, LV_STATE_DISABLED);
     }
     if (rx_capture_state == RX_CAPTURE_EMPTY) {
-        lv_label_set_text(rx_info_label, "RX capture is empty. Start Serial, then CAPTURE RX before sending.\n"
-                                       "Freeze to copy up to 128 bytes. Frame boundaries are not detected.");
+        lv_label_set_text(rx_info_label, "RX capture is empty");
         return;
     }
     const char *state = rx_capture_state == RX_CAPTURE_ACTIVE ? "Collecting" :
                         rx_capture_state == RX_CAPTURE_FROZEN ? "Frozen" :
                         rx_capture_state == RX_CAPTURE_OVERFLOW ? "Overflow" : "Read failed";
-    const char *hint = rx_capture_state == RX_CAPTURE_ACTIVE ? "FREEZE RX ends this window. COPY RX is available after freezing." :
-                       rx_capture_state == RX_CAPTURE_FROZEN ? "Raw bytes; verify that the window includes the entire intended reply." :
-                       rx_capture_state == RX_CAPTURE_OVERFLOW ? "Window exceeded 128 bytes; no partial copy. Start a new capture." :
-                       "RX could not be drained; no copy is available. Start a new capture.";
+    const char *hint = rx_capture_state == RX_CAPTURE_OVERFLOW ? "\nWindow exceeded 128 bytes; capture again." : "";
     static const char parity_letters[] = "NEO";
-    lv_label_set_text_fmt(rx_info_label, "%s RX | %s %u 8%c%u | %u/128 bytes\n%s", state,
+    lv_label_set_text_fmt(rx_info_label, "%s RX | %s %u 8%c%u | %u/128 bytes%s", state,
         rx_capture_rs485 ? "RS-485" : "UART", rx_capture_baud,
         parity_letters[rx_capture_parity], rx_capture_stop + 1,
         (unsigned)rx_capture_length, hint);
@@ -192,10 +188,10 @@ static void render_tx_info(void)
     uart_tx_status_t status = read_draft(&data);
     if (status == UART_TX_OK) {
         static const char *const suffix_names[] = {"no suffix", "LF appended", "CR appended", "CRLF appended"};
-        lv_label_set_text_fmt(tx_info_label, "Ready: %u TX bytes | %s | %s. SEND transmits once.",
+        lv_label_set_text_fmt(tx_info_label, "Ready: %u TX bytes | %s | %s.",
                               (unsigned)data.length, tx_mode == UART_TX_HEX ? "Hex" : "ASCII",
                               suffix_names[data.ending]);
-    } else lv_label_set_text(tx_info_label, uart_tx_error(status));
+    } else lv_label_set_text(tx_info_label, status == UART_TX_EMPTY ? "0 / 256 TX bytes" : uart_tx_error(status));
     if (send_button) {
         if (driver_running && status == UART_TX_OK) lv_obj_remove_state(send_button, LV_STATE_DISABLED);
         else lv_obj_add_state(send_button, LV_STATE_DISABLED);
@@ -421,16 +417,14 @@ static esp_err_t start_driver(bool route_pins)
 
 static void update_controls(void)
 {
-    if (title_label) lv_label_set_text(title_label, rs485_interface ? "Onboard RS-485 Terminal" :
-                                                                       "UART1 Terminal");
+    if (title_label) lv_label_set_text(title_label, rs485_interface ? "Serial / RS-485" : "Serial / UART");
     if (help_label) {
         if (rs485_interface) {
-            lv_label_set_text(help_label, "J7: pin 1 GND, pin 3 A, pin 4 B. Leave VIN pin 2 disconnected on USB.\n"
-                                          "The 120-ohm terminator is the physical switch; enable it only at a bus end.\n"
-                                          "SIT3088 direction is automatic. Stop returns to receive-safe/high-impedance GPIO.");
+            lv_label_set_text(help_label, "J7: 1 GND / 3 A / 4 B; leave VIN 2 disconnected on USB.\n"
+                                          "120-ohm switch: bus ends only. Automatic direction.");
         } else {
-            lv_label_set_text(help_label, "M5-Bus TX G47 / RX G48, 3.3 V logic only. Share ground.\n"
-                                          "Pins are high-impedance while stopped. Settings are 8 data bits, no flow control.");
+            lv_label_set_text(help_label, "TX G47 / RX G48 / 3.3 V / common GND / 8 data bits\n"
+                                          "No flow control; pins released when stopped.");
         }
     }
     if (interface_label) lv_label_set_text(interface_label, rs485_interface ? "Link\nRS-485" : "Link\nUART");
@@ -852,7 +846,12 @@ static lv_obj_t *small_button(lv_obj_t *parent, const char *text, int width,
 {
     lv_obj_t *control = lv_button_create(parent);
     lv_obj_set_size(control, width, 72);
+    lv_obj_set_style_pad_all(control, 6, 0);
+    lv_obj_set_style_radius(control, 12, 0);
+    lv_obj_set_style_bg_color(control, lv_color_hex(0x202938), 0);
+    lv_obj_set_style_shadow_width(control, 0, 0);
     lv_obj_set_style_text_font(control, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(control, lv_color_hex(0xE6EDF3), 0);
     lv_obj_add_event_cb(control, callback, LV_EVENT_CLICKED, user_data);
     lv_obj_t *label = lv_label_create(control);
     lv_label_set_text(label, text);
@@ -867,6 +866,7 @@ static lv_obj_t *row(lv_obj_t *parent, int height)
     lv_obj_t *container = lv_obj_create(parent);
     lv_obj_remove_style_all(container);
     lv_obj_set_size(container, 640, height);
+    lv_obj_remove_flag(container, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(container, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(container, LV_FLEX_ALIGN_SPACE_BETWEEN,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -877,12 +877,13 @@ static lv_obj_t *dropdown(lv_obj_t *parent, const char *caption, const char *opt
 {
     lv_obj_t *block = lv_obj_create(parent);
     lv_obj_remove_style_all(block);
-    lv_obj_set_size(block, 310, 82);
+    lv_obj_set_size(block, 310, 106);
     lv_obj_remove_flag(block, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(block, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(block, 4, 0);
+    lv_obj_set_style_pad_row(block, 10, 0);
     lv_obj_t *label = lv_label_create(block);
-    lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xAAB4C3), 0);
     lv_label_set_text(label, caption);
     lv_obj_t *select = lv_dropdown_create(block);
     lv_obj_set_size(select, 310, 60);
@@ -904,13 +905,15 @@ void uart_tool_show(lv_obj_t *parent, bool available,
     output_text = heap_caps_calloc(1, UART_TOOL_OUTPUT_CAPACITY,
                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
-    lv_obj_set_style_pad_row(parent, 10, 0);
+    lv_obj_set_style_pad_row(parent, 12, 0);
     title_label = lv_label_create(parent);
     lv_obj_set_style_text_font(title_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(title_label, lv_color_hex(0xE6EDF3), 0);
 
     help_label = lv_label_create(parent);
     lv_obj_set_width(help_label, 640);
-    lv_obj_set_style_text_font(help_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(help_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(help_label, lv_color_hex(0xAAB4C3), 0);
     lv_obj_set_style_text_align(help_label, LV_TEXT_ALIGN_CENTER, 0);
 
     lv_obj_t *settings = row(parent, 76);
@@ -920,15 +923,21 @@ void uart_tool_show(lv_obj_t *parent, bool available,
     small_button(settings, "", 148, setting_clicked, (void *)2, &stop_label);
 
     lv_obj_t *actions = row(parent, 76);
-    small_button(actions, "", 118, start_clicked, NULL, &start_label);
+    lv_obj_t *start_button = small_button(actions, "", 118, start_clicked, NULL, &start_label);
+    lv_obj_set_style_bg_color(start_button, lv_color_hex(0x5E35B1), 0);
     small_button(actions, "LINE\nTEST", 118, loopback_clicked, NULL, NULL);
     small_button(actions, "CLEAR", 118, clear_clicked, NULL, NULL);
     small_button(actions, "", 118, view_clicked, NULL, &view_label);
     small_button(actions, "", 118, log_clicked, NULL, &log_label);
 
     output_area = lv_textarea_create(parent);
-    lv_obj_set_size(output_area, 640, 240);
-    lv_obj_set_style_text_font(output_area, &lv_font_montserrat_14, 0);
+    lv_obj_set_size(output_area, 640, 280);
+    lv_obj_set_style_text_font(output_area, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_bg_color(output_area, lv_color_hex(0x18202B), 0);
+    lv_obj_set_style_text_color(output_area, lv_color_hex(0xE6EDF3), 0);
+    lv_obj_set_style_border_color(output_area, lv_color_hex(0x364152), 0);
+    lv_obj_set_style_pad_all(output_area, 16, 0);
+    lv_textarea_set_placeholder_text(output_area, "No serial traffic");
     lv_textarea_set_text(output_area, "");
     lv_textarea_set_cursor_click_pos(output_area, false);
 
@@ -937,28 +946,31 @@ void uart_tool_show(lv_obj_t *parent, bool available,
     rx_copy_button = small_button(capture_row, "COPY RX", 200, copy_rx_clicked, NULL, NULL);
     small_button(capture_row, "CLEAR RX", 200, clear_rx_clicked, NULL, NULL);
     rx_info_label = lv_label_create(parent);
-    lv_obj_set_size(rx_info_label, 640, 42);
-    lv_obj_set_style_text_font(rx_info_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_size(rx_info_label, 640, LV_SIZE_CONTENT);
+    lv_obj_set_style_text_font(rx_info_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(rx_info_label, lv_color_hex(0xAAB4C3), 0);
 
-    lv_obj_t *tx_options = row(parent, 82);
-    tx_mode_select = dropdown(tx_options, "Transmit format", "Literal ASCII\nHex byte pairs", tx_mode_changed);
-    ending_select = dropdown(tx_options, "Append to ASCII", "None\nLF (0A)\nCR (0D)\nCRLF (0D 0A)", ending_changed);
+    lv_obj_t *tx_options = row(parent, 106);
+    tx_mode_select = dropdown(tx_options, "TX format", "Literal ASCII\nHex byte pairs", tx_mode_changed);
+    ending_select = dropdown(tx_options, "ASCII ending", "None\nLF (0A)\nCR (0D)\nCRLF (0D 0A)", ending_changed);
     tx_info_label = lv_label_create(parent);
-    lv_obj_set_size(tx_info_label, 640, 42);
-    lv_obj_set_style_text_font(tx_info_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_size(tx_info_label, 640, LV_SIZE_CONTENT);
+    lv_obj_set_style_text_font(tx_info_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(tx_info_label, lv_color_hex(0xAAB4C3), 0);
 
     input_area = lv_textarea_create(parent);
     lv_obj_set_size(input_area, 640, 96);
     lv_obj_set_style_text_font(input_area, &lv_font_montserrat_28, 0);
-    lv_textarea_set_placeholder_text(input_area, "TX draft; line endings are explicit");
+    lv_textarea_set_placeholder_text(input_area, "Transmit bytes");
     lv_obj_add_event_cb(input_area, input_event, LV_EVENT_ALL, NULL);
     lv_obj_t *send_row = row(parent, 76);
     small_button(send_row, "PREV", 200, previous_clicked, NULL, NULL);
     small_button(send_row, "PASTE", 200, paste_clicked, NULL, NULL);
     send_button = small_button(send_row, "SEND", 200, send_clicked, NULL, NULL);
+    lv_obj_set_style_bg_color(send_button, lv_color_hex(0x5E35B1), 0);
 
     keyboard = lv_keyboard_create(parent);
-    lv_obj_set_size(keyboard, 640, 240);
+    lv_obj_set_size(keyboard, 640, 280);
     lv_keyboard_set_map(keyboard, LV_KEYBOARD_MODE_USER_1, hex_keys, hex_controls);
     lv_keyboard_set_textarea(keyboard, input_area);
     lv_obj_add_event_cb(keyboard, keyboard_done, LV_EVENT_READY, NULL);
@@ -966,18 +978,14 @@ void uart_tool_show(lv_obj_t *parent, bool available,
     lv_obj_add_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
 
     status_label = lv_label_create(parent);
-    lv_obj_set_size(status_label, 640, 42);
-    lv_obj_set_style_text_font(status_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_size(status_label, 640, LV_SIZE_CONTENT);
+    lv_obj_set_style_text_font(status_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(status_label, lv_color_hex(0xAAB4C3), 0);
     lv_obj_set_style_text_align(status_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(status_label, output_text ? "Ready; press START to connect" :
+    lv_label_set_text(status_label, output_text ? "Disconnected" :
                                                 "Output buffer allocation failed");
     receive_timer = lv_timer_create(receive_tick, 20, NULL);
     if (!receive_timer) lv_label_set_text(status_label, "Receive timer allocation failed. Return Home and reopen.");
-    lv_obj_t *note = lv_label_create(parent);
-    lv_obj_set_width(note, 640);
-    lv_obj_set_style_text_font(note, &lv_font_montserrat_14, 0);
-    lv_label_set_text(note, "256 TX bytes including suffix; no escape expansion. VIEW changes new display lines only.\n"
-                            "PREV restores sent bytes/format. PASTE replaces Hex TX. Drafts/history stay in RAM.");
     apply_tx_mode();
     update_controls();
 }
