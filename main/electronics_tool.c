@@ -26,9 +26,7 @@ static lv_obj_t *unknown_select;
 static lv_obj_t *field_rows[3];
 static lv_obj_t *field_labels[3];
 static lv_obj_t *fields[3];
-static lv_obj_t *help_label;
 static lv_obj_t *result_label;
-static lv_obj_t *note_label;
 static lv_obj_t *keyboard;
 static lv_obj_t *keys_label;
 static bool updating;
@@ -152,22 +150,6 @@ static void update_mode(void)
         {"Supply (V)", "LED forward (V)", "LED current (mA)"},
         {"Resistance (ohm)", "Capacitance (uF)", ""},
     };
-    static const char *const help[] = {
-        "Find one unknown from two values. V = I x R; P = V x I.",
-        "Vin -- Top R -- Vout -- Bottom R -- GND\nOutput is measured across the bottom resistor, with no load.",
-        "Supply -- series resistor -- one LED -- GND\nUse the LED's forward voltage at your intended current.",
-        "Vin -- R -- Vout; C from Vout to GND.\nCapacitance is in microfarads: 0.1 uF = 100 nF.",
-    };
-    static const char *const notes[] = {
-        "Ideal DC resistor calculation. Inputs are retained until restart.\nDecimal inputs: 0.000000001 to 1000000000000; up to 24 characters.",
-        "A connected load changes Vout. Check actual component tolerances.\nDecimal inputs: 0.000000001 to 1000000000000; up to 24 characters.",
-        "Choose an equal or higher resistance and a power rating above the\n"
-        "calculated dissipation. Values assume a fixed LED forward voltage.\n"
-        "Decimal inputs: 0.000000001 to 1000000000000; up to 24 characters.",
-        "Ideal RC low-pass: zero source impedance and no output load.\n"
-        "Settling means within 1% of the final step value. Actual component\n"
-        "tolerances and loading change the result. Inputs stay in RAM.",
-    };
     updating = true;
     for (unsigned i = 0; i < MODE_COUNT; i++) {
         if (i == mode) lv_obj_add_state(mode_buttons[i], LV_STATE_CHECKED);
@@ -187,8 +169,6 @@ static void update_mode(void)
     } else {
         lv_obj_remove_flag(field_rows[2], LV_OBJ_FLAG_HIDDEN);
     }
-    lv_label_set_text(help_label, help[mode]);
-    lv_label_set_text(note_label, notes[mode]);
     lv_keyboard_set_textarea(keyboard, fields[0]);
     updating = false;
     calculate();
@@ -223,7 +203,8 @@ static lv_obj_t *button(lv_obj_t *parent, const char *text, int width,
                         lv_event_cb_t callback, void *user_data)
 {
     lv_obj_t *object = lv_button_create(parent);
-    lv_obj_set_size(object, width, 60);
+    lv_obj_set_size(object, width, 72);
+    lv_obj_set_style_radius(object, 14, 0);
     lv_obj_t *label = lv_label_create(object);
     lv_label_set_text(label, text);
     lv_obj_center(label);
@@ -231,12 +212,11 @@ static lv_obj_t *button(lv_obj_t *parent, const char *text, int width,
     return object;
 }
 
-static lv_obj_t *label(lv_obj_t *parent, const char *text, bool small)
+static lv_obj_t *label(lv_obj_t *parent, const char *text)
 {
     lv_obj_t *object = lv_label_create(parent);
     lv_obj_set_width(object, 640);
     lv_label_set_long_mode(object, LV_LABEL_LONG_WRAP);
-    if (small) lv_obj_set_style_text_font(object, &lv_font_montserrat_14, 0);
     lv_label_set_text(object, text);
     return object;
 }
@@ -248,9 +228,7 @@ void electronics_tool_stop(void)
     keys_label = NULL;
     unknown_row = NULL;
     unknown_select = NULL;
-    help_label = NULL;
     result_label = NULL;
-    note_label = NULL;
     for (unsigned i = 0; i < MODE_COUNT; i++) mode_buttons[i] = NULL;
     for (unsigned i = 0; i < 3; i++) {
         field_rows[i] = NULL;
@@ -269,45 +247,62 @@ void electronics_tool_show(lv_obj_t *parent)
     lv_obj_set_size(column, 640, LV_SIZE_CONTENT);
     lv_obj_remove_flag(column, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(column, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(column, 12, 0);
+    lv_obj_set_style_pad_row(column, 20, 0);
     lv_obj_set_style_text_font(column, &lv_font_montserrat_28, 0);
-    label(column, "Electronics Calculator", false);
+    label(column, "Electronics");
 
     lv_obj_t *modes = NULL;
     static const char *const names[] = {"Ohm's law", "Divider", "LED resistor", "RC filter"};
     for (unsigned i = 0; i < MODE_COUNT; i++) {
-        if (i % 2 == 0) modes = row(column, 60);
+        if (i % 2 == 0) modes = row(column, 72);
         mode_buttons[i] = button(modes, names[i], 310, mode_clicked, (void *)(uintptr_t)i);
+        lv_obj_set_style_bg_color(mode_buttons[i], lv_color_hex(0x202938), 0);
         lv_obj_set_style_bg_color(mode_buttons[i], lv_color_hex(0x00695C), LV_STATE_CHECKED);
+        lv_obj_set_style_border_width(mode_buttons[i], 2, LV_STATE_CHECKED);
+        lv_obj_set_style_border_color(mode_buttons[i], lv_color_hex(0x00BFA5), LV_STATE_CHECKED);
     }
-    unknown_row = row(column, 60);
+    unknown_row = row(column, 72);
     lv_obj_t *solve = lv_label_create(unknown_row);
     lv_label_set_text(solve, "Solve for");
     unknown_select = lv_dropdown_create(unknown_row);
-    lv_obj_set_size(unknown_select, 400, 60);
+    lv_obj_set_size(unknown_select, 400, 72);
+    lv_obj_set_style_pad_ver(unknown_select, 18, 0);
+    lv_obj_set_style_text_font(lv_dropdown_get_list(unknown_select), &lv_font_montserrat_28, 0);
+    lv_obj_set_style_pad_ver(lv_dropdown_get_list(unknown_select), 12, 0);
+    lv_obj_set_style_text_line_space(lv_dropdown_get_list(unknown_select), 20, 0);
     lv_dropdown_set_options(unknown_select, "Voltage (V)\nCurrent (mA)\nResistance (ohm)");
     lv_dropdown_set_selected(unknown_select, unknown);
     lv_obj_add_event_cb(unknown_select, unknown_changed, LV_EVENT_VALUE_CHANGED, NULL);
-    help_label = label(column, "", true);
 
     for (unsigned i = 0; i < 3; i++) {
-        field_rows[i] = row(column, 64);
+        field_rows[i] = row(column, 76);
         field_labels[i] = lv_label_create(field_rows[i]);
         lv_obj_set_width(field_labels[i], 275);
         fields[i] = lv_textarea_create(field_rows[i]);
-        lv_obj_set_size(fields[i], 354, 64);
+        lv_obj_set_size(fields[i], 354, 76);
+        lv_obj_set_style_pad_all(fields[i], 18, 0);
+        lv_obj_set_style_radius(fields[i], 12, 0);
         /* Preserve pasted newlines; the decimal parser rejects them. */
         lv_textarea_set_max_length(fields[i], ELECTRONICS_INPUT_MAX + 1);
         lv_obj_add_event_cb(fields[i], field_event, LV_EVENT_ALL, (void *)(uintptr_t)i);
     }
 
-    lv_obj_t *actions = row(column, 60);
+    lv_obj_t *actions = row(column, 72);
     button(actions, "Calculate", 310, calculate_clicked, NULL);
     lv_obj_t *keys = button(actions, "Hide keys", 310, keys_clicked, NULL);
+    lv_obj_set_style_bg_color(keys, lv_color_hex(0x202938), 0);
     keys_label = lv_obj_get_child(keys, 0);
-    result_label = label(column, "", false);
-    lv_obj_set_height(result_label, 160);
-    note_label = label(column, "", true);
+    lv_obj_t *results = lv_obj_create(column);
+    lv_obj_set_size(results, 640, LV_SIZE_CONTENT);
+    lv_obj_remove_flag(results, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(results, lv_color_hex(0x202938), 0);
+    lv_obj_set_style_text_color(results, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_border_width(results, 0, 0);
+    lv_obj_set_style_radius(results, 14, 0);
+    lv_obj_set_style_pad_all(results, 24, 0);
+    result_label = label(results, "");
+    lv_obj_set_width(result_label, 592);
+    lv_obj_set_style_text_line_space(result_label, 12, 0);
     keyboard = lv_keyboard_create(column);
     lv_obj_set_size(keyboard, 640, 246);
     lv_keyboard_set_mode(keyboard, LV_KEYBOARD_MODE_NUMBER);
