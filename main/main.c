@@ -5854,6 +5854,7 @@ static void show_clock(void)
         lv_obj_set_style_radius(card, 20, 0);
         lv_obj_set_style_pad_all(card, 20, 0);
         alarm_time_labels[i] = lv_label_create(card);
+        lv_obj_set_style_text_color(alarm_time_labels[i], lv_color_white(), 0);
         lv_obj_set_style_text_font(alarm_time_labels[i], &lv_font_montserrat_48, 0);
         lv_obj_align(alarm_time_labels[i], LV_ALIGN_TOP_LEFT, 0, 8);
         lv_obj_t *toggle = alarm_control(card, "OFF", 120, (i << 4) | 4, &alarm_enabled_labels[i]);
