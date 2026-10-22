@@ -7830,6 +7830,8 @@ static void show_weather(void)
     lv_obj_set_style_pad_all(tools, 3, 0);
     weather_status = lv_label_create(tools);
     lv_obj_set_width(weather_status, 440);
+    lv_obj_set_style_text_color(weather_status, lv_color_hex(0xF5F7FA), 0);
+    lv_obj_set_style_text_font(weather_status, &lv_font_montserrat_28, 0);
     lv_label_set_text(weather_status, weather_busy ? "Updating forecast..." : weather_has_data ? "" : "No forecast");
     lv_obj_t *refresh = button(tools, "Refresh", weather_refresh_clicked);
     lv_obj_set_size(refresh, 170, 64);
