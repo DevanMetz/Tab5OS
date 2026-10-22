@@ -4992,6 +4992,7 @@ static void counter_clicked(lv_event_t *event)
     counter_label = lv_label_create(value);
     lv_obj_set_width(counter_label, LV_PCT(100));
     lv_obj_set_style_text_align(counter_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(counter_label, lv_color_white(), 0);
     lv_obj_set_style_text_font(counter_label, &lv_font_montserrat_48, 0);
     update_counter();
     lv_obj_center(counter_label);
