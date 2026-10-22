@@ -644,7 +644,7 @@ void udp_tool_show(lv_obj_t *parent, bool connected)
     cancel_button = button(actions, "CANCEL", cancel_clicked);
     status_label = label(column, connected ? "Ready" : "Wi-Fi disconnected", false);
     lv_obj_set_style_min_height(status_label, 70, 0);
-    identity_label = label(column, "Last exchange", true);
+    identity_label = label(column, "Last exchange", false);
     result_label = label(column, "No exchange yet", false);
     preview_panel = lv_obj_create(column);
     lv_obj_set_size(preview_panel, 640, 240);
@@ -654,7 +654,7 @@ void udp_tool_show(lv_obj_t *parent, bool connected)
     lv_obj_set_style_radius(preview_panel, 12, 0);
     lv_obj_set_flex_flow(preview_panel, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(preview_panel, 12, 0);
-    tx_label = label(preview_panel, "TX  —\n\nRX  —", false);
+    tx_label = label(preview_panel, "TX  -\n\nRX  -", false);
     rx_label = label(preview_panel, "", false);
     lv_obj_set_width(tx_label, LV_PCT(100));
     lv_obj_set_width(rx_label, LV_PCT(100));
