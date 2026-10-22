@@ -5791,7 +5791,7 @@ static void system_clicked(lv_event_t *event)
     lv_label_set_text_fmt(battery_metrics, "%d.%03d V    %+d mA    %d%%",
         battery_millivolts / 1000, battery_millivolts % 1000, battery_milliamps, battery_percent);
     lv_obj_t *history_title = lv_label_create(battery);
-    lv_label_set_text(history_title, "Charge (%) · 5 min");
+    lv_label_set_text(history_title, "Charge (%) | 5 min");
     battery_chart = lv_chart_create(battery);
     lv_obj_set_size(battery_chart, LV_PCT(100), 220);
     lv_obj_set_style_bg_color(battery_chart, lv_color_hex(0x202838), 0);
