@@ -209,7 +209,7 @@ static void start_clicked(lv_event_t *event)
     uint32_t actual = ledc_get_freq(LEDC_LOW_SPEED_MODE, SIGNAL_TIMER);
     lv_label_set_text_fmt(output_label, "Output: %lu Hz at %u%% on G6",
                           (unsigned long)actual, duty_choices[duty_index]);
-    set_status("PWM active · 5 min limit");
+    set_status("PWM active | 5 min limit");
 }
 
 static void setting_clicked(lv_event_t *event)
@@ -317,6 +317,7 @@ void signal_tool_show(lv_obj_t *parent)
     lv_obj_set_width(status_label, 592);
     lv_obj_set_style_text_align(status_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(status_label, lv_color_hex(0xCBD5E1), 0);
+    lv_obj_set_style_text_font(status_label, &lv_font_montserrat_28, 0);
     lv_label_set_text(status_label, "G6 released");
 
     lv_obj_t *pwm = signal_card(parent);
@@ -339,7 +340,8 @@ void signal_tool_show(lv_obj_t *parent)
     lv_obj_t *limits = lv_label_create(parent);
     lv_obj_set_width(limits, 640);
     lv_obj_set_style_text_color(limits, lv_color_hex(0xCBD5E1), 0);
-    lv_label_set_text(limits, "M5-Bus G6 · 3.3 V logic · Common ground\n"
+    lv_obj_set_style_text_font(limits, &lv_font_montserrat_28, 0);
+    lv_label_set_text(limits, "M5-Bus G6 | 3.3 V logic | Common ground\n"
                               "PWM stops after 5 minutes. Stop before rewiring.\n"
                               "Use a buffer for loads; never drive motors, relays, LEDs or 5 V logic directly.\n"
                               "Stopped: high impedance. Low before routing.\n"
