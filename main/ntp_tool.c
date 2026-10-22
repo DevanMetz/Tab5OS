@@ -317,7 +317,7 @@ static void refresh(lv_timer_t *timer)
                  result->leap, result->reference_id[0], result->reference_id[1], result->reference_id[2], result->reference_id[3]);
     } else {
         lv_label_set_text(summary_label, "No valid timing samples");
-        snprintf(text, sizeof(text), "%u valid | %u failed/missing | %u not sampled\nNo server quality metadata from a valid sample.",
+        snprintf(text, sizeof(text), "%u valid | %u failed/missing | %u not sampled",
                  valid, attempted - valid, NTP_SAMPLE_COUNT - attempted);
     }
     lv_label_set_text(metadata_label, text);
@@ -416,7 +416,7 @@ static void keyboard_done(lv_event_t *event)
 static lv_obj_t *label(lv_obj_t *parent, const char *text, bool small)
 {
     lv_obj_t *object = lv_label_create(parent);
-    lv_obj_set_width(object, 640);
+    lv_obj_set_width(object, lv_pct(100));
     if (small) lv_obj_set_style_text_font(object, &lv_font_montserrat_14, 0);
     lv_label_set_long_mode(object, LV_LABEL_LONG_WRAP);
     lv_label_set_text(object, text);
@@ -438,15 +438,15 @@ static lv_obj_t *input(lv_obj_t *parent, const char *caption, const char *value,
 {
     lv_obj_t *block = lv_obj_create(parent);
     lv_obj_remove_style_all(block);
-    lv_obj_set_size(block, width, 80);
+    lv_obj_set_size(block, width, 96);
     lv_obj_remove_flag(block, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(block, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(block, 4, 0);
+    lv_obj_set_style_pad_row(block, 8, 0);
     lv_obj_t *name = label(block, caption, true);
     lv_obj_set_width(name, width);
     lv_obj_t *area = lv_textarea_create(block);
     /* Preserve pasted newlines; validation rejects them instead of joining lines. */
-    lv_obj_set_size(area, width, 60);
+    lv_obj_set_size(area, width, 72);
     lv_textarea_set_max_length(area, maximum + 1);
     lv_textarea_set_text(area, value);
     lv_obj_add_event_cb(area, field_event, LV_EVENT_ALL, NULL);
@@ -456,7 +456,7 @@ static lv_obj_t *input(lv_obj_t *parent, const char *caption, const char *value,
 static lv_obj_t *button(lv_obj_t *parent, const char *text, lv_event_cb_t callback)
 {
     lv_obj_t *object = lv_button_create(parent);
-    lv_obj_set_size(object, 310, 60);
+    lv_obj_set_size(object, 310, 72);
     lv_obj_t *caption = lv_label_create(object);
     lv_label_set_text(caption, text);
     lv_obj_center(caption);
@@ -492,38 +492,40 @@ void ntp_tool_show(lv_obj_t *parent, bool connected)
     lv_obj_set_size(column, 640, LV_SIZE_CONTENT);
     lv_obj_remove_flag(column, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(column, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(column, 12, 0);
+    lv_obj_set_style_pad_row(column, 20, 0);
     lv_obj_set_style_text_font(column, &lv_font_montserrat_28, 0);
     label(column, "NTP Lab", false);
-    label(column, "Compare a server's time with this tablet using four UDP exchanges.\n"
-                  "Plain 48-byte NTPv3/v4 replies only; this app never sets the clock.", true);
-    lv_obj_t *destination = row(column, 80);
-    host_area = input(destination, "Server IPv4 address", saved_host, 430, 15);
-    lv_textarea_set_placeholder_text(host_area, "e.g. 192.168.1.10");
-    port_area = input(destination, "UDP port (1-65535)", saved_port, 198, 5);
+    lv_obj_t *destination = row(column, 96);
+    host_area = input(destination, "Server IPv4", saved_host, 430, 15);
+    lv_textarea_set_placeholder_text(host_area, "192.168.1.10");
+    port_area = input(destination, "UDP port", saved_port, 198, 5);
     keyboard = lv_keyboard_create(column);
     lv_obj_set_size(keyboard, 640, 220);
     lv_keyboard_set_mode(keyboard, LV_KEYBOARD_MODE_NUMBER);
     lv_obj_add_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_event_cb(keyboard, keyboard_done, LV_EVENT_READY, NULL);
     lv_obj_add_event_cb(keyboard, keyboard_done, LV_EVENT_CANCEL, NULL);
-    lv_obj_t *actions = row(column, 60);
-    start_button = button(actions, "SAMPLE 4", start_clicked);
-    stop_button = button(actions, "STOP", stop_clicked);
-    status_label = label(column, connected ? "Ready. Choose a server and tap SAMPLE 4." : "Connect to Wi-Fi before sampling.", true);
-    lv_obj_set_height(status_label, 44);
-    identity_label = label(column, "No samples sent.", true);
-    lv_obj_set_height(identity_label, 40);
-    summary_label = label(column, "Minimum delay and clock offset\nwill appear here.", false);
-    lv_obj_set_height(summary_label, 80);
-    metadata_label = label(column, "Server stratum, leap indicator and reference ID appear after a valid reply.", true);
-    lv_obj_set_height(metadata_label, 44);
-    samples_label = label(column, "#1  Not sampled\n\n#2  Not sampled\n\n#3  Not sampled\n\n#4  Not sampled", true);
-    lv_obj_set_height(samples_label, 168);
-    label(column, "Positive offset means the server is ahead of the tablet. Delay removes\n"
-                  "server processing time; RTT is measured with a monotonic clock.\n"
-                  "Unauthenticated estimates, not a calibration. Local clock must be 2020-2099.\n"
-                  "Clock steps over 5ms reject samples; small negative delay is clamped to 1us.", true);
+    lv_obj_t *actions = row(column, 72);
+    start_button = button(actions, "Sample 4", start_clicked);
+    stop_button = button(actions, "Stop", stop_clicked);
+    status_label = label(column, connected ? "Ready" : "Connect to Wi-Fi before sampling.", false);
+    lv_obj_set_style_text_color(status_label, lv_color_hex(0x9BCBEE), 0);
+
+    lv_obj_t *results = lv_obj_create(column);
+    lv_obj_set_size(results, 640, LV_SIZE_CONTENT);
+    lv_obj_remove_flag(results, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(results, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_bg_color(results, lv_color_hex(0x202938), 0);
+    lv_obj_set_style_bg_opa(results, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(results, 0, 0);
+    lv_obj_set_style_radius(results, 16, 0);
+    lv_obj_set_style_pad_all(results, 20, 0);
+    lv_obj_set_style_pad_row(results, 16, 0);
+    identity_label = label(results, "No samples yet", true);
+    summary_label = label(results, "Min delay  -- ms\nOffset       -- ms", false);
+    metadata_label = label(results, "", true);
+    label(column, "Samples", false);
+    samples_label = label(column, "#1  --\n\n#2  --\n\n#3  --\n\n#4  --", false);
     rendered_revision = UINT32_MAX;
     refresh(NULL);
     ui_timer = lv_timer_create(refresh, 100, NULL);
