@@ -7613,23 +7613,33 @@ static void weather_short_time(const char *iso, char output[12])
     snprintf(output, 12, "%d:%02d %s", hour % 12 ? hour % 12 : 12, minute, hour < 12 ? "AM" : "PM");
 }
 
+/* Weather-only surfaces keep the forecast legible against the OS background. */
+static void weather_surface(lv_obj_t *obj)
+{
+    lv_obj_set_style_bg_color(obj, lv_color_hex(0x202938), 0);
+    lv_obj_set_style_text_color(obj, lv_color_hex(0xF5F7FA), 0);
+    lv_obj_set_style_border_width(obj, 0, 0);
+    lv_obj_set_style_radius(obj, 16, 0);
+}
+
 static void weather_render(void)
 {
     if (!weather_body || !weather_has_data) return;
     lv_obj_clean(weather_body);
     lv_obj_t *place = lv_label_create(weather_body);
     lv_label_set_text(place, weather_data.place);
-    lv_obj_set_width(place, 600);
+    lv_obj_set_width(place, 630);
     lv_obj_set_style_text_font(place, &lv_font_montserrat_28, 0);
-    lv_obj_set_style_text_align(place, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_align(place, LV_TEXT_ALIGN_LEFT, 0);
 
     lv_obj_t *current = lv_obj_create(weather_body);
-    lv_obj_set_size(current, 610, 245);
+    lv_obj_set_size(current, 650, LV_SIZE_CONTENT);
+    weather_surface(current);
     lv_obj_clear_flag(current, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(current, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(current, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_all(current, 12, 0);
-    lv_obj_set_style_pad_row(current, 5, 0);
+    lv_obj_set_style_pad_all(current, 20, 0);
+    lv_obj_set_style_pad_row(current, 12, 0);
     lv_obj_t *temperature = lv_label_create(current);
     lv_label_set_text_fmt(temperature, "%d F", weather_round(weather_data.temperature));
     lv_obj_set_style_text_font(temperature, &lv_font_montserrat_48, 0);
@@ -7638,14 +7648,16 @@ static void weather_render(void)
     lv_obj_set_style_text_font(condition, &lv_font_montserrat_28, 0);
     lv_obj_t *details = lv_label_create(current);
     lv_label_set_text_fmt(details,
-        "Feels %d F  |  Humidity %u%%  |  Clouds %u%%\n"
-        "Wind %s %d mph, gusts %d  |  Pressure %d hPa\n"
+        "Feels %d F   Humidity %u%%\nClouds %u%%   "
+        "Wind %s %d mph, gusts %d\nPressure %d hPa   "
         "Precipitation %d.%02d in",
         weather_round(weather_data.apparent), weather_data.humidity, weather_data.cloud,
         weather_wind_direction(weather_data.wind_direction), weather_round(weather_data.wind),
         weather_round(weather_data.gust), weather_round(weather_data.pressure),
         (int)(weather_data.precipitation * 100) / 100, (int)(weather_data.precipitation * 100) % 100);
-    lv_obj_set_width(details, 570);
+    lv_obj_set_width(details, 610);
+    lv_obj_set_style_text_font(details, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_line_space(details, 8, 0);
     lv_obj_set_style_text_align(details, LV_TEXT_ALIGN_CENTER, 0);
     if (weather_data.day_count) {
         char sunrise[12], sunset[12];
@@ -7653,13 +7665,18 @@ static void weather_render(void)
         weather_short_time(weather_data.daily[0].sunset, sunset);
         lv_obj_t *sun = lv_label_create(current);
         lv_label_set_text_fmt(sun, "Sunrise %s  |  Sunset %s", sunrise, sunset);
+        lv_obj_set_width(sun, 610);
+        lv_obj_set_style_text_align(sun, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_font(sun, &lv_font_montserrat_28, 0);
     }
 
     lv_obj_t *hourly_title = lv_label_create(weather_body);
     lv_label_set_text(hourly_title, "Next 12 hours");
     lv_obj_set_style_text_font(hourly_title, &lv_font_montserrat_28, 0);
     lv_obj_t *hourly = lv_obj_create(weather_body);
-    lv_obj_set_size(hourly, 610, 170);
+    lv_obj_set_size(hourly, 650, 220);
+    weather_surface(hourly);
+    lv_obj_set_scroll_dir(hourly, LV_DIR_HOR);
     lv_obj_set_flex_flow(hourly, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(hourly, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_all(hourly, 8, 0);
@@ -7667,7 +7684,9 @@ static void weather_render(void)
     for (uint8_t i = 0; i < weather_data.hour_count; i++) {
         weather_hour_t *hour = &weather_data.hourly[i];
         lv_obj_t *card = lv_obj_create(hourly);
-        lv_obj_set_size(card, 130, 135);
+        lv_obj_set_size(card, 190, 188);
+        weather_surface(card);
+        lv_obj_set_style_bg_color(card, lv_color_hex(0x101820), 0);
         lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
         lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -7678,7 +7697,8 @@ static void weather_render(void)
         lv_obj_t *label = lv_label_create(card);
         lv_label_set_text_fmt(label, "%s\n%d F\n%u%% rain\n%s", time, weather_round(hour->temperature),
                               (unsigned)hour->precipitation, weather_condition(hour->code));
-        lv_obj_set_width(label, 115);
+        lv_obj_set_width(label, 176);
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_28, 0);
         lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
     }
 
@@ -7688,16 +7708,21 @@ static void weather_render(void)
     for (uint8_t i = 0; i < weather_data.day_count; i++) {
         weather_day_t *day = &weather_data.daily[i];
         lv_obj_t *row = lv_obj_create(weather_body);
-        lv_obj_set_size(row, 610, 70);
+        lv_obj_set_size(row, 650, LV_SIZE_CONTENT);
+        weather_surface(row);
         lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        lv_obj_set_style_pad_all(row, 10, 0);
+        lv_obj_set_style_pad_all(row, 18, 0);
         lv_obj_t *label = lv_label_create(row);
-        lv_label_set_text_fmt(label, "%c%c/%c%c  %s  %u%% rain  %d / %d F",
+        lv_label_set_text_fmt(label, "%c%c/%c%c  %s\n%u%% rain",
             day->date[5], day->date[6], day->date[8], day->date[9], weather_condition(day->code),
-            (unsigned)day->precipitation, weather_round(day->high), weather_round(day->low));
-        lv_obj_set_width(label, 570);
+            (unsigned)day->precipitation);
+        lv_obj_set_width(label, 380);
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_28, 0);
+        lv_obj_set_style_text_line_space(label, 8, 0);
+        lv_obj_t *range = lv_label_create(row);
+        lv_label_set_text_fmt(range, "%d / %d F", weather_round(day->high), weather_round(day->low));
+        lv_obj_set_style_text_font(range, &lv_font_montserrat_28, 0);
+        lv_obj_align(range, LV_ALIGN_RIGHT_MID, 0, 0);
     }
     lv_obj_t *source = lv_label_create(weather_body);
     lv_label_set_text(source, "Weather data: Open-Meteo");
@@ -7759,7 +7784,7 @@ static void weather_tick(lv_timer_t *timer)
     (void)timer;
     if (!weather_done || !weather_status) return;
     weather_done = false;
-    lv_label_set_text(weather_status, weather_ok ? "Forecast updated" : weather_error);
+    lv_label_set_text(weather_status, weather_ok ? "" : weather_error);
     if (weather_ok) {
         lv_textarea_set_text(weather_location_area, weather_location);
         weather_render();
@@ -7769,40 +7794,45 @@ static void weather_tick(lv_timer_t *timer)
 static void show_weather(void)
 {
     clear_content();
-    lv_obj_set_style_pad_row(content, 10, 0);
+    lv_obj_set_style_pad_row(content, 16, 0);
     lv_obj_t *title = lv_label_create(content);
     lv_label_set_text(title, "Weather");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
 
     lv_obj_t *search = lv_obj_create(content);
-    lv_obj_set_size(search, 650, 76);
+    lv_obj_set_size(search, 650, 158);
+    weather_surface(search);
     lv_obj_clear_flag(search, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_flex_flow(search, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(search, LV_FLEX_ALIGN_SPACE_AROUND, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_all(search, 4, 0);
+    lv_obj_set_flex_flow(search, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_align(search, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_all(search, 10, 0);
+    lv_obj_set_style_pad_gap(search, 10, 0);
     weather_location_area = lv_textarea_create(search);
-    lv_obj_set_size(weather_location_area, 385, 62);
+    lv_obj_set_size(weather_location_area, 628, 64);
     lv_textarea_set_one_line(weather_location_area, true);
+    lv_textarea_set_placeholder_text(weather_location_area, "City or postal code");
+    lv_obj_set_style_text_font(weather_location_area, &lv_font_montserrat_28, 0);
     lv_textarea_set_max_length(weather_location_area, sizeof(weather_location) - 1);
     lv_textarea_set_text(weather_location_area, weather_location);
     lv_obj_add_event_cb(weather_location_area, weather_search_clicked, LV_EVENT_READY, NULL);
     lv_obj_t *find = button(search, "Find", weather_search_clicked);
-    lv_obj_set_size(find, 110, 62);
+    lv_obj_set_size(find, 300, 64);
     lv_obj_t *keys = button(search, weather_keyboard_visible ? "Hide" : "Keys", weather_keys_clicked);
     weather_keys_label = lv_obj_get_child(keys, 0);
-    lv_obj_set_size(keys, 125, 62);
+    lv_obj_set_size(keys, 318, 64);
 
     lv_obj_t *tools = lv_obj_create(content);
-    lv_obj_set_size(tools, 650, 58);
+    lv_obj_set_size(tools, 650, 72);
+    weather_surface(tools);
     lv_obj_clear_flag(tools, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(tools, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(tools, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_pad_all(tools, 3, 0);
     weather_status = lv_label_create(tools);
-    lv_obj_set_width(weather_status, 450);
-    lv_label_set_text(weather_status, weather_busy ? "Updating forecast..." : weather_has_data ? "Saved forecast" : "Ready");
+    lv_obj_set_width(weather_status, 440);
+    lv_label_set_text(weather_status, weather_busy ? "Updating forecast..." : weather_has_data ? "" : "No forecast");
     lv_obj_t *refresh = button(tools, "Refresh", weather_refresh_clicked);
-    lv_obj_set_size(refresh, 150, 52);
+    lv_obj_set_size(refresh, 170, 64);
 
     weather_body = lv_obj_create(content);
     lv_obj_set_width(weather_body, 650);
@@ -7810,13 +7840,18 @@ static void show_weather(void)
     lv_obj_clear_flag(weather_body, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(weather_body, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(weather_body, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_all(weather_body, 8, 0);
-    lv_obj_set_style_pad_row(weather_body, 10, 0);
+    lv_obj_set_style_pad_all(weather_body, 0, 0);
+    lv_obj_set_style_bg_opa(weather_body, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(weather_body, 0, 0);
+    lv_obj_set_style_text_color(weather_body, lv_color_hex(0xF5F7FA), 0);
+    lv_obj_set_style_pad_row(weather_body, 16, 0);
     if (weather_has_data) weather_render();
     else {
         lv_obj_t *message = lv_label_create(weather_body);
-        lv_label_set_text(message, "Search for a city or postal code to load weather.");
+        lv_label_set_text(message, wifi_connected ? "No forecast" : "Wi-Fi disconnected");
         lv_obj_set_width(message, 600);
+        lv_obj_set_style_text_font(message, &lv_font_montserrat_28, 0);
+        lv_obj_set_style_pad_ver(message, 64, 0);
         lv_obj_set_style_text_align(message, LV_TEXT_ALIGN_CENTER, 0);
     }
 
