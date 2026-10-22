@@ -1137,9 +1137,16 @@ static lv_obj_t *action_button(lv_obj_t *parent, const char *text, int width,
 {
     lv_obj_t *button = lv_button_create(parent);
     lv_obj_set_size(button, width, 68);
+    lv_obj_set_style_pad_all(button, 0, 0);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x334155), LV_STATE_DISABLED);
+    lv_obj_set_style_bg_opa(button, LV_OPA_COVER, LV_STATE_DISABLED);
+    lv_obj_set_style_opa(button, LV_OPA_COVER, LV_STATE_DISABLED);
+    lv_obj_set_style_text_color(button, lv_color_hex(0xe6edf3), LV_STATE_DISABLED);
     lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, NULL);
     lv_obj_t *label = lv_label_create(button);
     lv_label_set_text(label, text);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xe6edf3), 0);
     lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_center(label);
     if (label_out) *label_out = label;
@@ -1153,6 +1160,7 @@ static lv_obj_t *row(lv_obj_t *parent, int height)
     lv_obj_set_style_pad_all(container, 0, 0);
     lv_obj_set_style_border_width(container, 0, 0);
     lv_obj_set_style_bg_opa(container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_text_color(container, lv_color_hex(0xe6edf3), 0);
     lv_obj_clear_flag(container, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(container, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(container, LV_FLEX_ALIGN_SPACE_BETWEEN,
@@ -1620,6 +1628,7 @@ void mqtt_tool_show(lv_obj_t *parent, bool wifi_connected, bool sd_available,
     lv_obj_t *title = lv_label_create(parent);
     lv_label_set_text(title, "MQTT");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xe6edf3), 0);
     uri_area = lv_textarea_create(parent);
     lv_textarea_set_one_line(uri_area, true);
     lv_textarea_set_max_length(uri_area, MQTT_URI_MAX + 1);
@@ -1640,10 +1649,11 @@ void mqtt_tool_show(lv_obj_t *parent, bool wifi_connected, bool sd_available,
     lv_textarea_set_placeholder_text(password_area, "Password");
 
     lv_obj_t *controls = row(parent, 78);
-    connect_button = action_button(controls, "", 140, connect_clicked, &connect_label);
-    action_button(controls, "", 120, qos_clicked, &qos_label);
-    action_button(controls, "", 140, retain_clicked, &retain_label);
-    action_button(controls, "", 140, log_clicked, &log_label);
+    connect_button = action_button(controls, "", 312, connect_clicked, &connect_label);
+    action_button(controls, "", 312, qos_clicked, &qos_label);
+    controls = row(parent, 78);
+    action_button(controls, "", 312, retain_clicked, &retain_label);
+    action_button(controls, "", 312, log_clicked, &log_label);
     if (!wifi_connected) lv_obj_add_state(connect_button, LV_STATE_DISABLED);
 
     lv_obj_t *profile_actions = row(parent, 78);
@@ -1680,12 +1690,15 @@ void mqtt_tool_show(lv_obj_t *parent, bool wifi_connected, bool sd_available,
     paste_payload_button = action_button(payload_actions, "PASTE BYTES", 312, paste_payload_clicked, NULL);
     payload_bytes_label = lv_label_create(parent);
     lv_obj_set_width(payload_bytes_label, 640);
-    lv_obj_set_style_text_font(payload_bytes_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(payload_bytes_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(payload_bytes_label, lv_color_hex(0xe6edf3), 0);
     lv_label_set_long_mode(payload_bytes_label, LV_LABEL_LONG_WRAP);
     refresh_payload();
 
     status_label = lv_label_create(parent);
     lv_obj_set_width(status_label, 640);
+    lv_obj_set_style_text_font(status_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(status_label, lv_color_hex(0xe6edf3), 0);
     lv_label_set_long_mode(status_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(status_label, LV_TEXT_ALIGN_CENTER, 0);
     if (stopping) lv_label_set_text(status_label, "Previous MQTT session is stopping in the background...");
@@ -1706,7 +1719,8 @@ void mqtt_tool_show(lv_obj_t *parent, bool wifi_connected, bool sd_available,
     copy_receive_button = action_button(history_actions, "COPY RX", 312, copy_receive_clicked, NULL);
     receive_label = lv_label_create(parent);
     lv_obj_set_width(receive_label, 640);
-    lv_obj_set_style_text_font(receive_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(receive_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(receive_label, lv_color_hex(0xe6edf3), 0);
     lv_label_set_long_mode(receive_label, LV_LABEL_LONG_WRAP);
 
     history_area = lv_textarea_create(parent);
@@ -1722,7 +1736,7 @@ void mqtt_tool_show(lv_obj_t *parent, bool wifi_connected, bool sd_available,
         lv_obj_set_style_pad_all(fields[i], 16, 0);
         lv_obj_set_style_radius(fields[i], 12, 0);
     }
-    lv_obj_set_style_text_font(history_area, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(history_area, lv_color_hex(0x475569), LV_PART_TEXTAREA_PLACEHOLDER);
     lv_obj_set_size(uri_area, 640, 64);
     lv_obj_set_size(username_area, 312, 64);
     lv_obj_set_size(password_area, 312, 64);
