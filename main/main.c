@@ -3520,6 +3520,8 @@ static void chat_tick(lv_timer_t *timer)
 {
     (void)timer;
     if (chat_wave && chat_wave_series) {
+        if (voice_recording) lv_obj_remove_flag(chat_wave, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_add_flag(chat_wave, LV_OBJ_FLAG_HIDDEN);
         lv_chart_set_next_value(chat_wave, chat_wave_series, voice_recording ? voice_level : 0);
     }
     if (chat_busy && chat_job == CHAT_JOB_VOICE && !voice_recording) {
@@ -5255,6 +5257,7 @@ static void show_chat(void)
     lv_obj_set_style_text_color(chat_status, lv_color_hex(0xCDD5E2), 0);
 
     chat_wave = lv_chart_create(content);
+    if (!voice_recording) lv_obj_add_flag(chat_wave, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_size(chat_wave, 640, 48);
     lv_chart_set_type(chat_wave, LV_CHART_TYPE_LINE);
     lv_chart_set_point_count(chat_wave, 60);
