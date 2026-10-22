@@ -851,6 +851,7 @@ static lv_obj_t *small_button(lv_obj_t *parent, const char *text, int width,
     lv_obj_set_style_bg_color(control, lv_color_hex(0x202938), 0);
     lv_obj_set_style_shadow_width(control, 0, 0);
     lv_obj_set_style_text_font(control, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(control, lv_color_hex(0xE6EDF3), 0);
     lv_obj_add_event_cb(control, callback, LV_EVENT_CLICKED, user_data);
     lv_obj_t *label = lv_label_create(control);
     lv_label_set_text(label, text);
@@ -876,12 +877,13 @@ static lv_obj_t *dropdown(lv_obj_t *parent, const char *caption, const char *opt
 {
     lv_obj_t *block = lv_obj_create(parent);
     lv_obj_remove_style_all(block);
-    lv_obj_set_size(block, 310, 92);
+    lv_obj_set_size(block, 310, 106);
     lv_obj_remove_flag(block, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(block, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(block, 10, 0);
     lv_obj_t *label = lv_label_create(block);
-    lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xAAB4C3), 0);
     lv_label_set_text(label, caption);
     lv_obj_t *select = lv_dropdown_create(block);
     lv_obj_set_size(select, 310, 60);
@@ -906,10 +908,12 @@ void uart_tool_show(lv_obj_t *parent, bool available,
     lv_obj_set_style_pad_row(parent, 12, 0);
     title_label = lv_label_create(parent);
     lv_obj_set_style_text_font(title_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(title_label, lv_color_hex(0xE6EDF3), 0);
 
     help_label = lv_label_create(parent);
     lv_obj_set_width(help_label, 640);
-    lv_obj_set_style_text_font(help_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(help_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(help_label, lv_color_hex(0xAAB4C3), 0);
     lv_obj_set_style_text_align(help_label, LV_TEXT_ALIGN_CENTER, 0);
 
     lv_obj_t *settings = row(parent, 76);
@@ -942,15 +946,17 @@ void uart_tool_show(lv_obj_t *parent, bool available,
     rx_copy_button = small_button(capture_row, "COPY RX", 200, copy_rx_clicked, NULL, NULL);
     small_button(capture_row, "CLEAR RX", 200, clear_rx_clicked, NULL, NULL);
     rx_info_label = lv_label_create(parent);
-    lv_obj_set_size(rx_info_label, 640, 36);
-    lv_obj_set_style_text_font(rx_info_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_size(rx_info_label, 640, LV_SIZE_CONTENT);
+    lv_obj_set_style_text_font(rx_info_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(rx_info_label, lv_color_hex(0xAAB4C3), 0);
 
-    lv_obj_t *tx_options = row(parent, 92);
+    lv_obj_t *tx_options = row(parent, 106);
     tx_mode_select = dropdown(tx_options, "TX format", "Literal ASCII\nHex byte pairs", tx_mode_changed);
     ending_select = dropdown(tx_options, "ASCII ending", "None\nLF (0A)\nCR (0D)\nCRLF (0D 0A)", ending_changed);
     tx_info_label = lv_label_create(parent);
-    lv_obj_set_size(tx_info_label, 640, 36);
-    lv_obj_set_style_text_font(tx_info_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_size(tx_info_label, 640, LV_SIZE_CONTENT);
+    lv_obj_set_style_text_font(tx_info_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(tx_info_label, lv_color_hex(0xAAB4C3), 0);
 
     input_area = lv_textarea_create(parent);
     lv_obj_set_size(input_area, 640, 96);
@@ -972,8 +978,9 @@ void uart_tool_show(lv_obj_t *parent, bool available,
     lv_obj_add_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
 
     status_label = lv_label_create(parent);
-    lv_obj_set_size(status_label, 640, 60);
-    lv_obj_set_style_text_font(status_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_size(status_label, 640, LV_SIZE_CONTENT);
+    lv_obj_set_style_text_font(status_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(status_label, lv_color_hex(0xAAB4C3), 0);
     lv_obj_set_style_text_align(status_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(status_label, output_text ? "Disconnected" :
                                                 "Output buffer allocation failed");
