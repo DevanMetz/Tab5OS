@@ -130,6 +130,8 @@ static void keyboard_visible(bool visible)
 {
     if (!keyboard) return;
     lv_keyboard_set_textarea(keyboard, visible ? input_area : NULL);
+    lv_obj_set_height(input_area, visible ? 112 : 144);
+    lv_obj_set_height(result_area, visible ? 120 : 240);
     if (visible) lv_obj_remove_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
     else {
         lv_obj_add_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
@@ -265,6 +267,8 @@ static lv_obj_t *small_button(lv_obj_t *parent, const char *text, int width,
 {
     lv_obj_t *control = lv_button_create(parent);
     lv_obj_set_size(control, width, 72);
+    lv_obj_set_style_radius(control, 14, 0);
+    lv_obj_set_style_bg_color(control, lv_color_hex(0x263343), 0);
     lv_obj_set_style_text_font(control, &lv_font_montserrat_28, 0);
     lv_obj_add_event_cb(control, callback, LV_EVENT_CLICKED, user_data);
     lv_obj_t *label = lv_label_create(control);
@@ -325,11 +329,13 @@ static void render_transfer(void)
     if (!result_area || !identity_label || !copy_rx_button) return;
     if (!saved_transfer.length) {
         lv_textarea_set_text(result_area, "");
-        lv_label_set_text(identity_label, "No completed transfer saved.\nCOPY RX copies received bytes to Byte Lab.");
+        lv_obj_set_style_text_font(identity_label, &lv_font_montserrat_28, 0);
+        lv_label_set_text(identity_label, "Result");
         lv_obj_add_state(copy_rx_button, LV_STATE_DISABLED);
         return;
     }
-    lv_label_set_text_fmt(identity_label, "Saved: mode %u | %d Hz | %u bytes\nCS G45; RX has one byte per transmitted byte.",
+    lv_obj_set_style_text_font(identity_label, &lv_font_montserrat_14, 0);
+    lv_label_set_text_fmt(identity_label, "Saved: mode %u | %d Hz | %u bytes",
         saved_transfer.mode, saved_transfer.clock_hz, (unsigned)saved_transfer.length);
     lv_obj_remove_state(copy_rx_button, LV_STATE_DISABLED);
     char result[256];
@@ -424,55 +430,72 @@ static void transfer_clicked(lv_event_t *event)
 
 void spi_tool_show(lv_obj_t *parent)
 {
-    lv_obj_set_style_pad_row(parent, 10, 0);
+    lv_obj_set_style_pad_row(parent, 16, 0);
 
     lv_obj_t *title = lv_label_create(parent);
-    lv_label_set_text(title, "SPI Master Console");
+    lv_label_set_text(title, "SPI Master");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
 
-    lv_obj_t *help = lv_label_create(parent);
-    lv_obj_set_width(help, 640);
-    lv_obj_set_style_text_align(help, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(help, &lv_font_montserrat_14, 0);
-    lv_label_set_text(help, "M5-Bus: MOSI G18, MISO G19, SCK G5, CS G45; 3.3 V logic only.\n"
-                            "Share ground. Pins are high-impedance until START and after STOP/Home.\n"
-                            "Each full-duplex transfer is limited to 32 bytes; verify target voltage and mode first.");
+    lv_obj_t *pins = lv_label_create(parent);
+    lv_obj_set_width(pins, 640);
+    lv_obj_set_style_text_font(pins, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_align(pins, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(pins, "MOSI 18   MISO 19   SCK 5   CS 45\n3.3 V only  /  Common GND");
 
     lv_obj_t *settings = row(parent);
     small_button(settings, "", 200, setting_clicked, (void *)0, &mode_label);
     small_button(settings, "", 200, setting_clicked, (void *)1, &speed_label);
-    small_button(settings, "", 200, start_clicked, NULL, &start_label);
+    lv_obj_t *start = small_button(settings, "", 200, start_clicked, NULL, &start_label);
+    lv_obj_set_style_bg_color(start, lv_color_hex(0xAD4B00), 0);
+
+    lv_obj_t *tx_title = lv_label_create(parent);
+    lv_obj_set_width(tx_title, 640);
+    lv_obj_set_style_text_font(tx_title, &lv_font_montserrat_28, 0);
+    lv_label_set_text(tx_title, "TX (hex, 32 bytes max)");
 
     input_area = lv_textarea_create(parent);
-    lv_obj_set_size(input_area, 640, 128);
+    lv_obj_set_size(input_area, 640, 144);
+    lv_obj_set_style_bg_color(input_area, lv_color_hex(0x1C2531), 0);
+    lv_obj_set_style_text_color(input_area, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_border_color(input_area, lv_color_hex(0x455468), 0);
+    lv_obj_set_style_radius(input_area, 14, 0);
+    lv_obj_set_style_pad_all(input_area, 16, 0);
     lv_obj_set_style_text_font(input_area, &lv_font_montserrat_28, 0);
     /* Retain invalid characters/newlines and one excess character. Reject an
      * overlong draft instead of silently sending a valid truncated prefix. */
     lv_textarea_set_max_length(input_area, SPI_TOOL_MAX_TEXT + 1);
-    lv_textarea_set_placeholder_text(input_area, "TX hex pairs: 9F 00 00 00");
+    lv_textarea_set_placeholder_text(input_area, "9F 00 00 00");
     /* Restore before attaching the callback: LVGL emits per-character events
      * during set_text, which must not overwrite the source being restored. */
     lv_textarea_set_text(input_area, saved_input);
     lv_obj_add_event_cb(input_area, input_event, LV_EVENT_ALL, NULL);
 
     lv_obj_t *actions = row(parent);
-    small_button(actions, "TRANSFER", 200, transfer_clicked, NULL, NULL);
-    small_button(actions, "PASTE\nBYTES", 200, paste_clicked, NULL, NULL);
+    lv_obj_t *transfer = small_button(actions, "TRANSFER", 200, transfer_clicked, NULL, NULL);
+    lv_obj_set_style_bg_color(transfer, lv_color_hex(0x2196F3), 0);
+    small_button(actions, "PASTE", 200, paste_clicked, NULL, NULL);
     small_button(actions, "CLEAR TX", 200, clear_tx_clicked, NULL, NULL);
 
-    lv_obj_t *result_controls = row(parent);
-    copy_rx_button = small_button(result_controls, "COPY RX", 310, copy_rx_clicked, NULL, NULL);
-    small_button(result_controls, "CLEAR RESULT", 310, clear_clicked, NULL, NULL);
     identity_label = lv_label_create(parent);
     lv_obj_set_size(identity_label, 640, 34);
     lv_obj_set_style_text_font(identity_label, &lv_font_montserrat_14, 0);
     lv_label_set_long_mode(identity_label, LV_LABEL_LONG_WRAP);
 
     result_area = lv_textarea_create(parent);
-    lv_obj_set_size(result_area, 640, 220);
+    lv_obj_set_size(result_area, 640, 240);
+    lv_obj_set_style_bg_color(result_area, lv_color_hex(0x1C2531), 0);
+    lv_obj_set_style_text_color(result_area, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_border_color(result_area, lv_color_hex(0x455468), 0);
+    lv_obj_set_style_radius(result_area, 14, 0);
+    lv_obj_set_style_pad_all(result_area, 16, 0);
+    lv_textarea_set_placeholder_text(result_area, "No transfer yet");
     lv_obj_set_style_text_font(result_area, &lv_font_montserrat_28, 0);
     lv_textarea_set_text(result_area, "");
     lv_textarea_set_cursor_click_pos(result_area, false);
+
+    lv_obj_t *result_controls = row(parent);
+    copy_rx_button = small_button(result_controls, "COPY RX", 310, copy_rx_clicked, NULL, NULL);
+    small_button(result_controls, "CLEAR RESULT", 310, clear_clicked, NULL, NULL);
 
     keyboard = lv_keyboard_create(parent);
     lv_obj_set_size(keyboard, 640, 240);
@@ -486,9 +509,8 @@ void spi_tool_show(lv_obj_t *parent)
     status_label = lv_label_create(parent);
     lv_obj_set_width(status_label, 640);
     lv_obj_set_style_text_align(status_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(status_label, &lv_font_montserrat_14, 0);
-    lv_label_set_text(status_label, "Tap TX for hex keys. Select mode/clock, then START.\n"
-                                    "Done only hides the keyboard; TRANSFER sends the draft.");
+    lv_obj_set_style_text_font(status_label, &lv_font_montserrat_28, 0);
+    lv_label_set_text(status_label, "SPI stopped");
     update_controls();
     render_transfer();
 }
