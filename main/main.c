@@ -3524,7 +3524,7 @@ static void chat_tick(lv_timer_t *timer)
     }
     if (chat_busy && chat_job == CHAT_JOB_VOICE && !voice_recording) {
         lv_label_set_text(chat_status, "Transcribing...");
-        lv_label_set_text(chat_voice_label, "Start");
+        lv_label_set_text(chat_voice_label, "Record");
         lv_obj_add_state(chat_voice_button, LV_STATE_DISABLED);
     }
     if (!chat_done) return;
@@ -3542,7 +3542,7 @@ static void chat_tick(lv_timer_t *timer)
     }
     lv_obj_remove_state(chat_send_button, LV_STATE_DISABLED);
     lv_obj_remove_state(chat_voice_button, LV_STATE_DISABLED);
-    lv_label_set_text(chat_voice_label, "Start");
+    lv_label_set_text(chat_voice_label, "Record");
 }
 
 static bool chat_start_job(chat_job_t job)
@@ -3610,14 +3610,14 @@ static void chat_voice_clicked(lv_event_t *event)
     voice_stop_requested = false;
     voice_recording = true;
     voice_level = 0;
-    lv_label_set_text(chat_status, "Recording - press Stop when done");
+    lv_label_set_text(chat_status, "Recording...");
     lv_label_set_text(chat_voice_label, "Stop");
     lv_obj_add_state(chat_send_button, LV_STATE_DISABLED);
     if (!chat_start_job(CHAT_JOB_VOICE)) {
         voice_recording = false;
         lv_obj_remove_state(chat_send_button, LV_STATE_DISABLED);
         lv_obj_remove_state(chat_voice_button, LV_STATE_DISABLED);
-        lv_label_set_text(chat_voice_label, "Start");
+        lv_label_set_text(chat_voice_label, "Record");
         lv_label_set_text(chat_status, "Could not start microphone");
     }
 }
@@ -3628,23 +3628,23 @@ static void chat_new_clicked(lv_event_t *event)
     if (chat_busy) return;
     chat_history[0] = '\0';
     chat_response_id[0] = '\0';
-    lv_textarea_set_text(chat_output, "Ask me anything.");
+    lv_textarea_set_text(chat_output, "");
     lv_label_set_text(chat_status, "New conversation");
 }
 
 static void chat_apply_preferences(void)
 {
-    const lv_font_t *font = chat_large_text ? &lv_font_montserrat_28 : &lv_font_montserrat_14;
+    const lv_font_t *font = chat_large_text ? &lv_font_montserrat_48 : &lv_font_montserrat_28;
     lv_obj_set_style_text_font(chat_output, font, 0);
     lv_obj_set_style_text_font(chat_input, font, 0);
-    lv_label_set_text(chat_text_label, chat_large_text ? "Text: Large" : "Text: Small");
+    lv_label_set_text(chat_text_label, chat_large_text ? "Text: Large" : "Text: Normal");
     lv_label_set_text(chat_keyboard_label, chat_keyboard_visible ? "Hide keys" : "Show keys");
     if (chat_keyboard_visible) {
         lv_obj_remove_flag(chat_keyboard, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_height(chat_output, 230);
+        lv_obj_set_height(chat_output, 340);
     } else {
         lv_obj_add_flag(chat_keyboard, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_height(chat_output, 560);
+        lv_obj_set_height(chat_output, 682);
     }
 }
 
@@ -5247,58 +5247,84 @@ static void show_chat(void)
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
 
     chat_status = lv_label_create(content);
-    lv_label_set_text(chat_status, voice_recording ? "Recording - press Stop when done" :
+    lv_label_set_text(chat_status, voice_recording ? "Recording..." :
         chat_busy ? (chat_job == CHAT_JOB_VOICE ? "Transcribing..." : "Thinking...") :
         (!chat_relay_url[0] || !chat_device_token[0]) ? "Relay is not configured" : "Ready");
     lv_obj_set_width(chat_status, 640);
+    lv_obj_set_style_text_font(chat_status, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(chat_status, lv_color_hex(0xCDD5E2), 0);
 
     chat_wave = lv_chart_create(content);
-    lv_obj_set_size(chat_wave, 640, 100);
+    lv_obj_set_size(chat_wave, 640, 48);
     lv_chart_set_type(chat_wave, LV_CHART_TYPE_LINE);
     lv_chart_set_point_count(chat_wave, 60);
     lv_chart_set_range(chat_wave, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
     lv_chart_set_div_line_count(chat_wave, 0, 0);
-    chat_wave_series = lv_chart_add_series(chat_wave, lv_color_hex(0x29B6F6), LV_CHART_AXIS_PRIMARY_Y);
+    chat_wave_series = lv_chart_add_series(chat_wave, lv_color_hex(0xE91E63), LV_CHART_AXIS_PRIMARY_Y);
+
+    lv_obj_set_style_bg_color(chat_wave, lv_color_hex(0x202938), 0);
+    lv_obj_set_style_border_width(chat_wave, 0, 0);
+    lv_obj_set_style_pad_all(chat_wave, 6, 0);
+    lv_obj_set_style_width(chat_wave, 0, LV_PART_INDICATOR);
+    lv_obj_set_style_height(chat_wave, 0, LV_PART_INDICATOR);
 
     chat_output = lv_textarea_create(content);
-    lv_obj_set_size(chat_output, 640, 230);
-    lv_textarea_set_text(chat_output, chat_history[0] ? chat_history : "Ask me anything.");
+    lv_obj_set_size(chat_output, 640, 340);
+    lv_textarea_set_text(chat_output, chat_history[0] ? chat_history : "");
     lv_textarea_set_cursor_pos(chat_output, LV_TEXTAREA_CURSOR_LAST);
     lv_textarea_set_one_line(chat_output, false);
+    lv_textarea_set_placeholder_text(chat_output, "New conversation");
+    lv_obj_set_style_bg_color(chat_output, lv_color_hex(0x202938), 0);
+    lv_obj_set_style_text_color(chat_output, lv_color_white(), 0);
+    lv_obj_set_style_text_color(chat_output, lv_color_hex(0xCDD5E2), LV_PART_TEXTAREA_PLACEHOLDER);
+    lv_obj_set_style_border_width(chat_output, 0, 0);
+    lv_obj_set_style_pad_all(chat_output, 20, 0);
+    lv_obj_set_style_text_line_space(chat_output, 6, 0);
+    lv_obj_set_style_bg_opa(chat_output, LV_OPA_TRANSP, LV_PART_CURSOR);
 
     chat_input = lv_textarea_create(content);
-    lv_obj_set_size(chat_input, 640, 90);
+    lv_obj_set_size(chat_input, 640, 96);
     lv_textarea_set_placeholder_text(chat_input, "Message");
     lv_textarea_set_max_length(chat_input, 2000);
+    lv_obj_set_style_pad_all(chat_input, 16, 0);
+    lv_obj_set_style_border_color(chat_input, lv_color_hex(0xE91E63), 0);
+    lv_obj_set_style_text_color(chat_input, lv_color_hex(0x647084), LV_PART_TEXTAREA_PLACEHOLDER);
 
     lv_obj_t *actions = lv_obj_create(content);
-    lv_obj_set_size(actions, 640, 90);
+    lv_obj_remove_style_all(actions);
+    lv_obj_set_size(actions, 640, 76);
     lv_obj_remove_flag(actions, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(actions, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(actions, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(actions, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     chat_send_button = button(actions, "Send", chat_send_clicked);
     lv_obj_set_size(chat_send_button, 180, 76);
-    chat_voice_button = button(actions, voice_recording ? "Stop" : "Start", chat_voice_clicked);
+    chat_voice_button = button(actions, voice_recording ? "Stop" : "Record", chat_voice_clicked);
     chat_voice_label = lv_obj_get_child(chat_voice_button, 0);
     lv_obj_set_size(chat_voice_button, 180, 76);
     lv_obj_t *new_chat = button(actions, "New", chat_new_clicked);
     lv_obj_set_size(new_chat, 180, 76);
+    lv_obj_set_style_bg_color(chat_send_button, lv_color_hex(0xE91E63), 0);
+    lv_obj_set_style_bg_color(chat_voice_button, lv_color_hex(0x344156), 0);
+    lv_obj_set_style_bg_color(new_chat, lv_color_hex(0x344156), 0);
     if (chat_busy) {
         lv_obj_add_state(chat_send_button, LV_STATE_DISABLED);
         if (!voice_recording) lv_obj_add_state(chat_voice_button, LV_STATE_DISABLED);
     }
 
     lv_obj_t *controls = lv_obj_create(content);
-    lv_obj_set_size(controls, 640, 64);
+    lv_obj_remove_style_all(controls);
+    lv_obj_set_size(controls, 640, 60);
     lv_obj_remove_flag(controls, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(controls, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(controls, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(controls, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_t *keyboard_button = button(controls, "Hide keys", chat_keyboard_clicked);
-    lv_obj_set_size(keyboard_button, 290, 54);
+    lv_obj_set_size(keyboard_button, 310, 60);
     chat_keyboard_label = lv_obj_get_child(keyboard_button, 0);
-    lv_obj_t *text_button = button(controls, "Text: Small", chat_text_clicked);
-    lv_obj_set_size(text_button, 290, 54);
+    lv_obj_t *text_button = button(controls, "Text: Normal", chat_text_clicked);
+    lv_obj_set_size(text_button, 310, 60);
     chat_text_label = lv_obj_get_child(text_button, 0);
+    lv_obj_set_style_bg_color(keyboard_button, lv_color_hex(0x344156), 0);
+    lv_obj_set_style_bg_color(text_button, lv_color_hex(0x344156), 0);
 
     chat_keyboard = lv_keyboard_create(content);
     lv_obj_set_size(chat_keyboard, 640, 330);
