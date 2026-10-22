@@ -29,11 +29,11 @@ static void render(const char *notice)
             "Saved read: addr 0x%02X | reg 0x%02X | %lu kHz\n"
             "%s\n%s",
             saved.address, saved.reg, (unsigned long)(saved.speed_hz / 1000),
-            value, notice ? notice : "Copy uses this saved read; it does not read the bus.");
+            value, notice ? notice : "");
     } else {
         lv_obj_add_state(copy_button, LV_STATE_DISABLED);
         lv_label_set_text_fmt(details, "Saved read: none\n%s",
-            notice ? notice : "Complete a read, then COPY READ to inspect it in Byte Lab.");
+            notice ? notice : "");
     }
 }
 
@@ -94,7 +94,7 @@ void i2c_result_show(lv_obj_t *parent, void (*before_action)(void))
     cancel_write = before_action;
     lv_obj_t *panel = lv_obj_create(parent);
     lv_obj_remove_style_all(panel);
-    lv_obj_set_size(panel, 620, 154);
+    lv_obj_set_size(panel, 620, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(panel, 8, 0);
     lv_obj_t *row = lv_obj_create(panel);
@@ -106,8 +106,8 @@ void i2c_result_show(lv_obj_t *parent, void (*before_action)(void))
     copy_button = button(row, "COPY READ", copy_clicked);
     button(row, "CLEAR READ", clear_clicked);
     details = lv_label_create(panel);
-    lv_obj_set_size(details, 620, 80);
-    lv_obj_set_style_text_font(details, &lv_font_montserrat_14, 0);
+    lv_obj_set_size(details, 620, LV_SIZE_CONTENT);
+    lv_obj_set_style_text_font(details, &lv_font_montserrat_28, 0);
     lv_label_set_long_mode(details, LV_LABEL_LONG_WRAP);
     render(NULL);
 }

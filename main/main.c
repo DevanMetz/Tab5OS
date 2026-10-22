@@ -6278,7 +6278,7 @@ static void i2c_update_controls(void)
     if (i2c_register_label)
         lv_label_set_text_fmt(i2c_register_label, "Register: 0x%02X", i2c_selected_register);
     if (i2c_speed_label)
-        lv_label_set_text_fmt(i2c_speed_label, "Register speed: %lu kHz",
+        lv_label_set_text_fmt(i2c_speed_label, "Speed: %lu kHz",
                               (unsigned long)(i2c_bus_speed_hz / 1000));
     if (i2c_watch_label)
         lv_label_set_text(i2c_watch_label, i2c_watch_enabled ? "WATCH 1 Hz: ON" : "WATCH 1 Hz: OFF");
@@ -6521,11 +6521,11 @@ static lv_obj_t *i2c_step_button(lv_obj_t *parent, const char *text, lv_event_cb
     return control;
 }
 
-static lv_obj_t *i2c_step_row(lv_event_cb_t callback)
+static lv_obj_t *i2c_step_row(lv_obj_t *parent, lv_event_cb_t callback)
 {
-    lv_obj_t *row = lv_obj_create(content);
+    lv_obj_t *row = lv_obj_create(parent);
     lv_obj_remove_style_all(row);
-    lv_obj_set_size(row, 620, 62);
+    lv_obj_set_size(row, 620, 64);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     i2c_step_button(row, "-0x10", callback, -0x10);
@@ -6813,50 +6813,64 @@ static void ble_clicked(lv_event_t *event)
     ble_tool_show(content, wifi_ready, sd_ready, ble_scan, ble_products_idle, sd_record_error);
 }
 
+static lv_obj_t *i2c_panel(void)
+{
+    lv_obj_t *panel = lv_obj_create(content);
+    lv_obj_set_size(panel, 660, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x202938), 0);
+    lv_obj_set_style_text_color(panel, lv_color_hex(0xe6edf3), 0);
+    lv_obj_set_style_border_width(panel, 0, 0);
+    lv_obj_set_style_radius(panel, 16, 0);
+    lv_obj_set_style_pad_all(panel, 20, 0);
+    lv_obj_set_style_pad_row(panel, 16, 0);
+    lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(panel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+    return panel;
+}
+
 static void show_i2c(void)
 {
     clear_content();
-    lv_obj_set_style_pad_row(content, 12, 0);
+    lv_obj_set_style_pad_row(content, 20, 0);
     lv_obj_t *title = lv_label_create(content);
-    lv_label_set_text(title, "External I2C Inspector");
+    lv_label_set_text(title, "I2C Tool");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
 
-    lv_obj_t *help = lv_label_create(content);
-    lv_obj_set_width(help, 620);
-    lv_obj_set_style_text_align(help, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(help, &lv_font_montserrat_14, 0);
-    lv_label_set_text(help, "Grove/EXT: SDA G53, SCL G54; external 5V stays off.\n"
-                            "Share ground. Use 3.3V pull-ups or level-shift a 5V bus.\n"
-                            "Read 1-32 bytes after an 8-bit register pointer.\n"
-                            "Reads can have side effects; check the device's auto-increment rules.\n"
-                            "Raw writes can reconfigure hardware; verify the register and value first.");
+    lv_obj_t *scan_panel = i2c_panel();
+    lv_obj_t *pins = lv_label_create(scan_panel);
+    lv_label_set_text(pins, "SDA G53   /   SCL G54   /   3.3 V");
+    lv_obj_set_style_text_font(pins, &lv_font_montserrat_28, 0);
 
-    lv_obj_t *scan = button(content, LV_SYMBOL_REFRESH "  SCAN", i2c_scan_clicked);
-    lv_obj_set_size(scan, 620, 90);
-    i2c_status = lv_label_create(content);
+    lv_obj_t *scan = button(scan_panel, LV_SYMBOL_REFRESH "  SCAN", i2c_scan_clicked);
+    lv_obj_set_size(scan, 620, 72);
+    i2c_status = lv_label_create(scan_panel);
     lv_obj_set_width(i2c_status, 620);
+    lv_obj_set_style_text_font(i2c_status, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_align(i2c_status, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(i2c_status, "Ready; tap SCAN to probe addresses 0x08-0x77");
-    i2c_devices = lv_label_create(content);
+    lv_label_set_text(i2c_status, "Not scanned");
+    i2c_devices = lv_label_create(scan_panel);
     lv_obj_set_width(i2c_devices, 620);
+    lv_obj_set_style_text_font(i2c_devices, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_align(i2c_devices, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(i2c_devices, "No scan performed this visit");
-    lv_obj_t *speed = button(content, "", i2c_speed_clicked);
+    lv_label_set_text(i2c_devices, "");
+    lv_obj_t *read_panel = i2c_panel();
+    lv_obj_t *speed = button(read_panel, "", i2c_speed_clicked);
     lv_obj_set_size(speed, 620, 70);
     i2c_speed_label = lv_obj_get_child(speed, 0);
-    i2c_address_label = lv_label_create(content);
+    i2c_address_label = lv_label_create(read_panel);
     lv_obj_set_style_text_font(i2c_address_label, &lv_font_montserrat_28, 0);
-    i2c_step_row(i2c_address_step_clicked);
-    i2c_register_label = lv_label_create(content);
+    i2c_step_row(read_panel, i2c_address_step_clicked);
+    i2c_register_label = lv_label_create(read_panel);
     lv_obj_set_style_text_font(i2c_register_label, &lv_font_montserrat_28, 0);
-    i2c_step_row(i2c_register_step_clicked);
-    lv_obj_t *length_row = lv_obj_create(content);
+    i2c_step_row(read_panel, i2c_register_step_clicked);
+    lv_obj_t *length_row = lv_obj_create(read_panel);
     lv_obj_remove_style_all(length_row);
     lv_obj_set_size(length_row, 620, 64);
     lv_obj_set_flex_flow(length_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(length_row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_t *length_label = lv_label_create(length_row);
-    lv_label_set_text(length_label, "One-shot bytes:");
+    lv_label_set_text(length_label, "Read bytes");
     lv_obj_set_style_text_font(length_label, &lv_font_montserrat_28, 0);
     lv_obj_t *length_select = lv_dropdown_create(length_row);
     lv_obj_set_size(length_select, 240, 60);
@@ -6869,11 +6883,7 @@ static void show_i2c(void)
     lv_dropdown_set_options(length_select, lengths);
     lv_dropdown_set_selected(length_select, (uint32_t)i2c_read_length - 1);
     lv_obj_add_event_cb(length_select, i2c_length_changed, LV_EVENT_VALUE_CHANGED, NULL);
-    lv_obj_t *read_help = lv_label_create(content);
-    lv_obj_set_width(read_help, 620);
-    lv_obj_set_style_text_font(read_help, &lv_font_montserrat_14, 0);
-    lv_label_set_text(read_help, "Watch/CSV always sample one byte at 1 Hz. READ ONCE stops Watch and saves its CSV.");
-    lv_obj_t *read_row = lv_obj_create(content);
+    lv_obj_t *read_row = lv_obj_create(read_panel);
     lv_obj_remove_style_all(read_row);
     lv_obj_set_size(read_row, 620, 72);
     lv_obj_set_flex_flow(read_row, LV_FLEX_FLOW_ROW);
@@ -6883,23 +6893,27 @@ static void show_i2c(void)
     lv_obj_t *watch = button(read_row, "", i2c_watch_clicked);
     lv_obj_set_size(watch, 300, 70);
     i2c_watch_label = lv_obj_get_child(watch, 0);
-    i2c_read_result = lv_label_create(content);
+    i2c_read_result = lv_label_create(read_panel);
     lv_obj_set_width(i2c_read_result, 620);
+    lv_obj_set_style_text_font(i2c_read_result, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_align(i2c_read_result, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(i2c_read_result, "Select an address and register, then read once");
-    i2c_result_show(content, i2c_result_action);
-    lv_obj_t *capture = button(content, "", i2c_capture_clicked);
+    lv_label_set_text(i2c_read_result, "No read yet");
+    i2c_result_show(read_panel, i2c_result_action);
+    lv_obj_t *capture_panel = i2c_panel();
+    lv_obj_t *capture = button(capture_panel, "", i2c_capture_clicked);
     lv_obj_set_size(capture, 620, 70);
     i2c_capture_label = lv_obj_get_child(capture, 0);
-    i2c_capture_status = lv_label_create(content);
+    i2c_capture_status = lv_label_create(capture_panel);
     lv_obj_set_width(i2c_capture_status, 620);
+    lv_obj_set_style_text_font(i2c_capture_status, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_align(i2c_capture_status, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(i2c_capture_status, i2c_capture_notice[0] ? i2c_capture_notice :
-                      "Optional 1 Hz CSV logging to the SD card");
-    i2c_value_label = lv_label_create(content);
+                      "1 byte / 1 Hz / SD card");
+    lv_obj_t *write_panel = i2c_panel();
+    i2c_value_label = lv_label_create(write_panel);
     lv_obj_set_style_text_font(i2c_value_label, &lv_font_montserrat_28, 0);
-    i2c_step_row(i2c_value_step_clicked);
-    lv_obj_t *write = button(content, "", i2c_write_clicked);
+    i2c_step_row(write_panel, i2c_value_step_clicked);
+    lv_obj_t *write = button(write_panel, "", i2c_write_clicked);
     lv_obj_set_size(write, 620, 80);
     i2c_write_label = lv_obj_get_child(write, 0);
     i2c_update_controls();
