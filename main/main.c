@@ -7531,45 +7531,69 @@ static void show_servo(void)
 {
     clear_content();
     if (!shared_i2c_pins_available()) return;
-    lv_obj_t *title = lv_label_create(content);
+    /* Keep spacing local so other apps retain their content styles. */
+    lv_obj_t *panel = lv_obj_create(content);
+    lv_obj_remove_style_all(panel);
+    lv_obj_set_size(panel, 640, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(panel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(panel, 20, 0);
+    lv_obj_remove_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *title = lv_label_create(panel);
     lv_label_set_text(title, "Servo Toy");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
-    servo_status = lv_label_create(content);
-    lv_label_set_text(servo_status, "Stopped - outputs off");
-    servo_position = lv_label_create(content);
+
+    lv_obj_t *readout = lv_obj_create(panel);
+    lv_obj_set_size(readout, 640, 180);
+    lv_obj_set_style_bg_color(readout, lv_color_hex(0x202938), 0);
+    lv_obj_set_style_text_color(readout, lv_color_white(), 0);
+    lv_obj_set_style_border_width(readout, 0, 0);
+    lv_obj_set_style_radius(readout, 20, 0);
+    lv_obj_remove_flag(readout, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(readout, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(readout, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(readout, 16, 0);
+    servo_position = lv_label_create(readout);
     lv_label_set_text(servo_position, "90 deg");
     lv_obj_set_style_text_font(servo_position, &lv_font_montserrat_48, 0);
+    servo_status = lv_label_create(readout);
+    lv_obj_set_width(servo_status, LV_PCT(100));
+    lv_obj_set_style_text_font(servo_status, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_align(servo_status, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(servo_status, "Stopped - outputs off");
 
-    lv_obj_t *mode = button(content, "Motion: Sine", servo_mode_clicked);
+    lv_obj_t *mode = button(panel, "Motion: Sine", servo_mode_clicked);
     servo_mode_label = lv_obj_get_child(mode, 0);
-    lv_obj_set_size(mode, 620, 72);
+    lv_obj_set_size(mode, 640, 96);
+    lv_obj_set_style_bg_color(mode, lv_color_hex(0x202938), 0);
 
-    lv_obj_t *controls = lv_obj_create(content);
-    lv_obj_set_size(controls, 620, 100);
-    lv_obj_remove_flag(controls, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_flex_flow(controls, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(controls, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_t *range = button(controls, "Range: Medium", servo_range_clicked);
+    lv_obj_t *range = button(panel, "Range: Medium", servo_range_clicked);
     servo_range_label = lv_obj_get_child(range, 0);
-    lv_obj_set_size(range, 270, 72);
-    lv_obj_t *rate = button(controls, "Freq: 0.25 Hz", servo_rate_clicked);
+    lv_obj_set_size(range, 640, 96);
+    lv_obj_set_style_bg_color(range, lv_color_hex(0x202938), 0);
+    lv_obj_t *rate = button(panel, "Freq: 0.25 Hz", servo_rate_clicked);
     servo_rate_label = lv_obj_get_child(rate, 0);
-    lv_obj_set_size(rate, 270, 72);
+    lv_obj_set_size(rate, 640, 96);
+    lv_obj_set_style_bg_color(rate, lv_color_hex(0x202938), 0);
 
-    lv_obj_t *hint = lv_label_create(content);
-    lv_obj_set_width(hint, 620);
-    lv_label_set_text(hint, "Sine frequency is full back-and-forth cycles per second.\nTap Motion to switch modes; switching stops the servo.");
-
-    lv_obj_t *start = button(content, "START", servo_start_clicked);
-    lv_obj_set_size(start, 620, 110);
-    lv_obj_t *stop = button(content, "STOP", servo_stop_clicked);
-    lv_obj_set_size(stop, 620, 150);
+    lv_obj_t *actions = lv_obj_create(panel);
+    lv_obj_remove_style_all(actions);
+    lv_obj_set_size(actions, 640, 112);
+    lv_obj_remove_flag(actions, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(actions, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(actions, 20, 0);
+    lv_obj_t *start = button(actions, LV_SYMBOL_PLAY "  Start", servo_start_clicked);
+    lv_obj_set_size(start, 310, 112);
+    lv_obj_t *stop = button(actions, LV_SYMBOL_STOP "  Stop", servo_stop_clicked);
+    lv_obj_set_size(stop, 310, 112);
     lv_obj_set_style_bg_color(stop, lv_color_hex(0xC62828), 0);
 
-    lv_obj_t *wiring = lv_label_create(content);
-    lv_obj_set_width(wiring, 620);
+    lv_obj_t *wiring = lv_label_create(panel);
+    lv_obj_set_width(wiring, 640);
+    lv_obj_set_style_text_font(wiring, &lv_font_montserrat_28, 0);
     lv_label_set_long_mode(wiring, LV_LABEL_LONG_WRAP);
-    lv_label_set_text_fmt(wiring, "G%d: servo signal\nG%d: LED driver signal\nUse external 5V servo power and common ground. Use a resistor and transistor/MOSFET for the LED. Leaving this app turns both outputs off.", SERVO_PIN, TOY_LED_PIN);
+    lv_label_set_text_fmt(wiring, "G%d  Servo     G%d  LED driver\nExternal 5V servo power + common ground.\nLED requires a resistor + transistor/MOSFET.", SERVO_PIN, TOY_LED_PIN);
     servo_update_labels();
     servo_timer = lv_timer_create(servo_tick, servo_sine_mode ? 20 : 50, NULL);
 }
