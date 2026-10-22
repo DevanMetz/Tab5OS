@@ -4907,12 +4907,21 @@ static void notes_clicked(lv_event_t *event)
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
 
     lv_obj_t *row = lv_obj_create(content);
-    lv_obj_set_size(row, 640, 70);
+    lv_obj_remove_style_all(row);
+    lv_obj_set_size(row, 640, 140);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(row, 20, 0);
     lv_obj_t *status = lv_label_create(row);
     lv_label_set_text(status, sd_ready ? "Notes" : "SD card unavailable");
+    lv_obj_set_width(status, 480);
+    lv_obj_set_style_text_font(status, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(status, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_flex_grow(status, 1);
     lv_obj_t *save = lv_button_create(row);
+    lv_obj_set_size(save, 140, 72);
+    lv_obj_set_style_text_font(save, &lv_font_montserrat_28, 0);
     lv_obj_add_event_cb(save, save_note, LV_EVENT_CLICKED, status);
     lv_obj_t *save_label = lv_label_create(save);
     lv_label_set_text(save_label, "Save");
@@ -4935,12 +4944,19 @@ static void notes_clicked(lv_event_t *event)
     }
 
     note_area = lv_textarea_create(content);
-    lv_obj_set_size(note_area, 640, 420);
+    lv_obj_set_size(note_area, 640, 440);
+    lv_obj_set_style_text_font(note_area, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_line_space(note_area, 8, 0);
+    lv_obj_set_style_pad_all(note_area, 20, 0);
     lv_textarea_set_text(note_area, note_can_save ? note : "");
     lv_textarea_set_max_length(note_area, NOTE_MAX_BYTES);
     heap_caps_free(note);
     lv_obj_t *keyboard = lv_keyboard_create(content);
-    lv_obj_set_size(keyboard, 640, 500);
+    lv_obj_set_size(keyboard, 640, 440);
+    lv_obj_set_style_pad_all(keyboard, 2, 0);
+    lv_obj_set_style_pad_column(keyboard, 1, 0);
+    lv_obj_set_style_pad_row(keyboard, 8, 0);
+    lv_obj_set_style_text_font(keyboard, &lv_font_montserrat_28, LV_PART_ITEMS);
     lv_keyboard_set_textarea(keyboard, note_area);
     if (!note_can_save) {
         lv_obj_add_state(save, LV_STATE_DISABLED);

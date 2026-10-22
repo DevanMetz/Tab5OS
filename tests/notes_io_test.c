@@ -220,6 +220,30 @@ lv_obj_t *lv_label_create(lv_obj_t *parent) { return lv_obj_create(parent); }
 lv_obj_t *lv_button_create(lv_obj_t *parent) { return lv_obj_create(parent); }
 lv_obj_t *lv_textarea_create(lv_obj_t *parent) { return lv_obj_create(parent); }
 lv_obj_t *lv_keyboard_create(lv_obj_t *parent) { return lv_obj_create(parent); }
+/* Presentation APIs used by the Notes layout; storage cases use controlled UI. */
+#define LV_FLEX_ALIGN_START 0
+#define LV_FLEX_ALIGN_CENTER 1
+#define LV_OBJ_FLAG_SCROLLABLE 1
+#define LV_PART_ITEMS 1
+static const int lv_font_montserrat_28 = 28;
+void lv_obj_remove_style_all(lv_obj_t *object) { assert(object); }
+void lv_obj_remove_flag(lv_obj_t *object, int flag) { assert(object && flag); }
+void lv_obj_set_width(lv_obj_t *object, int width) { assert(object && width > 0); }
+void lv_obj_set_flex_align(lv_obj_t *object, int main, int cross, int track)
+{ assert(object); (void)main; (void)cross; (void)track; }
+void lv_obj_set_style_text_font(lv_obj_t *object, const int *font, int selector)
+{ assert(object && font); (void)selector; }
+unsigned lv_color_hex(unsigned color) { return color; }
+void lv_obj_set_style_text_color(lv_obj_t *object, unsigned color, int selector)
+{ assert(object); (void)color; (void)selector; }
+#define NOTES_STYLE_STUB(name) \
+void name(lv_obj_t *object, int value, int selector) \
+{ assert(object && value >= 0); (void)selector; }
+NOTES_STYLE_STUB(lv_obj_set_style_pad_column)
+NOTES_STYLE_STUB(lv_obj_set_style_pad_row)
+NOTES_STYLE_STUB(lv_obj_set_style_pad_all)
+NOTES_STYLE_STUB(lv_obj_set_style_text_line_space)
+#undef NOTES_STYLE_STUB
 void lv_obj_set_size(lv_obj_t *object, int width, int height) { assert(object && width > 0 && height > 0); }
 void lv_obj_set_flex_flow(lv_obj_t *object, int flow) { assert(object && flow); }
 void lv_obj_set_flex_grow(lv_obj_t *object, int grow) { assert(object && grow == 1); }
