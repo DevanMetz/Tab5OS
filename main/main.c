@@ -5625,6 +5625,34 @@ static void system_self_test(void)
     assert(!wifi_forget_confirmation_valid(false, 100, 100));
 }
 
+static lv_obj_t *system_panel(const char *heading)
+{
+    lv_obj_t *panel = lv_obj_create(content);
+    lv_obj_set_size(panel, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_remove_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(panel, lv_color_hex(0x202838), 0);
+    lv_obj_set_style_text_color(panel, lv_color_white(), 0);
+    lv_obj_set_style_border_width(panel, 0, 0);
+    lv_obj_set_style_radius(panel, 16, 0);
+    lv_obj_set_style_pad_all(panel, 20, 0);
+    lv_obj_set_style_pad_row(panel, 16, 0);
+    lv_obj_set_style_text_font(panel, &lv_font_montserrat_28, 0);
+    lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_t *title = lv_label_create(panel);
+    lv_label_set_text(title, heading);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(0xB69CFF), 0);
+    return panel;
+}
+
+static lv_obj_t *system_details(lv_obj_t *panel)
+{
+    lv_obj_t *label = lv_label_create(panel);
+    lv_obj_set_width(label, LV_PCT(100));
+    lv_obj_set_style_text_line_space(label, 10, 0);
+    return label;
+}
+
 static void system_refresh_ota(void)
 {
     if (!system_ota_info) return;
@@ -5679,6 +5707,12 @@ static void system_clicked(lv_event_t *event)
     lv_obj_t *title = lv_label_create(content);
     lv_label_set_text(title, "System");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+    lv_obj_set_width(title, LV_PCT(100));
+    lv_obj_set_style_pad_row(content, 20, 0);
+    lv_obj_t *firmware = system_panel("Firmware");
+    lv_obj_t *battery = system_panel("Battery");
+    lv_obj_t *device = system_panel("Device");
+    lv_obj_t *storage = system_panel("Storage & network");
     esp_chip_info_t chip;
     esp_chip_info(&chip);
     const esp_app_desc_t *app = esp_app_get_description();
@@ -5712,16 +5746,21 @@ static void system_clicked(lv_event_t *event)
         else
             snprintf(sd_text, sizeof(sd_text), "mounted but not responding");
     }
-    lv_obj_t *info = lv_label_create(content);
+    lv_obj_t *version = system_details(firmware);
+    lv_label_set_text_fmt(version, "Tab5 OS %s", app->version);
+    system_ota_info = system_details(firmware);
+    system_refresh_ota();
+    ota_button = button(firmware, "Install stable", ota_clicked);
+    lv_obj_set_size(ota_button, LV_PCT(100), 72);
+    if (ota_busy) lv_obj_add_state(ota_button, LV_STATE_DISABLED);
+    ota_status = system_details(firmware);
+    lv_label_set_text(ota_status, ota_busy ? "Checking stable release manifest..." : "");
+
+    lv_obj_t *info = system_details(device);
     lv_label_set_text_fmt(info,
-        "Tab5 OS %s\nESP-IDF %d.%d.%d | ELF SHA-256: %s...\n\n"
         "ESP32-P4 rev %d.%d  |  %d cores\nPanel: %s 720 x 1280\n"
         "Reset: %s\nUptime: %lu d %02lu:%02lu\n"
-        "Internal heap: %lu KB free / %lu KB minimum\nPSRAM: %lu KB free / %lu KB total\n\n"
-        "Settings: %s\nInternal: %s\nSD card: %s\nWi-Fi: %s\n"
-        "Running app: %s",
-        app->version, ESP_IDF_VERSION_MAJOR, ESP_IDF_VERSION_MINOR,
-        ESP_IDF_VERSION_PATCH, elf_hash,
+        "Internal heap: %lu KB free / %lu KB minimum\nPSRAM: %lu KB free / %lu KB total",
         chip.revision / 100, chip.revision % 100, chip.cores,
         bsp_display_get_panel_ic(), reset_reason_name(esp_reset_reason()),
         (unsigned long)(uptime / 86400), (unsigned long)(uptime / 3600 % 24),
@@ -5729,32 +5768,36 @@ static void system_clicked(lv_event_t *event)
         (unsigned long)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024),
         (unsigned long)(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024),
         (unsigned long)(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024),
-        (unsigned long)(heap_caps_get_total_size(MALLOC_CAP_SPIRAM) / 1024),
+        (unsigned long)(heap_caps_get_total_size(MALLOC_CAP_SPIRAM) / 1024));
+    lv_obj_t *build_info = system_details(device);
+    lv_label_set_text_fmt(build_info, "ESP-IDF %d.%d.%d\nELF SHA-256: %s...\nRunning app: %s",
+        ESP_IDF_VERSION_MAJOR, ESP_IDF_VERSION_MINOR, ESP_IDF_VERSION_PATCH,
+        elf_hash, running_text);
+    lv_obj_t *storage_info = system_details(storage);
+    lv_label_set_text_fmt(storage_info, "Settings: %s\nInternal: %s\nSD card: %s\nWi-Fi: %s",
         nvs_init_error == ESP_OK ? "ready" : esp_err_to_name(nvs_init_error),
         internal_text, sd_text,
-        wifi_connected ? wifi_ip : wifi_ready ? "disconnected" : "unavailable",
-        running_text);
-    lv_obj_set_style_text_line_space(info, 8, 0);
-    system_ota_info = lv_label_create(content);
-    lv_obj_set_width(system_ota_info, LV_PCT(100));
-    lv_obj_set_style_text_line_space(system_ota_info, 8, 0);
-    system_refresh_ota();
+        wifi_connected ? wifi_ip : wifi_ready ? "disconnected" : "unavailable");
     storage_format_armed = false;
     if (!internal_ready) {
-        storage_status = lv_label_create(content);
-        lv_obj_set_width(storage_status, 620);
+        storage_status = system_details(storage);
         lv_label_set_text(storage_status, "Internal storage could not be mounted. Initialization erases it.");
-        lv_obj_t *format = button(content, "Initialize internal storage", storage_format_clicked);
+        lv_obj_t *format = button(storage, "Initialize internal storage", storage_format_clicked);
         storage_format_label = lv_obj_get_child(format, 0);
-        lv_obj_set_size(format, 520, 82);
+        lv_obj_set_size(format, LV_PCT(100), 82);
     }
-    battery_metrics = lv_label_create(content);
+    battery_metrics = system_details(battery);
+    lv_obj_set_style_text_font(battery_metrics, &lv_font_montserrat_28, 0);
     lv_label_set_text_fmt(battery_metrics, "%d.%03d V    %+d mA    %d%%",
         battery_millivolts / 1000, battery_millivolts % 1000, battery_milliamps, battery_percent);
-    lv_obj_t *history_title = lv_label_create(content);
-    lv_label_set_text(history_title, "Battery percentage - last 5 minutes");
-    battery_chart = lv_chart_create(content);
-    lv_obj_set_size(battery_chart, 620, 260);
+    lv_obj_t *history_title = lv_label_create(battery);
+    lv_label_set_text(history_title, "Charge (%) · 5 min");
+    battery_chart = lv_chart_create(battery);
+    lv_obj_set_size(battery_chart, LV_PCT(100), 220);
+    lv_obj_set_style_bg_color(battery_chart, lv_color_hex(0x202838), 0);
+    lv_obj_set_style_border_color(battery_chart, lv_color_hex(0x465166), 0);
+    lv_obj_set_style_line_color(battery_chart, lv_color_hex(0x465166), LV_PART_MAIN);
+    lv_obj_set_style_size(battery_chart, 4, 4, LV_PART_INDICATOR);
     lv_chart_set_type(battery_chart, LV_CHART_TYPE_LINE);
     lv_chart_set_point_count(battery_chart, BATTERY_HISTORY_POINTS);
     lv_chart_set_range(battery_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
@@ -5766,13 +5809,6 @@ static void system_clicked(lv_event_t *event)
         lv_chart_set_next_value(battery_chart, battery_series,
             battery_history[(first + i) % BATTERY_HISTORY_POINTS]);
     }
-    ota_button = button(content, "Install stable", ota_clicked);
-    lv_obj_set_size(ota_button, 320, 82);
-    if (ota_busy) lv_obj_add_state(ota_button, LV_STATE_DISABLED);
-    ota_status = lv_label_create(content);
-    lv_label_set_text(ota_status, ota_busy ? "Checking stable release manifest..." :
-                                            "Manifest version, hardware, size, URL, and SHA-256 are verified before activation");
-    lv_obj_set_width(ota_status, 620);
     ota_timer = lv_timer_create(ota_tick, 250, NULL);
 }
 
