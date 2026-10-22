@@ -55,9 +55,9 @@ static void inputs_changed(void)
      * per-character result formatting or button-state animations. */
     if (dirty || !status_label) return;
     dirty = true;
-    lv_label_set_text(frame_label, "Inputs changed. COPY REQUEST builds an 8-byte read frame.");
-    lv_label_set_text(status_label, "Inputs changed. DECODE checks the reply against the current request fields.");
-    lv_label_set_text(result_label, "No decoded reply for these inputs.");
+    lv_label_set_text(frame_label, "Request changed");
+    lv_label_set_text(status_label, "Request changed. Decode again.");
+    lv_label_set_text(result_label, "No decoded values");
 }
 
 static bool build_request(modbus_request_t *request, uint8_t bytes[MODBUS_RTU_REQUEST_BYTES])
@@ -76,10 +76,7 @@ static bool build_request(modbus_request_t *request, uint8_t bytes[MODBUS_RTU_RE
         return false;
     }
     char text[144];
-    snprintf(text, sizeof(text), "Request: unit %u | FC %02u | address %u | count %u\n"
-             "%02X %02X %02X %02X %02X %02X %02X %02X  (last 2 bytes: CRC)",
-             (unsigned)request->unit_id, (unsigned)request->function,
-             (unsigned)request->address, (unsigned)request->quantity,
+    snprintf(text, sizeof(text), "%02X %02X %02X %02X %02X %02X %02X %02X",
              (unsigned)bytes[0], (unsigned)bytes[1], (unsigned)bytes[2], (unsigned)bytes[3],
              (unsigned)bytes[4], (unsigned)bytes[5], (unsigned)bytes[6], (unsigned)bytes[7]);
     lv_label_set_text(frame_label, text);
@@ -101,7 +98,7 @@ static void decode_clicked(lv_event_t *event)
 {
     (void)event;
     decoded = false;
-    lv_label_set_text(result_label, "No decoded reply for these inputs.");
+    lv_label_set_text(result_label, "No decoded values");
     uint8_t request_bytes[MODBUS_RTU_REQUEST_BYTES];
     modbus_request_t request;
     if (!build_request(&request, request_bytes)) return;
@@ -239,7 +236,7 @@ static lv_obj_t *label(lv_obj_t *parent, const char *text)
 {
     lv_obj_t *object = lv_label_create(parent);
     lv_obj_set_width(object, 640);
-    lv_obj_set_style_text_font(object, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(object, &lv_font_montserrat_28, 0);
     lv_label_set_long_mode(object, LV_LABEL_LONG_WRAP);
     lv_label_set_text(object, text);
     return object;
@@ -260,7 +257,7 @@ static lv_obj_t *field_block(lv_obj_t *parent, const char *name, int width)
 {
     lv_obj_t *object = lv_obj_create(parent);
     lv_obj_remove_style_all(object);
-    lv_obj_set_size(object, width, 80);
+    lv_obj_set_size(object, width, 98);
     lv_obj_remove_flag(object, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(object, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(object, 4, 0);
@@ -272,7 +269,7 @@ static void input(lv_obj_t *parent, const char *name, unsigned index, int width)
 {
     lv_obj_t *block = field_block(parent, name, width);
     fields[index] = lv_textarea_create(block);
-    lv_obj_set_size(fields[index], width, 60);
+    lv_obj_set_size(fields[index], width, 64);
     lv_textarea_set_max_length(fields[index], 6);
     lv_textarea_set_text(fields[index], saved_fields[index]);
     lv_obj_add_event_cb(fields[index], input_event, LV_EVENT_ALL, (void *)(uintptr_t)index);
@@ -282,7 +279,7 @@ static lv_obj_t *select_options(lv_obj_t *parent, const char *name, int width,
                                  const char *options, unsigned selected, lv_event_cb_t callback)
 {
     lv_obj_t *object = lv_dropdown_create(field_block(parent, name, width));
-    lv_obj_set_size(object, width, 60);
+    lv_obj_set_size(object, width, 64);
     lv_dropdown_set_options(object, options);
     lv_dropdown_set_selected(object, selected);
     lv_obj_t *list = lv_dropdown_get_list(object);
@@ -297,7 +294,11 @@ static lv_obj_t *select_options(lv_obj_t *parent, const char *name, int width,
 static void button(lv_obj_t *parent, const char *text, int width, lv_event_cb_t callback)
 {
     lv_obj_t *object = lv_button_create(parent);
-    lv_obj_set_size(object, width, 60);
+    lv_obj_set_size(object, width, 64);
+    if (callback == example_clicked || callback == clear_clicked || callback == paste_clicked) {
+        lv_obj_set_style_bg_color(object, lv_color_hex(0x283548), 0);
+        lv_obj_set_style_text_color(object, lv_color_white(), 0);
+    }
     lv_obj_t *caption = lv_label_create(object);
     lv_label_set_text(caption, text);
     lv_obj_center(caption);
@@ -312,45 +313,48 @@ void modbus_rtu_tool_show(lv_obj_t *parent)
     lv_obj_set_size(column, 640, LV_SIZE_CONTENT);
     lv_obj_remove_flag(column, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(column, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(column, 8, 0);
+    lv_obj_set_style_pad_row(column, 10, 0);
     lv_obj_set_style_text_font(column, &lv_font_montserrat_28, 0);
-    lv_obj_set_style_text_font(label(column, "Modbus RTU Frames"), &lv_font_montserrat_28, 0);
-    label(column, "Build read frames and inspect captured replies offline.\nUse Serial to send bytes; this app does not open a port.");
-    lv_obj_t *operation = row(column, 80);
-    function_select = select_options(operation, "Read function", 430,
+    lv_obj_set_style_text_font(label(column, "RTU Frames"), &lv_font_montserrat_28, 0);
+    lv_obj_t *operation = row(column, 98);
+    function_select = select_options(operation, "Function", 430,
         "01 Coils\n02 Discrete inputs\n03 Holding registers\n04 Input registers", function_index, function_changed);
-    input(operation, "Unit (1-247)", UNIT, 198);
-    lv_obj_t *range = row(column, 80);
-    input(range, "Zero-based address (0-65535)", ADDRESS, 430);
-    input(range, "Count (1-16)", COUNT, 198);
-    frame_label = label(column, "COPY REQUEST builds the read frame with its CRC.");
-    lv_obj_set_height(frame_label, 40);
-    lv_obj_t *copy_actions = row(column, 60);
+    input(operation, "Unit 1-247", UNIT, 198);
+    lv_obj_t *range = row(column, 98);
+    input(range, "Address (zero-based)", ADDRESS, 430);
+    input(range, "Count 1-16", COUNT, 198);
+    frame_label = label(column, "Request");
+    lv_obj_set_height(frame_label, 56);
+    lv_obj_set_style_bg_color(frame_label, lv_color_hex(0x202938), 0);
+    lv_obj_set_style_bg_opa(frame_label, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(frame_label, 12, 0);
+    lv_obj_set_style_pad_all(frame_label, 10, 0);
+    lv_obj_t *copy_actions = row(column, 64);
     button(copy_actions, "COPY REQUEST", 310, copy_clicked);
     button(copy_actions, "PASTE REPLY", 310, paste_clicked);
-    label(column, "Complete reply in Hex, including CRC (5-37 bytes)");
+    label(column, "Reply (Hex + CRC)");
     fields[REPLY] = lv_textarea_create(column);
-    lv_obj_set_size(fields[REPLY], 640, 84);
+    lv_obj_set_size(fields[REPLY], 640, 96);
     lv_textarea_set_max_length(fields[REPLY], BYTE_DATA_MAX_TEXT + 1);
     lv_textarea_set_text(fields[REPLY], saved_reply);
     lv_obj_add_event_cb(fields[REPLY], input_event, LV_EVENT_ALL, (void *)(uintptr_t)REPLY);
-    lv_obj_t *actions = row(column, 60);
+    lv_obj_t *actions = row(column, 64);
     button(actions, "DECODE", 206, decode_clicked);
     button(actions, "EXAMPLE", 206, example_clicked);
     button(actions, "CLEAR", 206, clear_clicked);
-    status_label = label(column, "Ready. Copy a request or enter a complete reply to decode.");
-    lv_obj_set_height(status_label, 40);
-    lv_obj_t *views = row(column, 80);
-    view_select = select_options(views, "Decoded values", 310,
+    status_label = label(column, "");
+    lv_obj_set_height(status_label, 48);
+    lv_obj_set_style_text_font(status_label, &lv_font_montserrat_14, 0);
+    lv_obj_t *views = row(column, 98);
+    view_select = select_options(views, "Values", 310,
         "16-bit registers\nUnsigned 32-bit\nSigned 32-bit\nFloat32", value_view, view_changed);
-    order_select = select_options(views, "32-bit byte order", 310,
+    order_select = select_options(views, "32-bit order", 310,
         "ABCD\nCDAB\nBADC\nDCBA", byte_order, view_changed);
-    label(column, "A B = first register; C D = next. Pairs start at the requested address.\nA reply does not echo its address. Verify the request and device mapping.");
     result_box = lv_obj_create(column);
-    lv_obj_set_size(result_box, 640, 200);
+    lv_obj_set_size(result_box, 640, 180);
     lv_obj_set_style_pad_all(result_box, 16, 0);
     lv_obj_set_scroll_dir(result_box, LV_DIR_VER);
-    result_label = label(result_box, "No decoded reply for these inputs.");
+    result_label = label(result_box, "No decoded values");
     lv_obj_set_width(result_label, 596);
     keyboard = lv_keyboard_create(column);
     lv_obj_set_size(keyboard, 640, 220);
