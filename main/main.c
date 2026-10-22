@@ -3939,10 +3939,10 @@ static void browser_apply_layout(void)
     lv_label_set_text(browser_keys_label, browser_keyboard_visible ? "Hide keys" : "Show keys");
     if (browser_keyboard_visible) {
         lv_obj_remove_flag(browser_keyboard, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_height(browser_page, 450);
+        lv_obj_set_height(browser_page, 458);
     } else {
         lv_obj_add_flag(browser_keyboard, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_height(browser_page, 780);
+        lv_obj_set_height(browser_page, 800);
     }
 }
 
@@ -3950,7 +3950,9 @@ static void browser_render(void)
 {
     lv_obj_clean(browser_page);
     lv_obj_t *body = lv_label_create(browser_page);
-    lv_obj_set_width(body, 580);
+    lv_obj_set_width(body, LV_PCT(100));
+    lv_obj_set_style_text_font(body, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_line_space(body, 6, 0);
     lv_label_set_long_mode(body, LV_LABEL_LONG_WRAP);
     lv_label_set_text(body, browser_ok ? (browser_result && browser_result[0] ? browser_result : "No readable text") : browser_error);
     if (!browser_ok || !browser_link_count) return;
@@ -3960,12 +3962,12 @@ static void browser_render(void)
     lv_obj_set_style_text_font(heading, &lv_font_montserrat_28, 0);
     for (size_t i = 0; i < browser_link_count; ++i) {
         lv_obj_t *link = button(browser_page, browser_link_labels[i], NULL);
-        lv_obj_set_size(link, 580, 58);
+        lv_obj_set_size(link, LV_PCT(100), 72);
         lv_obj_add_event_cb(link, browser_link_clicked, LV_EVENT_CLICKED, browser_links[i]);
         lv_obj_t *label = lv_obj_get_child(link, 0);
-        lv_obj_set_width(label, 520);
+        lv_obj_set_width(label, 536);
         lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
-        lv_obj_set_style_text_font(label, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_28, 0);
     }
 }
 
@@ -3998,6 +4000,7 @@ static bool browser_start_url(const char *requested, bool add_history)
     if (browser_page) {
         lv_obj_clean(browser_page);
         lv_obj_t *loading = lv_label_create(browser_page);
+        lv_obj_set_style_text_font(loading, &lv_font_montserrat_28, 0);
         lv_label_set_text(loading, "Loading...");
     }
     if (!browser_task && xTaskCreateWithCaps(browser_request_task, "browser", 12288, NULL, 4, &browser_task,
@@ -4052,7 +4055,7 @@ static void browser_tick(lv_timer_t *timer)
     (void)timer;
     if (!browser_done) return;
     browser_done = false;
-    lv_label_set_text(browser_status, browser_ok ? "Loaded" : browser_error);
+    lv_label_set_text(browser_status, browser_ok ? "" : browser_error);
     if (browser_ok) lv_textarea_set_text(browser_url_area, browser_url);
     browser_render();
 }
@@ -5318,53 +5321,74 @@ static void show_browser(void)
     clear_content();
     lv_obj_set_style_pad_row(content, 12, 0);
 
-    lv_obj_t *title = lv_label_create(content);
+    lv_obj_t *header = lv_obj_create(content);
+    lv_obj_set_size(header, 640, 56);
+    lv_obj_set_style_bg_opa(header, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_text_color(header, lv_color_white(), 0);
+    lv_obj_set_style_border_width(header, 0, 0);
+    lv_obj_set_style_pad_all(header, 0, 0);
+    lv_obj_remove_flag(header, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(header, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(header, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *title = lv_label_create(header);
     lv_label_set_text(title, "Browser");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
 
-    browser_status = lv_label_create(content);
-    lv_label_set_text(browser_status, browser_busy ? "Loading..." : browser_result ? "Loaded" : "Ready");
-    lv_obj_set_width(browser_status, 640);
+    browser_status = lv_label_create(header);
+    lv_label_set_text(browser_status, browser_busy ? "Loading..." : "");
+    lv_obj_set_width(browser_status, 440);
+    lv_obj_set_style_text_align(browser_status, LV_TEXT_ALIGN_RIGHT, 0);
 
     lv_obj_t *address = lv_obj_create(content);
-    lv_obj_set_size(address, 640, 82);
+    lv_obj_set_size(address, 640, 80);
     lv_obj_remove_flag(address, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(address, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(address, 0, 0);
+    lv_obj_set_style_pad_all(address, 0, 0);
+    lv_obj_set_style_pad_column(address, 12, 0);
     lv_obj_set_flex_flow(address, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(address, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(address, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     browser_url_area = lv_textarea_create(address);
-    lv_obj_set_size(browser_url_area, 470, 68);
+    lv_obj_set_size(browser_url_area, 524, 80);
+    lv_obj_set_style_text_font(browser_url_area, &lv_font_montserrat_28, 0);
     lv_textarea_set_one_line(browser_url_area, true);
     lv_textarea_set_max_length(browser_url_area, sizeof(browser_url) - 1);
     lv_textarea_set_text(browser_url_area, browser_url);
     lv_obj_add_event_cb(browser_url_area, browser_go_clicked, LV_EVENT_READY, NULL);
     lv_obj_t *go = button(address, "Go", browser_go_clicked);
-    lv_obj_set_size(go, 130, 68);
+    lv_obj_set_size(go, 104, 80);
 
     lv_obj_t *tools = lv_obj_create(content);
-    lv_obj_set_size(tools, 640, 64);
+    lv_obj_set_size(tools, 640, 72);
     lv_obj_remove_flag(tools, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_opa(tools, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(tools, 0, 0);
+    lv_obj_set_style_pad_all(tools, 0, 0);
+    lv_obj_set_style_pad_column(tools, 12, 0);
     lv_obj_set_flex_flow(tools, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(tools, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(tools, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_t *back = button(tools, "Back", browser_back_clicked);
-    lv_obj_set_size(back, 190, 54);
+    lv_obj_set_size(back, 205, 72);
     lv_obj_t *keys = button(tools, browser_keyboard_visible ? "Hide keys" : "Show keys", browser_keys_clicked);
     browser_keys_label = lv_obj_get_child(keys, 0);
-    lv_obj_set_size(keys, 190, 54);
+    lv_obj_set_size(keys, 205, 72);
     lv_obj_t *reload = button(tools, "Reload", browser_reload_clicked);
-    lv_obj_set_size(reload, 190, 54);
+    lv_obj_set_size(reload, 205, 72);
 
     browser_page = lv_obj_create(content);
-    lv_obj_set_size(browser_page, 640, 450);
+    lv_obj_set_size(browser_page, 640, 458);
     lv_obj_set_flex_flow(browser_page, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(browser_page, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     lv_obj_set_style_bg_color(browser_page, lv_color_white(), 0);
     lv_obj_set_style_text_color(browser_page, lv_color_black(), 0);
-    lv_obj_set_style_pad_row(browser_page, 12, 0);
+    lv_obj_set_style_pad_all(browser_page, 24, 0);
+    lv_obj_set_style_pad_row(browser_page, 20, 0);
     if (browser_result) browser_render();
     else {
         lv_obj_t *message = lv_label_create(browser_page);
-        lv_obj_set_width(message, 580);
-        lv_label_set_text(message, "Enter a web address, or tap Go to open example.com.");
+        lv_obj_set_width(message, LV_PCT(100));
+        lv_obj_set_style_text_font(message, &lv_font_montserrat_28, 0);
+        lv_label_set_text(message, browser_busy ? "Loading..." : "No page open");
     }
 
     browser_keyboard = lv_keyboard_create(content);
