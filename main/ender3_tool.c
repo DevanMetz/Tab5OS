@@ -508,12 +508,12 @@ static void update_status(void)
 {
     if (!status_label) return;
     if (connected_flag) {
-        set_status(init_pending ? "Connected · Setting up..." :
-                                  "Connected · USB-A");
+        set_status(init_pending ? "Connected | Setting up..." :
+                                  "Connected | USB-A");
     } else if (host_error != ESP_OK) {
         set_status("USB host error: %s", esp_err_to_name(host_error));
     } else {
-        set_status("Waiting for printer · USB-A");
+        set_status("Waiting for printer | USB-A");
     }
 
     float x = 0.0f, y = 0.0f;
@@ -535,7 +535,7 @@ static void update_status(void)
             snprintf(position_text, sizeof(position_text), "X %+.1f   Y %+.1f   ACK %u", (double)x, (double)y, acks);
             lv_label_set_text(pos_label, position_text);
         } else {
-            lv_label_set_text_fmt(pos_label, "X —   Y —   ACK %u", acks);
+            lv_label_set_text_fmt(pos_label, "X -   Y -   ACK %u", acks);
         }
     }
     if (response_label) {
@@ -744,6 +744,7 @@ static lv_obj_t *row(lv_obj_t *parent, int height)
     lv_obj_t *container = lv_obj_create(parent);
     lv_obj_remove_style_all(container);
     lv_obj_set_size(container, 640, height);
+    lv_obj_set_style_text_color(container, lv_color_hex(0xe6edf3), 0);
     lv_obj_set_flex_flow(container, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(container, LV_FLEX_ALIGN_SPACE_BETWEEN,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -761,7 +762,9 @@ static lv_obj_t *small_button(lv_obj_t *parent, const char *text, int width,
     lv_obj_add_event_cb(control, callback, LV_EVENT_CLICKED, user_data);
     lv_obj_t *label = lv_label_create(control);
     lv_label_set_text(label, text);
-    if (width >= 140) lv_obj_set_style_text_font(label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(label, lv_color_white(), 0);
+    if (width < 140) lv_obj_set_style_pad_hor(control, 4, 0);
     lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_center(label);
     if (label_out) *label_out = label;
@@ -782,6 +785,7 @@ static lv_obj_t *pad_button(lv_obj_t *parent, const char *text, uint32_t color,
     lv_obj_add_event_cb(control, dir_released, LV_EVENT_PRESS_LOST, (void *)(uintptr_t)dir);
     lv_obj_t *label = lv_label_create(control);
     lv_label_set_text(label, text);
+    lv_obj_set_style_text_color(label, lv_color_white(), 0);
     lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_font(label, &lv_font_montserrat_28, 0);
     lv_obj_center(label);
@@ -825,6 +829,8 @@ void ender3_tool_show(lv_obj_t *parent)
     output_text = heap_caps_calloc(1, E3_OUTPUT_CAPACITY, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
     lv_obj_set_style_pad_row(parent, 10, 0);
+    lv_obj_set_style_text_font(parent, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(parent, lv_color_hex(0xe6edf3), 0);
 
     lv_obj_t *title = lv_label_create(parent);
     lv_label_set_text(title, "Ender 3");
@@ -900,6 +906,9 @@ void ender3_tool_show(lv_obj_t *parent)
     lv_obj_t *send_row = row(parent, 76);
     input_area = lv_textarea_create(send_row);
     lv_obj_set_size(input_area, 400, 72);
+    lv_obj_set_style_text_font(input_area, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(input_area, lv_color_hex(0x18212b), 0);
+    lv_obj_set_style_text_color(input_area, lv_color_hex(0x52606d), LV_PART_TEXTAREA_PLACEHOLDER);
     lv_textarea_set_one_line(input_area, true);
     lv_textarea_set_max_length(input_area, E3_LINE_CAP - 1);
     lv_textarea_set_placeholder_text(input_area, "G-code");
@@ -913,6 +922,9 @@ void ender3_tool_show(lv_obj_t *parent)
 
     output_area = lv_textarea_create(parent);
     lv_obj_set_size(output_area, 640, 220);
+    lv_obj_set_style_text_font(output_area, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(output_area, lv_color_hex(0x18212b), 0);
+    lv_obj_set_style_text_color(output_area, lv_color_hex(0x52606d), LV_PART_TEXTAREA_PLACEHOLDER);
     lv_textarea_set_text(output_area, "");
     lv_textarea_set_placeholder_text(output_area, "No printer activity");
     lv_textarea_set_cursor_click_pos(output_area, false);
@@ -943,7 +955,7 @@ void ender3_tool_show(lv_obj_t *parent)
         update_status();
         return;
     }
-    set_status("Waiting for printer · USB-A");
+    set_status("Waiting for printer | USB-A");
 }
 
 bool ender3_tool_busy(void)
