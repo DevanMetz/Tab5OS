@@ -215,6 +215,7 @@ static void refresh(lv_timer_t *timer)
              "UDP destination %s:%u | %s | %lu ms", job.mac[0], job.mac[1], job.mac[2],
              job.mac[3], job.mac[4], job.mac[5], job.destination, job.port,
              busy ? "Sending" : "Socket closed", (unsigned long)job.duration_ms);
+    lv_obj_remove_flag(identity_label, LV_OBJ_FLAG_HIDDEN);
     lv_label_set_text(identity_label, identity);
     lv_label_set_text(result_label, job.status);
     lv_label_set_text(status_label, busy ? "CANCEL or Home stops an unsent packet." :
@@ -349,12 +350,14 @@ static void input(lv_obj_t *parent, const char *caption, unsigned index, int wid
 {
     lv_obj_t *block = lv_obj_create(parent);
     lv_obj_remove_style_all(block);
-    lv_obj_set_size(block, width, 82);
+    lv_obj_set_size(block, width, 112);
     lv_obj_set_flex_flow(block, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(block, 4, 0);
-    lv_obj_set_width(label(block, caption, true), width);
+    lv_obj_set_style_pad_row(block, 10, 0);
+    lv_obj_set_width(label(block, caption, false), width);
     fields[index] = lv_textarea_create(block);
-    lv_obj_set_size(fields[index], width, 60);
+    lv_obj_set_size(fields[index], width, 72);
+    lv_obj_set_style_radius(fields[index], 12, 0);
+    lv_obj_set_style_pad_all(fields[index], 16, 0);
     /* Keep pasted newlines so the parser can reject the original draft. */
     lv_textarea_set_max_length(fields[index], 32);
     lv_textarea_set_text(fields[index], saved_inputs[index]);
@@ -364,7 +367,8 @@ static void input(lv_obj_t *parent, const char *caption, unsigned index, int wid
 static lv_obj_t *button(lv_obj_t *parent, const char *caption, lv_event_cb_t callback)
 {
     lv_obj_t *object = lv_button_create(parent);
-    lv_obj_set_size(object, 310, 64);
+    lv_obj_set_size(object, 310, 76);
+    lv_obj_set_style_radius(object, 12, 0);
     lv_obj_t *text = lv_label_create(object);
     lv_label_set_text(text, caption);
     lv_obj_center(text);
@@ -399,15 +403,13 @@ void wol_tool_show(lv_obj_t *parent, bool connected)
     lv_obj_set_size(column, 640, LV_SIZE_CONTENT);
     lv_obj_remove_flag(column, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(column, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(column, 12, 0);
+    lv_obj_set_style_pad_row(column, 24, 0);
     lv_obj_set_style_text_font(column, &lv_font_montserrat_28, 0);
     label(column, "Wake-on-LAN", false);
-    label(column, "Send one magic packet to a device you manage. The target needs Wake-on-LAN enabled.\n"
-                  "Choose its subnet broadcast or an explicit IPv4 destination; no scanning or retries.", true);
-    input(column, "Target MAC (colon, hyphen or 12 hex digits)", 0, 640);
-    lv_obj_t *destination = row(column, 82);
+    input(column, "Target MAC", 0, 640);
+    lv_obj_t *destination = row(column, 112);
     input(destination, "Destination IPv4", 1, 430);
-    input(destination, "UDP port (1-65535)", 2, 198);
+    input(destination, "UDP port", 2, 198);
     keyboard = lv_keyboard_create(column);
     lv_obj_set_size(keyboard, 640, 240);
     lv_keyboard_set_map(keyboard, LV_KEYBOARD_MODE_USER_2, mac_keys, mac_controls);
@@ -415,18 +417,28 @@ void wol_tool_show(lv_obj_t *parent, bool connected)
     lv_obj_add_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_event_cb(keyboard, keyboard_done, LV_EVENT_READY, NULL);
     lv_obj_add_event_cb(keyboard, keyboard_done, LV_EVENT_CANCEL, NULL);
-    lv_obj_t *actions = row(column, 64);
+    lv_obj_t *actions = row(column, 76);
     send_button = button(actions, "SEND", send_clicked);
     send_label = lv_obj_get_child(send_button, 0);
     cancel_button = button(actions, "CANCEL", cancel_clicked);
-    status_label = label(column, connected ? "Enter the target. SEND reviews it; a second tap confirms within 5 seconds." :
-                         "Connect to Wi-Fi before sending. You can enter the target now.", true);
-    lv_obj_set_height(status_label, 56);
-    identity_label = label(column, "No packet has been sent.", true);
-    lv_obj_set_height(identity_label, 50);
-    result_label = label(column, "A successful UDP send cannot confirm that the device woke up.", false);
-    label(column, "Inputs and the last result stay in RAM until restart.\n"
-                  "No SecureOn password. CANCEL/Home can stop an unsent packet only.", true);
+    status_label = label(column, connected ? "Ready to send" : "Connect to Wi-Fi before sending.", false);
+    lv_obj_set_style_min_height(status_label, 100, 0);
+    lv_obj_t *result = lv_obj_create(column);
+    lv_obj_set_size(result, 640, LV_SIZE_CONTENT);
+    lv_obj_remove_flag(result, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(result, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_bg_color(result, lv_color_hex(0x1F2937), 0);
+    lv_obj_set_style_bg_opa(result, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(result, 0, 0);
+    lv_obj_set_style_radius(result, 16, 0);
+    lv_obj_set_style_pad_all(result, 24, 0);
+    lv_obj_set_style_pad_row(result, 16, 0);
+    lv_obj_set_width(label(result, "Last packet", false), LV_PCT(100));
+    identity_label = label(result, "", false);
+    lv_obj_set_width(identity_label, LV_PCT(100));
+    lv_obj_add_flag(identity_label, LV_OBJ_FLAG_HIDDEN);
+    result_label = label(result, "No packet sent", false);
+    lv_obj_set_width(result_label, LV_PCT(100));
     rendered_revision = UINT32_MAX;
     ui_timer = lv_timer_create(refresh, 100, NULL);
     refresh(NULL);
