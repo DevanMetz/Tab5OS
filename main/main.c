@@ -7416,8 +7416,9 @@ static void show_ring(void)
     lv_obj_set_size(measure, 572, 82);
     lv_obj_align(measure, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_t *chart_title = lv_label_create(content);
-    lv_label_set_text(chart_title, "Heart rate · 5 hours");
+    lv_label_set_text(chart_title, "Heart rate - 5 hours");
     lv_obj_set_width(chart_title, 620);
+    lv_obj_set_style_pad_left(chart_title, 24, 0);
     lv_obj_set_style_text_font(chart_title, &lv_font_montserrat_28, 0);
     ring_hr_chart = lv_chart_create(content);
     lv_obj_set_size(ring_hr_chart, 620, 240);
