@@ -483,6 +483,14 @@ static void update_controls(void)
     if (swap_label) lv_label_set_text(swap_label, swap_axes ? "SWAP\nX/Y" : "SWAP\nOFF");
     if (invert_x_label) lv_label_set_text(invert_x_label, invert_x ? "INV X\nON" : "INV X\nOFF");
     if (invert_y_label) lv_label_set_text(invert_y_label, invert_y ? "INV Y\nON" : "INV Y\nOFF");
+    lv_obj_t *labels[] = {motor_label, swap_label, invert_x_label, invert_y_label};
+    bool active[] = {motors_enabled, swap_axes, invert_x, invert_y};
+    for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); ++i) {
+        if (!labels[i]) continue;
+        lv_obj_t *button = lv_obj_get_parent(labels[i]);
+        if (active[i]) lv_obj_add_state(button, LV_STATE_CHECKED);
+        else lv_obj_remove_state(button, LV_STATE_CHECKED);
+    }
 }
 
 static void set_status(const char *format, ...)
@@ -500,13 +508,12 @@ static void update_status(void)
 {
     if (!status_label) return;
     if (connected_flag) {
-        set_status(init_pending ? "Connected - sending setup commands..." :
-                                  "Connected to Ender 3 (USB-A host port)");
+        set_status(init_pending ? "Connected | Setting up..." :
+                                  "Connected | USB-A");
     } else if (host_error != ESP_OK) {
         set_status("USB host error: %s", esp_err_to_name(host_error));
     } else {
-        set_status("Searching for Ender 3 on the USB-A port...\n"
-                   "Plug the printer USB cable (A to B) into the tablet.");
+        set_status("Waiting for printer | USB-A");
     }
 
     float x = 0.0f, y = 0.0f;
@@ -525,10 +532,10 @@ static void update_status(void)
     if (pos_label) {
         if (valid) {
             char position_text[128];
-            snprintf(position_text, sizeof(position_text), "X %+7.1f   Y %+7.1f   ok:%u", (double)x, (double)y, acks);
+            snprintf(position_text, sizeof(position_text), "X %+.1f   Y %+.1f   ACK %u", (double)x, (double)y, acks);
             lv_label_set_text(pos_label, position_text);
         } else {
-            lv_label_set_text_fmt(pos_label, "X ?   Y ?   ok:%u", acks);
+            lv_label_set_text_fmt(pos_label, "X -   Y -   ACK %u", acks);
         }
     }
     if (response_label) {
@@ -737,6 +744,7 @@ static lv_obj_t *row(lv_obj_t *parent, int height)
     lv_obj_t *container = lv_obj_create(parent);
     lv_obj_remove_style_all(container);
     lv_obj_set_size(container, 640, height);
+    lv_obj_set_style_text_color(container, lv_color_hex(0xe6edf3), 0);
     lv_obj_set_flex_flow(container, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(container, LV_FLEX_ALIGN_SPACE_BETWEEN,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -748,9 +756,15 @@ static lv_obj_t *small_button(lv_obj_t *parent, const char *text, int width,
 {
     lv_obj_t *control = lv_button_create(parent);
     lv_obj_set_size(control, width, 72);
+    lv_obj_set_style_radius(control, 16, 0);
+    lv_obj_set_style_bg_color(control, lv_color_hex(0x263544), 0);
+    lv_obj_set_style_bg_color(control, lv_color_hex(0x2196F3), LV_STATE_CHECKED);
     lv_obj_add_event_cb(control, callback, LV_EVENT_CLICKED, user_data);
     lv_obj_t *label = lv_label_create(control);
     lv_label_set_text(label, text);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(label, lv_color_white(), 0);
+    if (width < 140) lv_obj_set_style_pad_hor(control, 4, 0);
     lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_center(label);
     if (label_out) *label_out = label;
@@ -761,16 +775,17 @@ static lv_obj_t *pad_button(lv_obj_t *parent, const char *text, uint32_t color,
                             ender3_dir_t dir)
 {
     lv_obj_t *control = lv_button_create(parent);
-    lv_obj_set_size(control, 196, 196);
+    lv_obj_set_size(control, 144, 144);
     lv_obj_set_style_radius(control, 16, 0);
     lv_obj_set_style_bg_color(control, lv_color_hex(color), 0);
-    lv_obj_set_style_bg_color(control, lv_color_hex(color), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(control, lv_color_darken(lv_color_hex(color), LV_OPA_20), LV_STATE_PRESSED);
     lv_obj_set_style_bg_opa(control, LV_OPA_COVER, LV_STATE_PRESSED);
     lv_obj_add_event_cb(control, dir_pressed, LV_EVENT_PRESSED, (void *)(uintptr_t)dir);
     lv_obj_add_event_cb(control, dir_released, LV_EVENT_RELEASED, (void *)(uintptr_t)dir);
     lv_obj_add_event_cb(control, dir_released, LV_EVENT_PRESS_LOST, (void *)(uintptr_t)dir);
     lv_obj_t *label = lv_label_create(control);
     lv_label_set_text(label, text);
+    lv_obj_set_style_text_color(label, lv_color_white(), 0);
     lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_font(label, &lv_font_montserrat_28, 0);
     lv_obj_center(label);
@@ -814,17 +829,12 @@ void ender3_tool_show(lv_obj_t *parent)
     output_text = heap_caps_calloc(1, E3_OUTPUT_CAPACITY, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 
     lv_obj_set_style_pad_row(parent, 10, 0);
+    lv_obj_set_style_text_font(parent, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(parent, lv_color_hex(0xe6edf3), 0);
 
     lv_obj_t *title = lv_label_create(parent);
-    lv_label_set_text(title, "Ender 3 Robot Controller");
+    lv_label_set_text(title, "Ender 3");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
-
-    lv_obj_t *help = lv_label_create(parent);
-    lv_obj_set_width(help, 640);
-    lv_obj_set_style_text_align(help, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(help, "Hold FWD/BACK to drive, LEFT/RIGHT to spin in place. STOP halts motion.\n"
-                            "X = left wheel, Y = right wheel. Use SWAP / INV X / INV Y to match your wiring.\n"
-                            "Connect sets gentle acceleration (M201 X10 Y10) for the heavy chassis.");
 
     status_label = lv_label_create(parent);
     lv_obj_set_width(status_label, 640);
@@ -838,6 +848,7 @@ void ender3_tool_show(lv_obj_t *parent)
 
     pos_label = lv_label_create(parent);
     lv_obj_set_width(pos_label, 640);
+    lv_obj_set_style_text_font(pos_label, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_align(pos_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(pos_label, "X ?   Y ?");
 
@@ -846,40 +857,32 @@ void ender3_tool_show(lv_obj_t *parent)
     lv_obj_set_style_text_align(response_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(response_label, lv_color_hex(0x90A4AE), 0);
 
-    // D-pad: FWD top, LEFT/STOP/RIGHT middle, BACK bottom.
+    // Explicit positions keep Forward and Back aligned with Stop.
     lv_obj_t *pad = lv_obj_create(parent);
     lv_obj_remove_style_all(pad);
-    lv_obj_set_size(pad, 620, 620);
-    lv_obj_set_flex_flow(pad, LV_FLEX_FLOW_ROW_WRAP);
-    lv_obj_set_flex_align(pad, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_gap(pad, 10, 0);
-    pad_button(pad, LV_SYMBOL_UP "\nFWD", 0x2E7D32, E3_DIR_FWD);
-    lv_obj_t *spacer = lv_obj_create(pad);
-    lv_obj_remove_style_all(spacer);
-    lv_obj_set_size(spacer, 196, 196);
-    spacer = lv_obj_create(pad);
-    lv_obj_remove_style_all(spacer);
-    lv_obj_set_size(spacer, 196, 196);
-    pad_button(pad, LV_SYMBOL_LEFT "\nLEFT", 0x1565C0, E3_DIR_LEFT);
+    lv_obj_set_size(pad, 640, 456);
+    lv_obj_t *forward = pad_button(pad, LV_SYMBOL_UP "\nFWD", 0x2E7D32, E3_DIR_FWD);
+    lv_obj_set_pos(forward, 248, 0);
+    lv_obj_t *left = pad_button(pad, LV_SYMBOL_LEFT "\nLEFT", 0x1565C0, E3_DIR_LEFT);
+    lv_obj_set_pos(left, 92, 156);
     lv_obj_t *stop_button = pad_button(pad, "STOP", 0xC62828, E3_DIR_NONE);
+    lv_obj_set_pos(stop_button, 248, 156);
     lv_obj_remove_event_cb(stop_button, dir_pressed);
     lv_obj_remove_event_cb(stop_button, dir_released);
     lv_obj_add_event_cb(stop_button, stop_clicked, LV_EVENT_CLICKED, NULL);
-    pad_button(pad, LV_SYMBOL_RIGHT "\nRIGHT", 0x1565C0, E3_DIR_RIGHT);
-    spacer = lv_obj_create(pad);
-    lv_obj_remove_style_all(spacer);
-    lv_obj_set_size(spacer, 196, 196);
-    pad_button(pad, LV_SYMBOL_DOWN "\nBACK", 0x2E7D32, E3_DIR_BACK);
-    spacer = lv_obj_create(pad);
-    lv_obj_remove_style_all(spacer);
-    lv_obj_set_size(spacer, 196, 196);
+    lv_obj_t *right = pad_button(pad, LV_SYMBOL_RIGHT "\nRIGHT", 0x1565C0, E3_DIR_RIGHT);
+    lv_obj_set_pos(right, 404, 156);
+    lv_obj_t *back = pad_button(pad, LV_SYMBOL_DOWN "\nBACK", 0x2E7D32, E3_DIR_BACK);
+    lv_obj_set_pos(back, 248, 312);
 
     // Speed slider.
     lv_obj_t *speed_row = row(parent, 80);
+    lv_obj_set_style_text_font(speed_row, &lv_font_montserrat_28, 0);
     lv_obj_t *speed_title = lv_label_create(speed_row);
     lv_label_set_text(speed_title, "Speed");
     lv_obj_t *slider = lv_slider_create(speed_row);
-    lv_obj_set_size(slider, 340, 18);
+    lv_obj_set_size(slider, 400, 24);
+    lv_obj_set_ext_click_area(slider, 18);
     lv_slider_set_range(slider, 1, 100);
     lv_slider_set_value(slider, 20, LV_ANIM_OFF);
     lv_obj_add_event_cb(slider, speed_changed, LV_EVENT_VALUE_CHANGED, NULL);
@@ -895,18 +898,22 @@ void ender3_tool_show(lv_obj_t *parent)
 
     // Quick commands.
     lv_obj_t *quick_row = row(parent, 76);
-    small_button(quick_row, "ZERO", 200, quick_clicked, (void *)"G92 X0 Y0", NULL);
-    small_button(quick_row, "M114", 200, quick_clicked, (void *)"M114", NULL);
-    small_button(quick_row, "M119", 200, quick_clicked, (void *)"M119", NULL);
+    small_button(quick_row, "Zero X/Y", 200, quick_clicked, (void *)"G92 X0 Y0", NULL);
+    small_button(quick_row, "Position", 200, quick_clicked, (void *)"M114", NULL);
+    small_button(quick_row, "Endstops", 200, quick_clicked, (void *)"M119", NULL);
 
     // Raw G-code line.
     lv_obj_t *send_row = row(parent, 76);
     input_area = lv_textarea_create(send_row);
     lv_obj_set_size(input_area, 400, 72);
+    lv_obj_set_style_text_font(input_area, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(input_area, lv_color_hex(0x18212b), 0);
+    lv_obj_set_style_text_color(input_area, lv_color_hex(0x52606d), LV_PART_TEXTAREA_PLACEHOLDER);
     lv_textarea_set_one_line(input_area, true);
     lv_textarea_set_max_length(input_area, E3_LINE_CAP - 1);
-    lv_textarea_set_placeholder_text(input_area, "Raw G-code (e.g. M114)");
-    small_button(send_row, "SEND", 120, send_clicked, NULL, NULL);
+    lv_textarea_set_placeholder_text(input_area, "G-code");
+    lv_obj_t *send_button = small_button(send_row, "SEND", 120, send_clicked, NULL, NULL);
+    lv_obj_set_style_bg_color(send_button, lv_color_hex(0x2196F3), 0);
     small_button(send_row, "CLEAR", 100, clear_clicked, NULL, NULL);
 
     lv_obj_t *keyboard = lv_keyboard_create(parent);
@@ -915,7 +922,11 @@ void ender3_tool_show(lv_obj_t *parent)
 
     output_area = lv_textarea_create(parent);
     lv_obj_set_size(output_area, 640, 220);
+    lv_obj_set_style_text_font(output_area, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(output_area, lv_color_hex(0x18212b), 0);
+    lv_obj_set_style_text_color(output_area, lv_color_hex(0x52606d), LV_PART_TEXTAREA_PLACEHOLDER);
     lv_textarea_set_text(output_area, "");
+    lv_textarea_set_placeholder_text(output_area, "No printer activity");
     lv_textarea_set_cursor_click_pos(output_area, false);
 
     update_controls();
@@ -944,8 +955,7 @@ void ender3_tool_show(lv_obj_t *parent)
         update_status();
         return;
     }
-    set_status("Searching for Ender 3 on the USB-A port...\n"
-               "Plug the printer USB cable (A to B) into the tablet.");
+    set_status("Waiting for printer | USB-A");
 }
 
 bool ender3_tool_busy(void)
