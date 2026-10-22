@@ -610,6 +610,7 @@ static lv_obj_t *ring_hr_label;
 static lv_obj_t *ring_hr_status;
 static lv_obj_t *ring_hr_button_label;
 static lv_obj_t *ring_hr_chart;
+static lv_obj_t *ring_chart_empty;
 static lv_chart_series_t *ring_hr_series;
 static lv_obj_t *ring_details;
 static lv_timer_t *ring_timer;
@@ -4203,6 +4204,7 @@ static void clear_content(void)
     ring_hr_status = NULL;
     ring_hr_button_label = NULL;
     ring_hr_chart = NULL;
+    ring_chart_empty = NULL;
     ring_hr_series = NULL;
     ring_details = NULL;
     ride_status = NULL;
@@ -7255,6 +7257,10 @@ static void ring_chart_render(void)
     first = (ring_hr_history_head + RING_HR_HISTORY_POINTS - count) % RING_HR_HISTORY_POINTS;
     for (uint8_t i = 0; i < count; i++) values[i] = ring_hr_history[(first + i) % RING_HR_HISTORY_POINTS];
     portEXIT_CRITICAL(&ring_lock);
+    if (ring_chart_empty) {
+        if (count) lv_obj_add_flag(ring_chart_empty, LV_OBJ_FLAG_HIDDEN);
+        else lv_obj_remove_flag(ring_chart_empty, LV_OBJ_FLAG_HIDDEN);
+    }
     lv_chart_set_all_value(ring_hr_chart, ring_hr_series, LV_CHART_POINT_NONE);
     for (uint8_t i = 0; i < count; i++) lv_chart_set_next_value(ring_hr_chart, ring_hr_series, values[i]);
 }
@@ -7287,25 +7293,25 @@ static void ring_tick(lv_timer_t *timer)
     hr_error = ring_hr_error;
     portEXIT_CRITICAL(&ring_lock);
     lv_label_set_text(ring_status, !enabled ? "Ring Bluetooth is off" : connected ? "Connected" : connecting ? "Connecting..." : found ? "Reconnecting..." : "Scanning...");
-    if (ring_toggle_label) lv_label_set_text(ring_toggle_label, enabled ? "Turn Ring Bluetooth off" : "Turn Ring Bluetooth on");
-    lv_label_set_text_fmt(ring_battery_label, battery < 0 ? "--%%" : "%d%%", battery);
+    if (ring_toggle_label) lv_label_set_text(ring_toggle_label, enabled ? "Turn Bluetooth off" : "Turn Bluetooth on");
+    lv_label_set_text_fmt(ring_battery_label, battery < 0 ? LV_SYMBOL_BATTERY_EMPTY " --" : LV_SYMBOL_BATTERY_FULL " %d%%", battery);
     if (ring_hr_label) lv_label_set_text_fmt(ring_hr_label, heart_rate < 0 ? "-- BPM" : "%d BPM", heart_rate);
     if (ring_hr_button_label) lv_label_set_text(ring_hr_button_label, hr_active ? "Measuring..." : "Measure now");
     if (ring_hr_status) {
         if (ring_storage_error[0]) lv_label_set_text(ring_hr_status, ring_storage_error);
-        else if (!enabled) lv_label_set_text(ring_hr_status, "Turn on Ring Bluetooth to connect");
-        else if (!connected) lv_label_set_text(ring_hr_status, "Ring is disconnected");
+        else if (!enabled) lv_label_set_text(ring_hr_status, "");
+        else if (!connected) lv_label_set_text(ring_hr_status, "");
         else if (hr_active) lv_label_set_text(ring_hr_status, "Measuring - keep your hand still");
         else if (sync_active) lv_label_set_text(ring_hr_status, "Syncing stored heart-rate history...");
         else if (hr_error == 1) lv_label_set_text(ring_hr_status, "Adjust the ring for better skin contact");
         else if (hr_error == 2) lv_label_set_text(ring_hr_status, "No reading yet - keep your hand still");
-        else lv_label_set_text(ring_hr_status, "Ring records every 5 min, even while away");
+        else lv_label_set_text(ring_hr_status, "");
     }
     ring_chart_render();
     if (!enabled) {
-        lv_label_set_text(ring_details, "Ring Bluetooth is off");
+        lv_label_set_text(ring_details, "");
     } else if (!found) {
-        lv_label_set_text(ring_details, "Looking for COLMI R12...");
+        lv_label_set_text(ring_details, "");
     } else {
         int age = updated ? (int)(time(NULL) - updated) : 0;
         if (updated)
@@ -7377,41 +7383,64 @@ static void show_ring(void)
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
     ring_status = lv_label_create(content);
     lv_obj_set_width(ring_status, 620);
+    lv_obj_set_style_text_font(ring_status, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_align(ring_status, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_t *toggle = button(content, "Turn Ring Bluetooth on", ring_toggle_clicked);
     ring_toggle_label = lv_obj_get_child(toggle, 0);
-    lv_obj_set_size(toggle, 520, 82);
+    lv_obj_set_size(toggle, 620, 82);
     lv_obj_t *card = lv_obj_create(content);
-    lv_obj_set_size(card, 620, 500);
+    lv_obj_set_size(card, 620, 380);
     lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(card, 20, 0);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x202837), 0);
+    lv_obj_set_style_border_width(card, 0, 0);
+    lv_obj_set_style_radius(card, 20, 0);
+    lv_obj_set_style_text_color(card, lv_color_white(), 0);
+    lv_obj_set_style_pad_all(card, 24, 0);
+    lv_obj_t *metric = lv_label_create(card);
+    lv_label_set_text(metric, "Heart rate");
+    lv_obj_set_style_text_font(metric, &lv_font_montserrat_28, 0);
+    lv_obj_align(metric, LV_ALIGN_TOP_LEFT, 0, 0);
     ring_battery_label = lv_label_create(card);
     lv_obj_set_style_text_font(ring_battery_label, &lv_font_montserrat_28, 0);
+    lv_obj_align(ring_battery_label, LV_ALIGN_TOP_RIGHT, 0, 0);
     ring_hr_label = lv_label_create(card);
     lv_label_set_text(ring_hr_label, "-- BPM");
     lv_obj_set_style_text_font(ring_hr_label, &lv_font_montserrat_48, 0);
+    lv_obj_align(ring_hr_label, LV_ALIGN_TOP_LEFT, 0, 64);
     ring_hr_status = lv_label_create(card);
-    lv_obj_set_width(ring_hr_status, 560);
-    lv_obj_set_style_text_align(ring_hr_status, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_width(ring_hr_status, 572);
+    lv_obj_set_style_text_font(ring_hr_status, &lv_font_montserrat_28, 0);
+    lv_obj_align(ring_hr_status, LV_ALIGN_TOP_LEFT, 0, 130);
     lv_obj_t *measure = button(card, "Measure now", ring_hr_clicked);
     ring_hr_button_label = lv_obj_get_child(measure, 0);
-    lv_obj_set_size(measure, 520, 82);
-    ring_details = lv_label_create(card);
-    lv_obj_set_width(ring_details, 560);
-    lv_obj_set_style_text_align(ring_details, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_t *disclaimer = lv_label_create(card);
-    lv_label_set_text(disclaimer, "Wellness estimate - not a medical measurement");
+    lv_obj_set_size(measure, 572, 82);
+    lv_obj_align(measure, LV_ALIGN_BOTTOM_MID, 0, 0);
     lv_obj_t *chart_title = lv_label_create(content);
-    lv_label_set_text(chart_title, "Heart rate - last 5 hours");
+    lv_label_set_text(chart_title, "Heart rate · 5 hours");
+    lv_obj_set_width(chart_title, 620);
+    lv_obj_set_style_text_font(chart_title, &lv_font_montserrat_28, 0);
     ring_hr_chart = lv_chart_create(content);
-    lv_obj_set_size(ring_hr_chart, 620, 260);
+    lv_obj_set_size(ring_hr_chart, 620, 240);
+    lv_obj_set_style_bg_color(ring_hr_chart, lv_color_hex(0x202837), 0);
+    lv_obj_set_style_border_width(ring_hr_chart, 0, 0);
+    lv_obj_set_style_radius(ring_hr_chart, 20, 0);
+    lv_obj_set_style_line_color(ring_hr_chart, lv_color_hex(0x3B4658), LV_PART_MAIN);
+    lv_obj_set_style_line_width(ring_hr_chart, 3, LV_PART_ITEMS);
     lv_chart_set_type(ring_hr_chart, LV_CHART_TYPE_LINE);
     lv_chart_set_point_count(ring_hr_chart, RING_HR_HISTORY_POINTS);
     lv_chart_set_range(ring_hr_chart, LV_CHART_AXIS_PRIMARY_Y, 40, 200);
     lv_chart_set_div_line_count(ring_hr_chart, 5, 6);
-    ring_hr_series = lv_chart_add_series(ring_hr_chart, lv_palette_main(LV_PALETTE_RED), LV_CHART_AXIS_PRIMARY_Y);
+    ring_hr_series = lv_chart_add_series(ring_hr_chart, lv_color_hex(0xFF6B81), LV_CHART_AXIS_PRIMARY_Y);
+    ring_chart_empty = lv_label_create(ring_hr_chart);
+    lv_label_set_text(ring_chart_empty, "No heart-rate history");
+    lv_obj_set_style_text_font(ring_chart_empty, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(ring_chart_empty, lv_color_white(), 0);
+    lv_obj_set_style_bg_color(ring_chart_empty, lv_color_hex(0x202837), 0);
+    lv_obj_set_style_bg_opa(ring_chart_empty, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(ring_chart_empty, 12, 0);
+    lv_obj_center(ring_chart_empty);
+    ring_details = lv_label_create(content);
+    lv_obj_set_width(ring_details, 620);
     ring_tick(NULL);
     ring_timer = lv_timer_create(ring_tick, 1000, NULL);
 }
