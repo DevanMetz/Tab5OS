@@ -6491,6 +6491,7 @@ static lv_obj_t *i2c_panel(void)
     lv_obj_t *panel = lv_obj_create(content);
     lv_obj_set_size(panel, 660, LV_SIZE_CONTENT);
     lv_obj_set_style_bg_color(panel, lv_color_hex(0x202938), 0);
+    lv_obj_set_style_text_color(panel, lv_color_hex(0xe6edf3), 0);
     lv_obj_set_style_border_width(panel, 0, 0);
     lv_obj_set_style_radius(panel, 16, 0);
     lv_obj_set_style_pad_all(panel, 20, 0);
