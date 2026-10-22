@@ -790,7 +790,7 @@ static void update_controls(void)
         if (copyable) lv_obj_remove_state(copy_receive_button, LV_STATE_DISABLED);
         else lv_obj_add_state(copy_receive_button, LV_STATE_DISABLED);
         if (!receive.present)
-            lv_label_set_text(receive_label, "No complete RX saved. COPY RX shares 0-128 raw bytes with Byte Lab.");
+            lv_label_set_text(receive_label, "No complete RX saved");
         else
             lv_label_set_text_fmt(receive_label, "Latest complete RX: %u bytes | QoS %u%s%s\n%s\n%s",
                                   (unsigned)receive.length, receive.qos, receive.retained ? " | retained" : "",
@@ -1137,9 +1137,16 @@ static lv_obj_t *action_button(lv_obj_t *parent, const char *text, int width,
 {
     lv_obj_t *button = lv_button_create(parent);
     lv_obj_set_size(button, width, 68);
+    lv_obj_set_style_pad_all(button, 0, 0);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x334155), LV_STATE_DISABLED);
+    lv_obj_set_style_bg_opa(button, LV_OPA_COVER, LV_STATE_DISABLED);
+    lv_obj_set_style_opa(button, LV_OPA_COVER, LV_STATE_DISABLED);
+    lv_obj_set_style_text_color(button, lv_color_hex(0xe6edf3), LV_STATE_DISABLED);
     lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, NULL);
     lv_obj_t *label = lv_label_create(button);
     lv_label_set_text(label, text);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(label, lv_color_hex(0xe6edf3), 0);
     lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_center(label);
     if (label_out) *label_out = label;
@@ -1150,10 +1157,13 @@ static lv_obj_t *row(lv_obj_t *parent, int height)
 {
     lv_obj_t *container = lv_obj_create(parent);
     lv_obj_set_size(container, 640, height);
-    lv_obj_set_style_pad_all(container, 2, 0);
+    lv_obj_set_style_pad_all(container, 0, 0);
+    lv_obj_set_style_border_width(container, 0, 0);
+    lv_obj_set_style_bg_opa(container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_text_color(container, lv_color_hex(0xe6edf3), 0);
     lv_obj_clear_flag(container, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(container, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(container, LV_FLEX_ALIGN_SPACE_EVENLY,
+    lv_obj_set_flex_align(container, LV_FLEX_ALIGN_SPACE_BETWEEN,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     return container;
 }
@@ -1616,26 +1626,10 @@ void mqtt_tool_show(lv_obj_t *parent, bool wifi_connected, bool sd_available,
              mac[3], mac[4], mac[5]);
 
     lv_obj_t *title = lv_label_create(parent);
-    lv_label_set_text(title, "MQTT Console");
+    lv_label_set_text(title, "MQTT");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
-    lv_obj_t *help = lv_label_create(parent);
-    lv_obj_set_width(help, 640);
-    lv_obj_set_style_text_align(help, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(help, "TLS/WSS certificates are verified; plain transports require two taps.\n"
-                            "TLS profiles save explicitly to unencrypted developer settings; cleartext stays memory-only.\n"
-                            "SD logs are opt-in metadata and never contain credentials or payloads.\n"
-                            "PASTE BYTES prepares 0-128 bytes from Byte Lab; review, then PUBLISH.\n"
-                            "The default public test broker/topic is observable: never send secrets.");
-
-    lv_obj_t *controls = row(parent, 78);
-    connect_button = action_button(controls, "", 140, connect_clicked, &connect_label);
-    action_button(controls, "", 120, qos_clicked, &qos_label);
-    action_button(controls, "", 140, retain_clicked, &retain_label);
-    action_button(controls, "", 140, log_clicked, &log_label);
-    if (!wifi_connected) lv_obj_add_state(connect_button, LV_STATE_DISABLED);
-
+    lv_obj_set_style_text_color(title, lv_color_hex(0xe6edf3), 0);
     uri_area = lv_textarea_create(parent);
-    lv_obj_set_size(uri_area, 640, 72);
     lv_textarea_set_one_line(uri_area, true);
     lv_textarea_set_max_length(uri_area, MQTT_URI_MAX + 1);
     lv_textarea_set_text(uri_area, "mqtts://test.mosquitto.org:8886");
@@ -1643,25 +1637,32 @@ void mqtt_tool_show(lv_obj_t *parent, bool wifi_connected, bool sd_available,
 
     lv_obj_t *credentials = row(parent, 78);
     username_area = lv_textarea_create(credentials);
-    lv_obj_set_size(username_area, 292, 68);
+    lv_obj_set_size(username_area, 312, 64);
     lv_textarea_set_one_line(username_area, true);
     lv_textarea_set_max_length(username_area, MQTT_CREDENTIAL_MAX + 1);
-    lv_textarea_set_placeholder_text(username_area, "Username (optional)");
+    lv_textarea_set_placeholder_text(username_area, "Username");
     password_area = lv_textarea_create(credentials);
-    lv_obj_set_size(password_area, 292, 68);
+    lv_obj_set_size(password_area, 312, 64);
     lv_textarea_set_one_line(password_area, true);
     lv_textarea_set_password_mode(password_area, true);
     lv_textarea_set_max_length(password_area, MQTT_CREDENTIAL_MAX + 1);
-    lv_textarea_set_placeholder_text(password_area, "Password (never exported)");
+    lv_textarea_set_placeholder_text(password_area, "Password");
+
+    lv_obj_t *controls = row(parent, 78);
+    connect_button = action_button(controls, "", 312, connect_clicked, &connect_label);
+    action_button(controls, "", 312, qos_clicked, &qos_label);
+    controls = row(parent, 78);
+    action_button(controls, "", 312, retain_clicked, &retain_label);
+    action_button(controls, "", 312, log_clicked, &log_label);
+    if (!wifi_connected) lv_obj_add_state(connect_button, LV_STATE_DISABLED);
 
     lv_obj_t *profile_actions = row(parent, 78);
-    save_profile_button = action_button(profile_actions, "SAVE PROFILE", 270,
+    save_profile_button = action_button(profile_actions, "SAVE PROFILE", 312,
                                         save_profile_clicked, NULL);
-    delete_profile_button = action_button(profile_actions, "DELETE PROFILE", 270,
+    delete_profile_button = action_button(profile_actions, "DELETE PROFILE", 312,
                                           delete_profile_clicked, NULL);
 
     topic_area = lv_textarea_create(parent);
-    lv_obj_set_size(topic_area, 640, 72);
     lv_textarea_set_one_line(topic_area, true);
     lv_textarea_set_max_length(topic_area, MQTT_TOPIC_MAX + 1);
     lv_textarea_set_text(topic_area, profile_loaded ? profile.topic : default_topic);
@@ -1674,29 +1675,30 @@ void mqtt_tool_show(lv_obj_t *parent, bool wifi_connected, bool sd_available,
     }
     mbedtls_platform_zeroize(&profile, sizeof(profile));
 
-    lv_obj_t *actions = row(parent, 78);
-    subscribe_button = action_button(actions, "SUBSCRIBE", 140, subscribe_clicked, NULL);
-    publish_button = action_button(actions, "PUBLISH", 140, publish_clicked, NULL);
-    action_button(actions, "CLEAR", 140, clear_clicked, NULL);
-    copy_receive_button = action_button(actions, "COPY RX", 140, copy_receive_clicked, NULL);
-
     payload_area = lv_textarea_create(parent);
     lv_obj_set_size(payload_area, 640, 140);
     lv_textarea_set_max_length(payload_area, MQTT_PAYLOAD_MAX + 1);
     lv_textarea_set_text(payload_area, "hello from Tab5 OS");
     lv_textarea_set_placeholder_text(payload_area, "Text publish payload (maximum 512 UTF-8 bytes)");
 
+    lv_obj_t *actions = row(parent, 78);
+    subscribe_button = action_button(actions, "SUBSCRIBE", 312, subscribe_clicked, NULL);
+    publish_button = action_button(actions, "PUBLISH", 312, publish_clicked, NULL);
+
     lv_obj_t *payload_actions = row(parent, 78);
-    payload_mode_button = action_button(payload_actions, "", 270, payload_mode_clicked, &payload_mode_label);
-    paste_payload_button = action_button(payload_actions, "PASTE BYTES", 270, paste_payload_clicked, NULL);
+    payload_mode_button = action_button(payload_actions, "", 312, payload_mode_clicked, &payload_mode_label);
+    paste_payload_button = action_button(payload_actions, "PASTE BYTES", 312, paste_payload_clicked, NULL);
     payload_bytes_label = lv_label_create(parent);
     lv_obj_set_width(payload_bytes_label, 640);
-    lv_obj_set_style_text_font(payload_bytes_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(payload_bytes_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(payload_bytes_label, lv_color_hex(0xe6edf3), 0);
     lv_label_set_long_mode(payload_bytes_label, LV_LABEL_LONG_WRAP);
     refresh_payload();
 
     status_label = lv_label_create(parent);
     lv_obj_set_width(status_label, 640);
+    lv_obj_set_style_text_font(status_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(status_label, lv_color_hex(0xe6edf3), 0);
     lv_label_set_long_mode(status_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(status_label, LV_TEXT_ALIGN_CENTER, 0);
     if (stopping) lv_label_set_text(status_label, "Previous MQTT session is stopping in the background...");
@@ -1710,15 +1712,35 @@ void mqtt_tool_show(lv_obj_t *parent, bool wifi_connected, bool sd_available,
     else
         lv_label_set_text(status_label, wifi_connected ? "Ready; connect explicitly" : "Connect to Wi-Fi first");
 
+    lv_obj_move_to_index(status_label, 1);
+
+    lv_obj_t *history_actions = row(parent, 78);
+    action_button(history_actions, "CLEAR", 312, clear_clicked, NULL);
+    copy_receive_button = action_button(history_actions, "COPY RX", 312, copy_receive_clicked, NULL);
     receive_label = lv_label_create(parent);
     lv_obj_set_width(receive_label, 640);
-    lv_obj_set_style_text_font(receive_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(receive_label, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(receive_label, lv_color_hex(0xe6edf3), 0);
     lv_label_set_long_mode(receive_label, LV_LABEL_LONG_WRAP);
 
     history_area = lv_textarea_create(parent);
     lv_obj_set_size(history_area, 640, 300);
     lv_textarea_set_cursor_click_pos(history_area, false);
-    lv_textarea_set_placeholder_text(history_area, "Received and published messages");
+    lv_textarea_set_placeholder_text(history_area, "No messages");
+
+    /* One-line textareas derive their height from the font; apply the touch
+     * height after enabling one-line mode so LVGL does not shrink them. */
+    lv_obj_t *fields[] = {uri_area, username_area, password_area, topic_area, payload_area, history_area};
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        lv_obj_set_style_text_font(fields[i], &lv_font_montserrat_28, 0);
+        lv_obj_set_style_pad_all(fields[i], 16, 0);
+        lv_obj_set_style_radius(fields[i], 12, 0);
+    }
+    lv_obj_set_style_text_color(history_area, lv_color_hex(0x475569), LV_PART_TEXTAREA_PLACEHOLDER);
+    lv_obj_set_size(uri_area, 640, 64);
+    lv_obj_set_size(username_area, 312, 64);
+    lv_obj_set_size(password_area, 312, 64);
+    lv_obj_set_size(topic_area, 640, 64);
 
     keyboard = lv_keyboard_create(parent);
     lv_obj_set_size(keyboard, 640, 360);
