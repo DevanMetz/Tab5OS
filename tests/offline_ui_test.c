@@ -178,7 +178,7 @@ static void byte_number_checks(void)
     assert(!strcmp(lv_textarea_get_text(nth(&lv_textarea_class, 0)), "1.5"));
     assert(lv_obj_has_flag(keyboard, LV_OBJ_FLAG_HIDDEN));
     set_input(0, "0.1"); assert(has_text(content, "Encoded Float32 LE: 0.100000001"));
-    assert(click("USE AS HEX (replaces Hex draft)"));
+    assert(click("Use as hex"));
     assert(lv_dropdown_get_selected(nth(&lv_dropdown_class, 0)) == 0);
     assert(!strcmp(lv_textarea_get_text(nth(&lv_textarea_class, 0)), "CD CC CC 3D"));
     assert(has_text(content, "Float32 LE: 0.100000001"));
@@ -199,7 +199,7 @@ static void byte_number_checks(void)
         set_input(0, bad[i]);
         assert(!strcmp(lv_textarea_get_text(nth(&lv_textarea_class, 0)), bad[i]));
         assert(!has_text(content, "Encoded ") && !has_text(content, "CRC-32/"));
-        lv_obj_t *use = lv_obj_get_parent(label_find(content, "USE AS HEX (replaces Hex draft)"));
+        lv_obj_t *use = lv_obj_get_parent(label_find(content, "Use as hex"));
         assert(lv_obj_has_state(use, LV_STATE_DISABLED));
         lv_obj_send_event(use, LV_EVENT_CLICKED, NULL);
         assert(lv_dropdown_get_selected(nth(&lv_dropdown_class, 0)) == 2);
@@ -255,7 +255,7 @@ static void byte_clipboard_checks(void)
     select_dropdown(0, 1); assert(!strcmp(lv_textarea_get_text(nth(&lv_textarea_class, 0)), "keep ASCII"));
     select_dropdown(0, 2); assert(!strcmp(lv_textarea_get_text(nth(&lv_textarea_class, 0)), "1.5"));
     byte_tool_stop(); reset_content(); byte_tool_show(content); refresh();
-    assert(has_text(content, "Byte clipboard: 4 bytes in RAM"));
+    assert(has_text(content, "Clipboard: 4 bytes"));
     assert(click("Paste hex"));
     assert(click("CLEAR")); assert(click("Copy bytes"));
     assert(copy->length == 0 && payload_clipboard_peek());
