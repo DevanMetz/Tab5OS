@@ -541,11 +541,11 @@ static void field(lv_obj_t *parent, const char *caption, unsigned index, int wid
 {
     lv_obj_t *block = lv_obj_create(parent);
     lv_obj_remove_style_all(block);
-    lv_obj_set_size(block, width, 82);
+    lv_obj_set_size(block, width, 100);
     lv_obj_remove_flag(block, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(block, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(block, 4, 0);
-    lv_obj_set_width(label(block, caption, true), width);
+    lv_obj_set_style_pad_row(block, 6, 0);
+    lv_obj_set_width(label(block, caption, false), width);
     fields[index] = lv_textarea_create(block);
     lv_obj_set_size(fields[index], width, 60);
     /* Keep pasted newlines so the parser can reject the original draft. */
@@ -558,6 +558,11 @@ static lv_obj_t *button(lv_obj_t *parent, const char *text, lv_event_cb_t callba
 {
     lv_obj_t *object = lv_button_create(parent);
     lv_obj_set_size(object, 310, 64);
+    lv_obj_set_style_radius(object, 12, 0);
+    if (callback != send_clicked) {
+        lv_obj_set_style_bg_color(object, lv_color_hex(0x263345), 0);
+        lv_obj_set_style_text_color(object, lv_color_white(), 0);
+    }
     lv_obj_t *caption = lv_label_create(object);
     lv_label_set_text(caption, text);
     lv_obj_center(caption);
@@ -602,20 +607,18 @@ void udp_tool_show(lv_obj_t *parent, bool connected)
     lv_obj_set_style_pad_row(column, 12, 0);
     lv_obj_set_style_text_font(column, &lv_font_montserrat_28, 0);
     label(column, "UDP Console", false);
-    label(column, "One unencrypted datagram, then one reply from the same IPv4/port.\n"
-                  "0-128 TX bytes; 512-byte RX preview; 3-second deadline; no retries.", true);
-    lv_obj_t *target = row(column, 82);
-    field(target, "Peer IPv4 (unicast)", 0, 430);
+    lv_obj_t *target = row(column, 100);
+    field(target, "Peer IPv4", 0, 430);
     field(target, "Peer port", 1, 198);
-    lv_obj_t *options = row(column, 82);
-    field(options, "Source port (0 = automatic)", 2, 310);
+    lv_obj_t *options = row(column, 100);
+    field(options, "Source (0 = auto)", 2, 310);
     lv_obj_t *mode_block = lv_obj_create(options);
     lv_obj_remove_style_all(mode_block);
-    lv_obj_set_size(mode_block, 310, 82);
+    lv_obj_set_size(mode_block, 310, 100);
     lv_obj_remove_flag(mode_block, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(mode_block, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(mode_block, 4, 0);
-    lv_obj_set_width(label(mode_block, "Payload format", true), 310);
+    lv_obj_set_style_pad_row(mode_block, 6, 0);
+    lv_obj_set_width(label(mode_block, "Payload", false), 310);
     mode_select = lv_dropdown_create(mode_block);
     lv_obj_set_size(mode_select, 310, 60);
     lv_dropdown_set_options(mode_select, "Hex byte pairs\nLiteral ASCII");
@@ -639,24 +642,22 @@ void udp_tool_show(lv_obj_t *parent, bool connected)
     send_button = button(actions, "SEND", send_clicked);
     send_label = lv_obj_get_child(send_button, 0);
     cancel_button = button(actions, "CANCEL", cancel_clicked);
-    status_label = label(column, connected ? "Enter a peer. SEND reviews the request; a second tap confirms it." :
-                         "Connect to Wi-Fi before sending. You can prepare the request now.", true);
-    lv_obj_set_height(status_label, 56);
-    identity_label = label(column, "No UDP exchange yet.", true);
-    lv_obj_set_height(identity_label, 42);
-    result_label = label(column, "Replies are unauthenticated. Empty input sends an empty datagram.", true);
-    lv_obj_set_height(result_label, 48);
+    status_label = label(column, connected ? "Ready" : "Wi-Fi disconnected", false);
+    lv_obj_set_style_min_height(status_label, 70, 0);
+    identity_label = label(column, "Last exchange", true);
+    result_label = label(column, "No exchange yet", false);
     preview_panel = lv_obj_create(column);
-    lv_obj_set_size(preview_panel, 640, 220);
+    lv_obj_set_size(preview_panel, 640, 240);
+    lv_obj_set_style_bg_color(preview_panel, lv_color_hex(0x1F2937), 0);
+    lv_obj_set_style_border_color(preview_panel, lv_color_hex(0x374151), 0);
+    lv_obj_set_style_text_color(preview_panel, lv_color_white(), 0);
+    lv_obj_set_style_radius(preview_panel, 12, 0);
     lv_obj_set_flex_flow(preview_panel, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(preview_panel, 12, 0);
-    tx_label = label(preview_panel, "Sent bytes and received bytes appear here in hex and ASCII.", true);
-    rx_label = label(preview_panel, "", true);
+    tx_label = label(preview_panel, "TX  —\n\nRX  —", false);
+    rx_label = label(preview_panel, "", false);
     lv_obj_set_width(tx_label, LV_PCT(100));
     lv_obj_set_width(rx_label, LV_PCT(100));
-    label(column, "Paste replaces the Hex draft; copy accepts complete replies up to 128 bytes.\n"
-                  "Inputs, clipboard and last exchange stay in RAM until restart.\n"
-                  "CANCEL/Home closes the exchange; transmitted data cannot be recalled.", true);
     rendered_revision = UINT32_MAX;
     ui_timer = lv_timer_create(refresh, 100, NULL);
     refresh(NULL);
