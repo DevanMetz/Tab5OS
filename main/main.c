@@ -5039,14 +5039,54 @@ static void counter_clicked(lv_event_t *event)
 {
     (void)event;
     clear_content();
-    counter_label = lv_label_create(content);
+    lv_obj_t *panel = lv_obj_create(content);
+    lv_obj_remove_style_all(panel);
+    lv_obj_remove_flag(panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(panel, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_flex_flow(panel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(panel, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(panel, 24, 0);
+
+    lv_obj_t *title = lv_label_create(panel);
+    lv_label_set_text(title, "Counter");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+
+    lv_obj_t *value = lv_obj_create(panel);
+    lv_obj_set_size(value, LV_PCT(100), 240);
+    lv_obj_remove_flag(value, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(value, lv_color_hex(0x20283a), 0);
+    lv_obj_set_style_border_width(value, 0, 0);
+    lv_obj_set_style_radius(value, 24, 0);
+    counter_label = lv_label_create(value);
+    lv_obj_set_width(counter_label, LV_PCT(100));
+    lv_obj_set_style_text_align(counter_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(counter_label, lv_color_white(), 0);
     lv_obj_set_style_text_font(counter_label, &lv_font_montserrat_48, 0);
     update_counter();
-    lv_obj_t *minus = button(content, "-1", NULL);
+    lv_obj_center(counter_label);
+
+    lv_obj_t *actions = lv_obj_create(panel);
+    lv_obj_remove_style_all(actions);
+    lv_obj_remove_flag(actions, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_size(actions, LV_PCT(100), 180);
+    lv_obj_set_flex_flow(actions, LV_FLEX_FLOW_ROW);
+    lv_obj_set_style_pad_column(actions, 24, 0);
+    lv_obj_t *minus = button(actions, "-1", NULL);
+    lv_obj_set_height(minus, LV_PCT(100));
+    lv_obj_set_flex_grow(minus, 1);
+    lv_obj_set_style_radius(minus, 24, 0);
+    lv_obj_set_style_text_font(lv_obj_get_child(minus, 0), &lv_font_montserrat_48, 0);
     lv_obj_add_event_cb(minus, counter_change, LV_EVENT_CLICKED, (void *)(intptr_t)-1);
-    lv_obj_t *plus = button(content, "+1", NULL);
+    lv_obj_t *plus = button(actions, "+1", NULL);
+    lv_obj_set_height(plus, LV_PCT(100));
+    lv_obj_set_flex_grow(plus, 1);
+    lv_obj_set_style_radius(plus, 24, 0);
+    lv_obj_set_style_text_font(lv_obj_get_child(plus, 0), &lv_font_montserrat_48, 0);
     lv_obj_add_event_cb(plus, counter_change, LV_EVENT_CLICKED, (void *)(intptr_t)1);
-    button(content, "Reset", counter_reset);
+    lv_obj_t *reset = button(panel, "Reset", counter_reset);
+    lv_obj_set_size(reset, LV_PCT(100), 80);
+    lv_obj_set_style_bg_color(reset, lv_color_hex(0x20283a), 0);
+    lv_obj_set_style_radius(reset, 20, 0);
 }
 
 static void wifi_scan_task(void *argument)
