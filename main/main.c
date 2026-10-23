@@ -337,7 +337,6 @@ static i2c_master_dev_handle_t rtc;
 static lv_obj_t *time_label;
 static lv_obj_t *clock_time;
 static lv_obj_t *clock_date;
-static lv_obj_t *clock_status;
 static alarm_setting_t alarms[ALARM_COUNT];
 static int alarm_last_day[ALARM_COUNT];
 static lv_obj_t *alarm_time_labels[ALARM_COUNT];
@@ -2670,8 +2669,6 @@ static void clock_tick(lv_timer_t *timer)
         else snprintf(text, sizeof(text), "Time not set");
         lv_label_set_text(clock_date, text);
     }
-    if (clock_status) lv_label_set_text(clock_status, internet_time_synced ? "Synced from internet" :
-        rtc_time_loaded ? "Running from hardware RTC" : "Connect to Wi-Fi to set the clock");
 }
 
 static void battery_tick(lv_timer_t *timer)
@@ -4174,7 +4171,6 @@ static void clear_content(void)
     storage_format_armed = false;
     clock_time = NULL;
     clock_date = NULL;
-    clock_status = NULL;
     for (size_t i = 0; i < ALARM_COUNT; i++) {
         alarm_time_labels[i] = NULL;
         alarm_enabled_labels[i] = NULL;
@@ -6028,6 +6024,9 @@ static void alarm_update_row(size_t index)
     lv_label_set_text_fmt(alarm_time_labels[index], "%u:%02u %s", hour ? hour : 12, alarms[index].minute,
                           alarms[index].hour < 12 ? "AM" : "PM");
     lv_label_set_text(alarm_enabled_labels[index], alarms[index].enabled ? "ON" : "OFF");
+    lv_obj_t *toggle = lv_obj_get_parent(alarm_enabled_labels[index]);
+    lv_obj_set_style_bg_color(toggle, lv_color_hex(alarms[index].enabled ? 0x009688 : 0x374151), 0);
+    lv_obj_set_style_border_color(toggle, lv_color_hex(alarms[index].enabled ? 0x009688 : 0x64748b), 0);
 }
 
 static void alarm_edit_clicked(lv_event_t *event)
@@ -6049,7 +6048,14 @@ static void alarm_edit_clicked(lv_event_t *event)
 static lv_obj_t *alarm_control(lv_obj_t *parent, const char *text, int width, unsigned action, lv_obj_t **label_out)
 {
     lv_obj_t *control = lv_button_create(parent);
-    lv_obj_set_size(control, width, 64);
+    lv_obj_set_size(control, width, 72);
+    lv_obj_set_style_radius(control, 14, 0);
+    lv_obj_set_style_text_font(control, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_pad_all(control, 8, 0);
+    lv_obj_set_style_bg_color(control, lv_color_hex(0x263449), 0);
+    lv_obj_set_style_border_width(control, 1, 0);
+    lv_obj_set_style_border_color(control, lv_color_hex(0x475569), 0);
+    lv_obj_set_style_shadow_width(control, 0, 0);
     lv_obj_add_event_cb(control, alarm_edit_clicked, LV_EVENT_CLICKED, (void *)(uintptr_t)action);
     lv_obj_t *label = lv_label_create(control);
     lv_label_set_text(label, text);
@@ -6061,27 +6067,47 @@ static lv_obj_t *alarm_control(lv_obj_t *parent, const char *text, int width, un
 static void show_clock(void)
 {
     clear_content();
-    clock_time = lv_label_create(content);
+    lv_obj_t *face = lv_obj_create(content);
+    lv_obj_remove_style_all(face);
+    lv_obj_set_size(face, 650, 190);
+    lv_obj_set_flex_flow(face, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(face, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_row(face, 18, 0);
+    clock_time = lv_label_create(face);
     lv_obj_set_style_text_font(clock_time, &lv_font_montserrat_48, 0);
-    clock_date = lv_label_create(content);
+    clock_date = lv_label_create(face);
+    lv_obj_set_width(clock_date, LV_PCT(100));
+    lv_obj_set_style_text_align(clock_date, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_font(clock_date, &lv_font_montserrat_28, 0);
-    clock_status = lv_label_create(content);
     lv_obj_t *heading = lv_label_create(content);
     lv_label_set_text(heading, "Daily alarms");
+    lv_obj_set_width(heading, 650);
     lv_obj_set_style_text_font(heading, &lv_font_montserrat_28, 0);
     for (size_t i = 0; i < ALARM_COUNT; i++) {
-        lv_obj_t *row = lv_obj_create(content);
+        lv_obj_t *card = lv_obj_create(content);
+        lv_obj_set_size(card, 650, 220);
+        lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_color(card, lv_color_hex(0x1f2937), 0);
+        lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(card, 0, 0);
+        lv_obj_set_style_radius(card, 20, 0);
+        lv_obj_set_style_pad_all(card, 20, 0);
+        alarm_time_labels[i] = lv_label_create(card);
+        lv_obj_set_style_text_color(alarm_time_labels[i], lv_color_white(), 0);
+        lv_obj_set_style_text_font(alarm_time_labels[i], &lv_font_montserrat_48, 0);
+        lv_obj_align(alarm_time_labels[i], LV_ALIGN_TOP_LEFT, 0, 8);
+        lv_obj_t *toggle = alarm_control(card, "OFF", 120, (i << 4) | 4, &alarm_enabled_labels[i]);
+        lv_obj_align(toggle, LV_ALIGN_TOP_RIGHT, 0, 0);
+        lv_obj_t *row = lv_obj_create(card);
         lv_obj_remove_style_all(row);
-        lv_obj_set_size(row, 650, 76);
+        lv_obj_set_size(row, LV_PCT(100), 72);
+        lv_obj_align(row, LV_ALIGN_BOTTOM_LEFT, 0, 0);
         lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_AROUND, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-        alarm_time_labels[i] = lv_label_create(row);
-        lv_obj_set_width(alarm_time_labels[i], 120);
-        alarm_control(row, "H-", 68, i << 4, NULL);
-        alarm_control(row, "H+", 68, (i << 4) | 1, NULL);
-        alarm_control(row, "M-", 68, (i << 4) | 2, NULL);
-        alarm_control(row, "M+", 68, (i << 4) | 3, NULL);
-        alarm_control(row, "OFF", 100, (i << 4) | 4, &alarm_enabled_labels[i]);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        alarm_control(row, "Hour -", 140, i << 4, NULL);
+        alarm_control(row, "Hour +", 140, (i << 4) | 1, NULL);
+        alarm_control(row, "Min -", 140, (i << 4) | 2, NULL);
+        alarm_control(row, "Min +", 140, (i << 4) | 3, NULL);
         alarm_update_row(i);
     }
     clock_tick(NULL);
