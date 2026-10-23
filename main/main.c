@@ -495,6 +495,7 @@ static lv_timer_t *scope_timer;
 static lv_obj_t *scope_chart;
 static lv_chart_series_t *scope_series;
 static lv_obj_t *scope_stats;
+static int32_t scope_previous_row_gap;
 static lv_obj_t *scope_channel_label;
 static lv_obj_t *scope_run_label;
 static lv_obj_t *scope_rate_label;
@@ -2020,6 +2021,7 @@ static void scope_task(void *argument)
 
 static void scope_release(void)
 {
+    lv_obj_set_style_pad_row(content, scope_previous_row_gap, 0);
     portENTER_CRITICAL(&scope_lock);
     scope_active = false;
     portEXIT_CRITICAL(&scope_lock);
@@ -2058,7 +2060,7 @@ static void scope_update_controls(void)
     lv_label_set_text_fmt(scope_level_label, "Trigger %u mV", scope_trigger_mv);
     if (scope_offset_label) lv_label_set_text_fmt(scope_offset_label, "Offset\n%d mV", (int)offset_mv);
     if (scope_gain_label)
-        lv_label_set_text_fmt(scope_gain_label, "Scale\n%u.%u%%",
+        lv_label_set_text_fmt(scope_gain_label, "Gain\n%u.%u%%",
                               (unsigned)(gain_permille / 10), (unsigned)(gain_permille % 10));
 }
 
@@ -2075,7 +2077,7 @@ static void scope_tick(lv_timer_t *timer)
 
     size_t start;
     if (!scope_window_start(scope_snapshot, count, scope_trigger_mode, scope_trigger_mv, &start)) {
-        lv_label_set_text(scope_stats, scope_error ? "ADC error" : "Waiting for trigger...");
+        lv_label_set_text(scope_stats, scope_error ? "ADC error" : count < SCOPE_CHART_POINTS ? "Acquiring samples..." : "Waiting for trigger...");
         return;
     }
     uint32_t sum = 0;
@@ -2101,8 +2103,9 @@ static void scope_tick(lv_timer_t *timer)
     else
         snprintf(timing, sizeof(timing), "Freq --   Duty --");
     lv_label_set_text_fmt(scope_stats,
-                          "Now %u.%03u V   Min %u.%03u   Max %u.%03u   Vpp %u.%03u\n"
-                          "Avg %u.%03u V   %s   %lu kS/s",
+                          "Now %u.%03u V    Min %u.%03u V\n"
+                          "Max %u.%03u V    Vpp %u.%03u V\n"
+                          "Avg %u.%03u V\n%s    %lu kS/s",
                           now / 1000, now % 1000, minimum / 1000, minimum % 1000,
                           maximum / 1000, maximum % 1000, peak_to_peak / 1000, peak_to_peak % 1000,
                           average / 1000, average % 1000, timing,
@@ -6905,7 +6908,10 @@ static lv_obj_t *scope_control(lv_obj_t *parent, const char *text, int width,
                                lv_event_cb_t callback, void *user_data, lv_obj_t **label_out)
 {
     lv_obj_t *control = lv_button_create(parent);
-    lv_obj_set_size(control, width, 60);
+    lv_obj_set_size(control, width, 72);
+    lv_obj_set_style_radius(control, 14, 0);
+    lv_obj_set_style_pad_all(control, 4, 0);
+    lv_obj_set_style_text_font(control, &lv_font_montserrat_28, 0);
     lv_obj_add_event_cb(control, callback, LV_EVENT_CLICKED, user_data);
     lv_obj_t *label = lv_label_create(control);
     lv_label_set_text(label, text);
@@ -6918,9 +6924,10 @@ static lv_obj_t *scope_row(void)
 {
     lv_obj_t *row = lv_obj_create(content);
     lv_obj_remove_style_all(row);
-    lv_obj_set_size(row, 650, 64);
+    lv_obj_set_size(row, 650, 72);
+    lv_obj_set_style_pad_column(row, 12, 0);
     lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_AROUND, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     return row;
 }
 
@@ -6933,8 +6940,10 @@ static void scope_clicked(lv_event_t *event)
 static void show_scope(void)
 {
     clear_content();
+    scope_previous_row_gap = lv_obj_get_style_pad_row(content, 0);
     if (!shared_i2c_pins_available()) return;
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_row(content, 16, 0);
     if (!scope_ring) {
         scope_ring = heap_caps_calloc(SCOPE_RING_POINTS, sizeof(*scope_ring), MALLOC_CAP_SPIRAM);
         scope_snapshot = heap_caps_calloc(SCOPE_RING_POINTS, sizeof(*scope_snapshot), MALLOC_CAP_SPIRAM);
@@ -6951,16 +6960,22 @@ static void show_scope(void)
         }
     }
     lv_obj_t *title = lv_label_create(content);
-    lv_label_set_text(title, "ADC Oscilloscope");
+    lv_label_set_text(title, "Scope");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
 
     scope_stats = lv_label_create(content);
-    lv_obj_set_width(scope_stats, 650);
+    lv_obj_set_size(scope_stats, 650, 136);
+    lv_obj_set_style_text_font(scope_stats, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_align(scope_stats, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(scope_stats, "Starting ADC...");
 
     scope_chart = lv_chart_create(content);
     lv_obj_set_size(scope_chart, 650, 420);
+    lv_obj_set_style_bg_color(scope_chart, lv_color_hex(0x18222e), 0);
+    lv_obj_set_style_border_color(scope_chart, lv_color_hex(0x394655), 0);
+    lv_obj_set_style_line_color(scope_chart, lv_color_hex(0x394655), LV_PART_MAIN);
+    lv_obj_set_style_line_width(scope_chart, 2, LV_PART_ITEMS);
+    lv_obj_set_style_size(scope_chart, 0, 0, LV_PART_INDICATOR);
     lv_chart_set_type(scope_chart, LV_CHART_TYPE_LINE);
     lv_chart_set_point_count(scope_chart, SCOPE_CHART_POINTS);
     lv_chart_set_range(scope_chart, LV_CHART_AXIS_PRIMARY_Y, 0, scope_ranges_mv[scope_range_index]);
@@ -6969,37 +6984,39 @@ static void show_scope(void)
     lv_chart_set_series_ext_y_array(scope_chart, scope_series, scope_chart_points);
 
     lv_obj_t *row = scope_row();
-    scope_control(row, "G16", 130, scope_channel_clicked, NULL, &scope_channel_label);
-    scope_control(row, "HOLD", 130, scope_run_clicked, NULL, &scope_run_label);
-    scope_control(row, "6 ms/div", 250, scope_rate_clicked, NULL, &scope_rate_label);
+    scope_control(row, "G16", 208, scope_channel_clicked, NULL, &scope_channel_label);
+    scope_control(row, "HOLD", 208, scope_run_clicked, NULL, &scope_run_label);
+    scope_control(row, "6 ms/div", 210, scope_rate_clicked, NULL, &scope_rate_label);
 
     row = scope_row();
-    scope_control(row, "330 mV/div", 250, scope_scale_clicked, NULL, &scope_scale_label);
-    scope_control(row, "AUTO", 250, scope_trigger_clicked, NULL, &scope_trigger_label);
+    scope_control(row, "330 mV/div", 319, scope_scale_clicked, NULL, &scope_scale_label);
+    scope_control(row, "AUTO", 319, scope_trigger_clicked, NULL, &scope_trigger_label);
 
     row = scope_row();
     scope_control(row, LV_SYMBOL_MINUS, 100, scope_level_clicked, (void *)(intptr_t)-100, NULL);
     scope_level_label = lv_label_create(row);
-    lv_obj_set_width(scope_level_label, 260);
+    lv_obj_set_width(scope_level_label, 426);
+    lv_obj_set_style_text_font(scope_level_label, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_align(scope_level_label, LV_TEXT_ALIGN_CENTER, 0);
     scope_control(row, LV_SYMBOL_PLUS, 100, scope_level_clicked, (void *)(intptr_t)100, NULL);
 
     row = scope_row();
-    scope_control(row, "Offset\n0 mV", 180, scope_offset_clicked, NULL, &scope_offset_label);
-    scope_control(row, "Scale\n100.0%", 180, scope_gain_clicked, NULL, &scope_gain_label);
-    scope_control(row, "RESET CAL", 180, scope_calibration_reset_clicked, NULL, NULL);
+    scope_control(row, "Offset\n0 mV", 208, scope_offset_clicked, NULL, &scope_offset_label);
+    scope_control(row, "Gain\n100.0%", 208, scope_gain_clicked, NULL, &scope_gain_label);
+    scope_control(row, "Reset cal", 210, scope_calibration_reset_clicked, NULL, NULL);
 
     row = scope_row();
-    scope_control(row, "SAVE CSV", 180, scope_capture_clicked, NULL, NULL);
+    scope_control(row, "Save CSV", 208, scope_capture_clicked, NULL, NULL);
     scope_capture_status = lv_label_create(row);
-    lv_obj_set_width(scope_capture_status, 420);
+    lv_obj_set_width(scope_capture_status, 430);
     lv_obj_set_style_text_align(scope_capture_status, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(scope_capture_status, LV_LABEL_LONG_WRAP);
     lv_label_set_text(scope_capture_status, scope_capture_notice[0] ? scope_capture_notice :
-                      "Save the visible 300-point chart to SD");
+                      "");
 
     lv_obj_t *warning = lv_label_create(content);
-    lv_label_set_text(warning, "Inputs: G16 G18 G19 G49 G50 G51 G53 G54   |   0-3.3V only");
+    lv_label_set_text(warning, "0-3.3 V input");
+    lv_obj_set_style_text_font(warning, &lv_font_montserrat_28, 0);
     lv_obj_set_width(warning, 650);
     lv_obj_set_style_text_align(warning, LV_TEXT_ALIGN_CENTER, 0);
 
