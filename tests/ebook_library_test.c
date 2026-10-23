@@ -279,9 +279,19 @@ static lv_timer_t *lv_timer_create(void (*callback)(lv_timer_t *), unsigned peri
 { assert(callback == ebook_download_tick && period == 500 && !data && !timer_handles); timer_handles++; timer_creates++; return &timer; }
 static lv_obj_t *lv_label_create(lv_obj_t *parent) { assert(parent == content); return &title; }
 static void lv_label_set_text(lv_obj_t *object, const char *text) { assert(object == &title && !strcmp(text, "Ebooks")); strcpy(object->text, text); }
-static void lv_obj_set_style_text_font(lv_obj_t *object, const int *font, int part) { assert(object == &title && font == &lv_font_montserrat_28 && !part); }
+static void lv_obj_set_style_text_font(lv_obj_t *object, const int *font, int part) { assert((object == &title || object == &list) && font == &lv_font_montserrat_28 && !part); }
 static lv_obj_t *lv_list_create(lv_obj_t *parent) { assert(parent == content); return &list; }
-static void lv_obj_set_size(lv_obj_t *object, int width, int height) { assert(object == &list && width == 640 && height == 940); }
+static void lv_obj_set_size(lv_obj_t *object, int width, int height) { assert(object == &list && width == 640 && height == 1040); }
+static void lv_obj_set_style_pad_all(lv_obj_t *object, int value, int part)
+{ assert(!part && ((object == &list && value == 12) || (object >= rows && object < rows + row_count && value == 20))); }
+static void lv_obj_set_style_pad_row(lv_obj_t *object, int value, int part)
+{ assert(object == &list && value == 8 && !part); }
+static void lv_obj_set_style_radius(lv_obj_t *object, int value, int part)
+{ assert(object == &list && value == 16 && !part); }
+static void lv_obj_set_style_min_height(lv_obj_t *object, int value, int part)
+{ assert(object >= rows && object < rows + row_count && value == (object == rows ? 72 : 88) && !part); }
+static void lv_obj_set_style_pad_column(lv_obj_t *object, int value, int part)
+{ assert(object > rows && object < rows + row_count && value == 20 && !part); }
 static lv_obj_t *lv_list_add_button(lv_obj_t *parent, const char *symbol, const char *text)
 {
     assert(parent == &list && row_count < 80 && (!symbol || !strcmp(symbol, LV_SYMBOL_LEFT) || !strcmp(symbol, LV_SYMBOL_FILE)));
