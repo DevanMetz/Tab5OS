@@ -260,6 +260,8 @@ static void refresh(lv_timer_t *timer)
     set_enabled(test_button, !busy);
     set_enabled(stop_button, busy);
     render_values(&job, busy);
+    if (job.present) lv_obj_remove_flag(identity_label, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(identity_label, LV_OBJ_FLAG_HIDDEN);
     if (!job.present) return;
     char identity[192];
     if (job.probe)
@@ -467,11 +469,11 @@ static lv_obj_t *field_block(lv_obj_t *parent, const char *name, int width)
 {
     lv_obj_t *block = lv_obj_create(parent);
     lv_obj_remove_style_all(block);
-    lv_obj_set_size(block, width, 80);
+    lv_obj_set_size(block, width, 100);
     lv_obj_remove_flag(block, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(block, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(block, 4, 0);
-    lv_obj_t *caption = label(block, name, true);
+    lv_obj_set_style_pad_row(block, 6, 0);
+    lv_obj_t *caption = label(block, name, false);
     lv_obj_set_width(caption, width);
     return block;
 }
@@ -490,7 +492,7 @@ static void input(lv_obj_t *parent, const char *name, unsigned index, int width)
 static lv_obj_t *button(lv_obj_t *parent, const char *text, lv_event_cb_t callback, void *user_data)
 {
     lv_obj_t *object = lv_button_create(parent);
-    lv_obj_set_size(object, 206, 60);
+    lv_obj_set_size(object, 206, 68);
     lv_obj_t *caption = lv_label_create(object);
     lv_label_set_text(caption, text);
     lv_obj_center(caption);
@@ -540,15 +542,13 @@ void modbus_tool_show(lv_obj_t *parent, bool connected)
     lv_obj_set_size(column, 640, LV_SIZE_CONTENT);
     lv_obj_remove_flag(column, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(column, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_row(column, 10, 0);
+    lv_obj_set_style_pad_row(column, 12, 0);
     lv_obj_set_style_text_font(column, &lv_font_montserrat_28, 0);
-    label(column, "Modbus TCP Inspector", false);
-    label(column, "Read coils, discrete inputs or registers from a device you manage.\n"
-                  "One request per read. TCP test opens a connection without sending data.", true);
-    lv_obj_t *destination = row(column, 80);
-    input(destination, "Device IPv4 address", 0, 430);
-    input(destination, "TCP port (1-65535)", 1, 198);
-    lv_obj_t *operation = row(column, 80);
+    label(column, "Modbus TCP", false);
+    lv_obj_t *destination = row(column, 100);
+    input(destination, "Device IPv4", 0, 430);
+    input(destination, "TCP port", 1, 198);
+    lv_obj_t *operation = row(column, 100);
     lv_obj_t *function = field_block(operation, "Read function", 430);
     function_select = lv_dropdown_create(function);
     readable_options(function_select);
@@ -556,10 +556,10 @@ void modbus_tool_show(lv_obj_t *parent, bool connected)
     lv_dropdown_set_options(function_select, "01 Coils\n02 Discrete inputs\n03 Holding registers\n04 Input registers");
     lv_dropdown_set_selected(function_select, function_index);
     lv_obj_add_event_cb(function_select, function_changed, LV_EVENT_VALUE_CHANGED, NULL);
-    input(operation, "Unit ID (0-255)", 2, 198);
-    lv_obj_t *range = row(column, 80);
-    input(range, "Zero-based start address (0-65535)", 3, 430);
-    input(range, "Count (1-16)", 4, 198);
+    input(operation, "Unit ID", 2, 198);
+    lv_obj_t *range = row(column, 100);
+    input(range, "Start address (0-based)", 3, 430);
+    input(range, "Count", 4, 198);
     keyboard = lv_keyboard_create(column);
     lv_obj_set_style_text_font(keyboard, &lv_font_montserrat_28, LV_PART_ITEMS);
     lv_obj_set_size(keyboard, 640, 220);
@@ -567,39 +567,37 @@ void modbus_tool_show(lv_obj_t *parent, bool connected)
     lv_obj_add_flag(keyboard, LV_OBJ_FLAG_HIDDEN);
     lv_obj_add_event_cb(keyboard, keyboard_done, LV_EVENT_READY, NULL);
     lv_obj_add_event_cb(keyboard, keyboard_done, LV_EVENT_CANCEL, NULL);
-    lv_obj_t *actions = row(column, 60);
+    lv_obj_t *actions = row(column, 68);
     read_button = button(actions, "READ", start_clicked, NULL);
     read_label = lv_obj_get_child(read_button, 0);
     test_button = button(actions, "TEST TCP", start_clicked, (void *)1);
     stop_button = button(actions, "STOP", stop_clicked, NULL);
-    status_label = label(column, connected ? "Ready. READ requires a second tap for cleartext confirmation." :
-                         "Connect to Wi-Fi before starting. You can configure the request now.", true);
-    lv_obj_set_height(status_label, 44);
-    identity_label = label(column, "No request has been sent.", true);
-    lv_obj_set_height(identity_label, 44);
-    lv_obj_t *views = row(column, 80);
-    lv_obj_t *view_block = field_block(views, "Saved reply: value view", 310);
+    lv_obj_set_style_bg_color(test_button, lv_color_hex(0x263445), 0);
+    lv_obj_set_style_bg_color(stop_button, lv_color_hex(0x263445), 0);
+    status_label = label(column, connected ? "Ready" : "Wi-Fi disconnected", false);
+    lv_obj_set_style_min_height(status_label, 68, 0);
+    label(column, "Results", false);
+    identity_label = label(column, "", true);
+    lv_obj_t *views = row(column, 100);
+    lv_obj_t *view_block = field_block(views, "Value view", 310);
     view_select = lv_dropdown_create(view_block);
     readable_options(view_select);
     lv_obj_set_size(view_select, 310, 60);
     lv_dropdown_set_options(view_select, "16-bit registers\nUnsigned 32-bit\nSigned 32-bit\nFloat32");
     lv_dropdown_set_selected(view_select, value_view);
     lv_obj_add_event_cb(view_select, view_changed, LV_EVENT_VALUE_CHANGED, NULL);
-    lv_obj_t *order_block = field_block(views, "32-bit byte order", 310);
+    lv_obj_t *order_block = field_block(views, "Byte order", 310);
     order_select = lv_dropdown_create(order_block);
     readable_options(order_select);
     lv_obj_set_size(order_select, 310, 60);
     lv_dropdown_set_options(order_select, "ABCD\nCDAB\nBADC\nDCBA");
     lv_dropdown_set_selected(order_select, byte_order);
     lv_obj_add_event_cb(order_select, view_changed, LV_EVENT_VALUE_CHANGED, NULL);
-    label(column, "A B = first register bytes; C D = next register bytes.\n"
-                  "Pairs start at the read address. Check the device's mapping and scaling.", true);
     result_box = lv_obj_create(column);
-    lv_obj_set_size(result_box, 640, 250);
+    lv_obj_set_size(result_box, 640, 280);
     lv_obj_set_style_pad_all(result_box, 16, 0);
     lv_obj_set_scroll_dir(result_box, LV_DIR_VER);
-    result_label = label(result_box, "Results appear here. After a register read, choose a value view.\n"
-                         "Changing the view reinterprets the saved reply without sending a request.", true);
+    result_label = label(result_box, "No reply yet", false);
     lv_obj_set_width(result_label, 596);
     rendered_revision = UINT32_MAX;
     refresh(NULL);
