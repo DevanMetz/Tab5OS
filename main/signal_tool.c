@@ -209,7 +209,7 @@ static void start_clicked(lv_event_t *event)
     uint32_t actual = ledc_get_freq(LEDC_LOW_SPEED_MODE, SIGNAL_TIMER);
     lv_label_set_text_fmt(output_label, "Output: %lu Hz at %u%% on G6",
                           (unsigned long)actual, duty_choices[duty_index]);
-    set_status("PWM active for at most five minutes; press STOP or Home when finished");
+    set_status("PWM active | 5 min limit");
 }
 
 static void setting_clicked(lv_event_t *event)
@@ -226,7 +226,7 @@ static void setting_clicked(lv_event_t *event)
     else
         pulse_index = (pulse_index + 1) % (sizeof(pulse_choices_us) / sizeof(pulse_choices_us[0]));
     update_controls();
-    set_status("Settings selected; start PWM or send one pulse");
+    set_status("G6 released");
 }
 
 static void pulse_clicked(lv_event_t *event)
@@ -260,7 +260,9 @@ static lv_obj_t *small_button(lv_obj_t *parent, const char *text, int width,
                               lv_event_cb_t callback, void *user_data, lv_obj_t **label_out)
 {
     lv_obj_t *control = lv_button_create(parent);
-    lv_obj_set_size(control, width, 76);
+    lv_obj_set_size(control, width, 96);
+    lv_obj_set_style_radius(control, 16, 0);
+    lv_obj_set_style_text_font(control, &lv_font_montserrat_28, 0);
     lv_obj_add_event_cb(control, callback, LV_EVENT_CLICKED, user_data);
     lv_obj_t *label = lv_label_create(control);
     lv_label_set_text(label, text);
@@ -274,54 +276,75 @@ static lv_obj_t *row(lv_obj_t *parent)
 {
     lv_obj_t *container = lv_obj_create(parent);
     lv_obj_remove_style_all(container);
-    lv_obj_set_size(container, 640, 80);
+    lv_obj_set_size(container, 592, 100);
     lv_obj_set_flex_flow(container, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(container, LV_FLEX_ALIGN_SPACE_BETWEEN,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
     return container;
 }
 
+static lv_obj_t *signal_card(lv_obj_t *parent)
+{
+    lv_obj_t *card = lv_obj_create(parent);
+    lv_obj_set_size(card, 640, LV_SIZE_CONTENT);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x202938), 0);
+    lv_obj_set_style_border_width(card, 0, 0);
+    lv_obj_set_style_radius(card, 18, 0);
+    lv_obj_set_style_pad_all(card, 24, 0);
+    lv_obj_set_style_pad_row(card, 20, 0);
+    lv_obj_set_style_text_color(card, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    return card;
+}
+
 void signal_tool_show(lv_obj_t *parent)
 {
-    lv_obj_set_style_pad_row(parent, 18, 0);
+    lv_obj_set_style_pad_row(parent, 20, 0);
 
     lv_obj_t *title = lv_label_create(parent);
-    lv_label_set_text(title, "PWM & Pulse Generator");
+    lv_label_set_text(title, "Signal Gen");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
 
-    lv_obj_t *help = lv_label_create(parent);
-    lv_obj_set_width(help, 640);
-    lv_obj_set_style_text_align(help, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(help, "M5-Bus G6 output, 3.3 V logic only; share ground.\n"
-                            "Use a buffer for loads. Output is low before routing and high-impedance while stopped.\n"
-                            "Measure the real waveform; single-pulse width is requested timing, not calibrated timing.");
-
-    lv_obj_t *settings = row(parent);
-    small_button(settings, "", 200, setting_clicked, (void *)0, &frequency_label);
-    small_button(settings, "", 200, setting_clicked, (void *)1, &duty_label);
-    small_button(settings, "", 200, setting_clicked, (void *)2, &pulse_label);
-
-    lv_obj_t *actions = row(parent);
-    small_button(actions, "", 310, start_clicked, NULL, &start_label);
-    small_button(actions, "SINGLE PULSE", 310, pulse_clicked, NULL, NULL);
-
-    lv_obj_t *card = lv_obj_create(parent);
-    lv_obj_set_size(card, 640, 300);
-    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    output_label = lv_label_create(card);
+    lv_obj_t *output = signal_card(parent);
+    output_label = lv_label_create(output);
+    lv_obj_set_width(output_label, 592);
+    lv_obj_set_style_text_align(output_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(output_label, "Output: stopped");
     lv_obj_set_style_text_font(output_label, &lv_font_montserrat_28, 0);
-    lv_obj_t *limits = lv_label_create(card);
-    lv_obj_set_width(limits, 560);
-    lv_obj_set_style_text_align(limits, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(limits, "PWM automatically stops after five minutes.\n"
-                              "Stop before rewiring. Never drive motors, relays, LEDs, or 5 V logic directly.");
-
-    status_label = lv_label_create(parent);
-    lv_obj_set_width(status_label, 640);
+    status_label = lv_label_create(output);
+    lv_obj_set_width(status_label, 592);
     lv_obj_set_style_text_align(status_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(status_label, "Ready; choose frequency/duty or pulse width");
+    lv_obj_set_style_text_color(status_label, lv_color_hex(0xCBD5E1), 0);
+    lv_obj_set_style_text_font(status_label, &lv_font_montserrat_28, 0);
+    lv_label_set_text(status_label, "G6 released");
+
+    lv_obj_t *pwm = signal_card(parent);
+    lv_obj_t *heading = lv_label_create(pwm);
+    lv_label_set_text(heading, "PWM");
+    lv_obj_set_style_text_font(heading, &lv_font_montserrat_28, 0);
+    lv_obj_t *settings = row(pwm);
+    small_button(settings, "", 286, setting_clicked, (void *)0, &frequency_label);
+    small_button(settings, "", 286, setting_clicked, (void *)1, &duty_label);
+    small_button(pwm, "", 592, start_clicked, NULL, &start_label);
+
+    lv_obj_t *pulse = signal_card(parent);
+    heading = lv_label_create(pulse);
+    lv_label_set_text(heading, "Single pulse");
+    lv_obj_set_style_text_font(heading, &lv_font_montserrat_28, 0);
+    lv_obj_t *actions = row(pulse);
+    small_button(actions, "", 286, setting_clicked, (void *)2, &pulse_label);
+    small_button(actions, "SEND PULSE", 286, pulse_clicked, NULL, NULL);
+
+    lv_obj_t *limits = lv_label_create(parent);
+    lv_obj_set_width(limits, 640);
+    lv_obj_set_style_text_color(limits, lv_color_hex(0xCBD5E1), 0);
+    lv_obj_set_style_text_font(limits, &lv_font_montserrat_28, 0);
+    lv_label_set_text(limits, "M5-Bus G6 | 3.3 V logic | Common ground\n"
+                              "PWM stops after 5 minutes. Stop before rewiring.\n"
+                              "Use a buffer for loads; never drive motors, relays, LEDs or 5 V logic directly.\n"
+                              "Stopped: high impedance. Low before routing.\n"
+                              "Pulse timing is requested, not calibrated; measure the waveform.");
     update_controls();
 }
