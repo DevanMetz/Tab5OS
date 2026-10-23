@@ -7510,7 +7510,7 @@ static void cycling_tick(lv_timer_t *timer)
                            connecting ? "Connecting to KICKR..." : connected ? "Reading KICKR services..." :
                            found ? "KICKR disconnected - scanning..." : "Wake the KICKR by pedaling");
     if (ride_toggle_label)
-        lv_label_set_text(ride_toggle_label, enabled ? "Turn KICKR Bluetooth off" : "Turn KICKR Bluetooth on");
+        lv_label_set_text(ride_toggle_label, enabled ? "KICKR Bluetooth: On" : "KICKR Bluetooth: Off");
     lv_label_set_text_fmt(ride_power_label, data.has_power ? "%d W" : "-- W", data.power_w);
     /* LVGL's formatter has float support disabled; libc snprintf supports it. */
     char cadence_text[32];
@@ -7519,7 +7519,7 @@ static void cycling_tick(lv_timer_t *timer)
     lv_label_set_text_fmt(ride_hr_label, heart_rate > 0 ? "%d BPM" : "-- BPM", heart_rate);
     unsigned elapsed = ride_recording ? pdTICKS_TO_MS(ticks - ride_started_tick) / 1000 : 0;
     char stats_text[160];
-    snprintf(stats_text, sizeof(stats_text), "%.1f mph  |  %.2f mi  |  %.1f kJ  |  %02u:%02u:%02u",
+    snprintf(stats_text, sizeof(stats_text), "%.1f mph     %.2f mi     %.1f kJ\n%02u:%02u:%02u",
              data.speed_kmh * 0.621371f, ride_distance_km * 0.621371f, ride_work_kj,
              elapsed / 3600, elapsed / 60 % 60, elapsed % 60);
     lv_label_set_text(ride_stats, stats_text);
@@ -7568,18 +7568,36 @@ static void cycling_clicked(lv_event_t *event)
 static void show_cycling(void)
 {
     clear_content();
-    lv_obj_t *title = lv_label_create(content);
+    /* Keep the dashboard self-contained so shared content styles are untouched. */
+    lv_obj_t *dashboard = lv_obj_create(content);
+    lv_obj_set_size(dashboard, 664, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(dashboard, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(dashboard, 0, 0);
+    lv_obj_set_style_pad_all(dashboard, 0, 0);
+    lv_obj_set_style_pad_row(dashboard, 20, 0);
+    lv_obj_set_style_text_color(dashboard, lv_color_hex(0xE6EDF3), 0);
+    lv_obj_clear_flag(dashboard, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(dashboard, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(dashboard, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_t *title = lv_label_create(dashboard);
     lv_label_set_text(title, "Cycling");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
-    ride_status = lv_label_create(content);
+    ride_status = lv_label_create(dashboard);
+    lv_obj_set_style_text_color(ride_status, lv_color_hex(0xAAB4C3), 0);
     lv_obj_set_width(ride_status, 640);
+    lv_obj_set_style_text_font(ride_status, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_align(ride_status, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_t *toggle = button(content, "Turn KICKR Bluetooth on", kickr_toggle_clicked);
+    lv_obj_t *toggle = button(dashboard, "KICKR Bluetooth: Off", kickr_toggle_clicked);
     ride_toggle_label = lv_obj_get_child(toggle, 0);
-    lv_obj_set_size(toggle, 520, 82);
+    lv_obj_set_size(toggle, 640, 72);
+    lv_obj_set_style_bg_color(toggle, lv_color_hex(0x243449), 0);
 
-    lv_obj_t *metrics = lv_obj_create(content);
-    lv_obj_set_size(metrics, 640, 180);
+    lv_obj_t *metrics = lv_obj_create(dashboard);
+    lv_obj_set_size(metrics, 640, 200);
+    lv_obj_set_style_bg_color(metrics, lv_color_hex(0x202938), 0);
+    lv_obj_set_style_border_width(metrics, 0, 0);
+    lv_obj_set_style_radius(metrics, 20, 0);
+    lv_obj_set_style_text_color(metrics, lv_color_hex(0xFFFFFF), 0);
     lv_obj_clear_flag(metrics, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(metrics, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(metrics, LV_FLEX_ALIGN_SPACE_AROUND, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
@@ -7590,24 +7608,41 @@ static void show_cycling(void)
     lv_obj_set_style_text_font(ride_cadence_label, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_font(ride_hr_label, &lv_font_montserrat_28, 0);
 
-    ride_stats = lv_label_create(content);
+    lv_obj_set_style_text_color(ride_power_label, lv_color_hex(0x42A5FF), 0);
+    lv_obj_set_style_text_color(ride_hr_label, lv_color_hex(0xFF8095), 0);
+
+    ride_stats = lv_label_create(dashboard);
+    lv_obj_set_style_text_color(ride_stats, lv_color_hex(0xAAB4C3), 0);
     lv_obj_set_width(ride_stats, 640);
+    lv_obj_set_style_text_font(ride_stats, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_line_space(ride_stats, 14, 0);
     lv_obj_set_style_text_align(ride_stats, LV_TEXT_ALIGN_CENTER, 0);
-    ride_chart = lv_chart_create(content);
-    lv_obj_set_size(ride_chart, 640, 350);
+    ride_chart = lv_chart_create(dashboard);
+    lv_obj_set_size(ride_chart, 640, 280);
+    lv_obj_set_style_bg_color(ride_chart, lv_color_hex(0x202938), 0);
+    lv_obj_set_style_border_width(ride_chart, 0, 0);
+    lv_obj_set_style_radius(ride_chart, 20, 0);
+    lv_obj_set_style_line_color(ride_chart, lv_color_hex(0x394555), LV_PART_MAIN);
+    lv_obj_set_style_line_width(ride_chart, 3, LV_PART_ITEMS);
+    lv_obj_set_style_size(ride_chart, 0, 0, LV_PART_INDICATOR);
     lv_chart_set_type(ride_chart, LV_CHART_TYPE_LINE);
     lv_chart_set_point_count(ride_chart, RIDE_CHART_POINTS);
     lv_chart_set_range(ride_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 1000);
     lv_chart_set_range(ride_chart, LV_CHART_AXIS_SECONDARY_Y, 40, 220);
     lv_chart_set_div_line_count(ride_chart, 5, 7);
-    ride_power_series = lv_chart_add_series(ride_chart, lv_palette_main(LV_PALETTE_BLUE), LV_CHART_AXIS_PRIMARY_Y);
-    ride_hr_series = lv_chart_add_series(ride_chart, lv_palette_main(LV_PALETTE_RED), LV_CHART_AXIS_SECONDARY_Y);
+    ride_power_series = lv_chart_add_series(ride_chart, lv_color_hex(0x42A5FF), LV_CHART_AXIS_PRIMARY_Y);
+    ride_hr_series = lv_chart_add_series(ride_chart, lv_color_hex(0xFF8095), LV_CHART_AXIS_SECONDARY_Y);
 
-    lv_obj_t *start = button(content, ride_recording ? "Stop & save" : "Start ride", ride_button_clicked);
-    lv_obj_set_size(start, 520, 82);
+    lv_chart_set_all_value(ride_chart, ride_power_series, LV_CHART_POINT_NONE);
+    lv_chart_set_all_value(ride_chart, ride_hr_series, LV_CHART_POINT_NONE);
+
+    lv_obj_t *start = button(dashboard, ride_recording ? "Stop & save" : "Start ride", ride_button_clicked);
+    lv_obj_set_size(start, 640, 88);
     ride_button_label = lv_obj_get_child(start, 0);
-    ride_history = lv_label_create(content);
+    ride_history = lv_label_create(dashboard);
+    lv_obj_set_style_text_color(ride_history, lv_color_hex(0xAAB4C3), 0);
     lv_obj_set_width(ride_history, 640);
+    lv_obj_set_style_text_font(ride_history, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_align(ride_history, LV_TEXT_ALIGN_CENTER, 0);
     ride_load_history();
     cycling_tick(NULL);
