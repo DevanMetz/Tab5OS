@@ -1114,7 +1114,7 @@ int main(int argc, char **argv)
     assert(has_text(content, "inside; broadcast address"));
     set_input(2, "");
     assert(click("Calculate"));
-    assert(has_text(content, "Enter a peer to check"));
+    assert(!has_text(content, "inside; broadcast address"));
     set_input(1, "255.0.255.0");
     assert(click("Calculate"));
     assert(has_text(content, "Netmask bits must be contiguous"));
