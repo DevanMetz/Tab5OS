@@ -7056,12 +7056,12 @@ static void govee_tick(lv_timer_t *timer)
     bool scanning = govee_scanning;
     portEXIT_CRITICAL(&govee_lock);
     if (govee_toggle_label)
-        lv_label_set_text(govee_toggle_label, enabled ? "Turn Govee Bluetooth off" : "Turn Govee Bluetooth on");
+        lv_label_set_text(govee_toggle_label, enabled ? "Turn Bluetooth off" : "Turn Bluetooth on");
     if (!enabled) {
-        lv_label_set_text(govee_status, "Govee Bluetooth is off");
+        lv_label_set_text(govee_status, "Bluetooth off");
         lv_label_set_text(govee_temperature, "-- F");
         lv_label_set_text(govee_humidity, "--% RH");
-        lv_label_set_text(govee_details, "Turn on Bluetooth to monitor broadcasts");
+        lv_obj_add_flag(govee_details, LV_OBJ_FLAG_HIDDEN);
         return;
     }
     govee_reading_t reading;
@@ -7069,12 +7069,16 @@ static void govee_tick(lv_timer_t *timer)
     int8_t rssi;
     time_t updated;
     if (!govee_snapshot(&reading, name, sizeof(name), address, sizeof(address), &rssi, &updated)) {
-        lv_label_set_text(govee_status, scanning ? "Scanning for a Govee H5075..." : "Bluetooth is unavailable");
+        lv_label_set_text(govee_status, scanning ? "Scanning..." : "Bluetooth unavailable");
+        lv_label_set_text(govee_temperature, "-- F");
+        lv_label_set_text(govee_humidity, "--% RH");
+        lv_obj_add_flag(govee_details, LV_OBJ_FLAG_HIDDEN);
         return;
     }
     int age = (int)(time(NULL) - updated);
     int c_tenths = weather_round(reading.temperature_c * 10.0f);
-    lv_label_set_text_fmt(govee_status, "%s  |  updated %d sec ago", name, age < 0 ? 0 : age);
+    lv_label_set_text_fmt(govee_status, "%s\nUpdated %d sec ago", name, age < 0 ? 0 : age);
+    lv_obj_remove_flag(govee_details, LV_OBJ_FLAG_HIDDEN);
     lv_label_set_text_fmt(govee_temperature, "%d F", weather_round(reading.temperature_c * 9.0f / 5.0f + 32.0f));
     lv_label_set_text_fmt(govee_humidity, "%d%% RH", weather_round(reading.humidity));
     lv_label_set_text_fmt(govee_details, "%s%d.%d C\nSensor battery %u%%\nSignal %d dBm\n%s",
@@ -7099,29 +7103,51 @@ static void show_govee(void)
     lv_obj_t *title = lv_label_create(content);
     lv_label_set_text(title, "Govee H5075");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+    lv_obj_t *toggle = button(content, "Turn Bluetooth on", govee_toggle_clicked);
+    govee_toggle_label = lv_obj_get_child(toggle, 0);
+    lv_obj_set_size(toggle, 620, 88);
+    lv_obj_set_style_bg_color(toggle, lv_color_hex(0x00897B), 0);
+
     govee_status = lv_label_create(content);
     lv_obj_set_width(govee_status, 620);
+    lv_obj_set_style_text_font(govee_status, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_align(govee_status, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_t *toggle = button(content, "Turn Govee Bluetooth on", govee_toggle_clicked);
-    govee_toggle_label = lv_obj_get_child(toggle, 0);
-    lv_obj_set_size(toggle, 520, 82);
+    lv_obj_set_style_text_color(govee_status, lv_color_hex(0xCBD5E1), 0);
 
-    lv_obj_t *card = lv_obj_create(content);
-    lv_obj_set_size(card, 620, 610);
-    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-    lv_obj_set_style_pad_row(card, 32, 0);
-    govee_temperature = lv_label_create(card);
-    lv_obj_set_style_text_font(govee_temperature, &lv_font_montserrat_48, 0);
-    govee_humidity = lv_label_create(card);
-    lv_obj_set_style_text_font(govee_humidity, &lv_font_montserrat_48, 0);
-    govee_details = lv_label_create(card);
-    lv_obj_set_width(govee_details, 560);
+    lv_obj_t *readings = lv_obj_create(content);
+    lv_obj_set_size(readings, 620, 240);
+    lv_obj_set_style_bg_opa(readings, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(readings, 0, 0);
+    lv_obj_set_style_pad_all(readings, 0, 0);
+    lv_obj_set_style_pad_column(readings, 20, 0);
+    lv_obj_clear_flag(readings, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_flex_flow(readings, LV_FLEX_FLOW_ROW);
+    for (int i = 0; i < 2; ++i) {
+        lv_obj_t *card = lv_obj_create(readings);
+        lv_obj_set_size(card, 300, 240);
+        lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_set_style_bg_color(card, lv_color_hex(0x202938), 0);
+        lv_obj_set_style_border_width(card, 0, 0);
+        lv_obj_set_style_radius(card, 20, 0);
+        lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
+        lv_obj_set_flex_align(card, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+        lv_obj_set_style_pad_row(card, 24, 0);
+        lv_obj_t *label = lv_label_create(card);
+        lv_label_set_text(label, i == 0 ? "Temperature" : "Humidity");
+        lv_obj_set_style_text_font(label, &lv_font_montserrat_28, 0);
+        lv_obj_set_style_text_color(label, lv_color_white(), 0);
+        lv_obj_t *value = lv_label_create(card);
+        lv_obj_set_style_text_font(value, &lv_font_montserrat_48, 0);
+        lv_obj_set_style_text_color(value, lv_color_hex(0x5EEAD4), 0);
+        if (i == 0) govee_temperature = value;
+        else govee_humidity = value;
+    }
+    govee_details = lv_label_create(content);
+    lv_obj_set_width(govee_details, 620);
+    lv_obj_set_style_text_font(govee_details, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_align(govee_details, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(govee_temperature, "-- F");
-    lv_label_set_text(govee_humidity, "--% RH");
-    lv_label_set_text(govee_details, "Waiting for a broadcast...");
+    lv_obj_set_style_text_line_space(govee_details, 12, 0);
+    lv_obj_set_style_text_color(govee_details, lv_color_hex(0xCBD5E1), 0);
     govee_tick(NULL);
     govee_timer = lv_timer_create(govee_tick, 1000, NULL);
 }
