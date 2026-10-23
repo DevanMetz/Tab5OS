@@ -609,10 +609,15 @@ static lv_obj_t *action_button(lv_obj_t *parent, const char *text, int width,
 {
     lv_obj_t *button = lv_button_create(parent);
     lv_obj_set_size(button, width, 72);
+    lv_obj_set_style_radius(button, 16, 0);
+    lv_obj_set_style_bg_color(button, lv_color_hex(0x2196F3), 0);
+    lv_obj_set_style_text_color(button, lv_color_white(), 0);
+    lv_obj_set_style_text_font(button, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_shadow_width(button, 0, 0);
     lv_obj_add_event_cb(button, callback, LV_EVENT_CLICKED, user_data);
     lv_obj_t *label = lv_label_create(button);
     lv_obj_set_width(label, width - 20);
-    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(label, text);
     lv_obj_center(label);
@@ -623,6 +628,10 @@ static lv_obj_t *row(lv_obj_t *parent, int height)
 {
     lv_obj_t *container = lv_obj_create(parent);
     lv_obj_set_size(container, 640, height);
+    lv_obj_set_style_bg_opa(container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(container, 0, 0);
+    lv_obj_set_style_pad_all(container, 0, 0);
+    lv_obj_set_style_pad_column(container, 16, 0);
     lv_obj_clear_flag(container, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_flex_flow(container, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(container, LV_FLEX_ALIGN_SPACE_EVENLY,
@@ -1093,11 +1102,11 @@ static void render_scan_view(void)
     portEXIT_CRITICAL(&tool_lock);
 
     lv_obj_t *controls = row(screen_parent, 84);
-    lv_obj_t *scan = action_button(controls, scanning ? "STOP SCAN" : "START SCAN", 250,
+    lv_obj_t *scan = action_button(controls, scanning ? "STOP SCAN" : "START SCAN", 302,
                                    scan_clicked, NULL);
     if (!available || pending) lv_obj_add_state(scan, LV_STATE_DISABLED);
     if (selected >= 0 && (size_t)selected < count) {
-        lv_obj_t *connect = action_button(controls, "CONNECT", 250, connect_clicked, NULL);
+        lv_obj_t *connect = action_button(controls, "CONNECT", 302, connect_clicked, NULL);
         if (pending) lv_obj_add_state(connect, LV_STATE_DISABLED);
     }
     for (size_t i = 0; i < count; i++) {
@@ -1109,14 +1118,19 @@ static void render_scan_view(void)
                  address, snapshot[i].rssi);
         lv_obj_t *device = action_button(screen_parent, text, 620, device_clicked,
                                          (void *)(intptr_t)i);
-        lv_obj_set_height(device, 86);
+        lv_obj_set_height(device, 104);
+        lv_obj_set_style_bg_color(device, lv_color_hex((int)i == selected ? 0x6A4C93 : 0x202938), 0);
+        lv_obj_set_style_border_color(device, lv_color_hex(0xA98BD4), 0);
+        lv_obj_set_style_border_width(device, (int)i == selected ? 2 : 0, 0);
     }
     if (!count) {
         lv_obj_t *empty = lv_label_create(screen_parent);
         lv_obj_set_width(empty, 620);
         lv_obj_set_style_text_align(empty, LV_TEXT_ALIGN_CENTER, 0);
-        lv_label_set_text(empty, scanning ? "Listening for advertisements..." :
-                          "No scan results. Scanning never starts automatically.");
+        lv_obj_set_style_text_font(empty, &lv_font_montserrat_28, 0);
+        lv_obj_set_style_text_color(empty, lv_color_hex(0xB8C4D4), 0);
+        lv_obj_set_style_pad_top(empty, 48, 0);
+        lv_label_set_text(empty, scanning ? "Scanning..." : "No devices found");
     }
 }
 
@@ -1158,24 +1172,17 @@ static void render_characteristic_detail(const ble_tool_characteristic_t *charac
     lv_label_set_long_mode(value_label, LV_LABEL_LONG_WRAP);
     copy_value_button = action_button(screen_parent, "COPY LATEST VALUE", 620, copy_value_clicked, NULL);
     update_value_panel();
-    lv_obj_t *copy_help = lv_label_create(screen_parent);
-    lv_obj_set_width(copy_help, 620);
-    lv_obj_set_style_text_font(copy_help, &lv_font_montserrat_14, 0);
-    lv_label_set_text(copy_help, "Copy the latest received payload (0-64 bytes); no BLE traffic.\n"
-                                "The handle above identifies its source, even when another is selected.\n"
-                                "READ returns one ATT response; long values are not assembled.");
-
     lv_obj_t *warning = lv_label_create(screen_parent);
     lv_obj_set_width(warning, 620);
     lv_obj_set_style_text_align(warning, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text(warning, "Raw writes can change or damage a device.\n"
-                               "The exact same value must be tapped twice within five seconds.");
+                               "Tap WRITE RAW BYTES twice within 5 seconds to confirm.");
     write_area = lv_textarea_create(screen_parent);
     lv_obj_set_size(write_area, 620, 72);
     lv_textarea_set_one_line(write_area, true);
     lv_textarea_set_max_length(write_area, BLE_TOOL_WRITE_MAX * 3 - 1);
     lv_textarea_set_accepted_chars(write_area, "0123456789abcdefABCDEF ");
-    lv_textarea_set_placeholder_text(write_area, "Hex bytes, for example: 01 AF 00");
+    lv_textarea_set_placeholder_text(write_area, "Hex bytes: 01 AF 00");
     lv_obj_t *write = action_button(screen_parent, "WRITE RAW BYTES", 620, write_clicked, NULL);
     if (!(characteristic->properties & (BLE_GATT_CHR_PROP_WRITE | BLE_GATT_CHR_PROP_WRITE_NO_RSP)) || busy)
         lv_obj_add_state(write, LV_STATE_DISABLED);
@@ -1211,8 +1218,8 @@ static void render_connected_view(void)
 
     lv_obj_t *controls = row(screen_parent, 82);
     lv_obj_t *disconnect = action_button(controls, disconnecting ? "DISCONNECTING..." : "DISCONNECT",
-                                         260, disconnect_clicked, NULL);
-    lv_obj_t *save = action_button(controls, "SAVE EVIDENCE", 260,
+                                         302, disconnect_clicked, NULL);
+    lv_obj_t *save = action_button(controls, "SAVE EVIDENCE", 302,
                                    save_evidence_clicked, NULL);
     if (disconnecting) lv_obj_add_state(disconnect, LV_STATE_DISABLED);
     if (!sd_available || in_discovery || disconnecting || busy)
@@ -1225,7 +1232,7 @@ static void render_connected_view(void)
     lv_obj_set_width(summary, 620);
     lv_obj_set_style_text_align(summary, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_text_fmt(summary, in_discovery ? "Discovering GATT database..." :
-                          "%u services, %u characteristics. Tap one to inspect.",
+                          "%u services / %u characteristics",
                           (unsigned)services_found, (unsigned)count);
     for (size_t i = 0; i < count; i++) {
         char service_uuid[BLE_UUID_STR_LEN];
@@ -1240,7 +1247,10 @@ static void render_connected_view(void)
                  service_uuid, characteristic_snapshot[i].val_handle, uuid, properties);
         lv_obj_t *button = action_button(screen_parent, text, 620, characteristic_clicked,
                                          (void *)(intptr_t)i);
-        lv_obj_set_height(button, 94);
+        lv_obj_set_height(button, 180);
+        lv_obj_set_style_bg_color(button, lv_color_hex(0x202938), 0);
+        lv_obj_t *label = lv_obj_get_child(button, 0);
+        lv_obj_set_style_text_align(label, LV_TEXT_ALIGN_LEFT, 0);
     }
 }
 
@@ -1250,19 +1260,13 @@ static void render(void)
     lv_obj_clean(screen_parent);
     status_label = value_label = copy_value_button = write_area = NULL;
     lv_obj_t *title = lv_label_create(screen_parent);
-    lv_label_set_text(title, "BLE GATT Explorer");
+    lv_label_set_text(title, "BLE GATT");
     lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
-    lv_obj_t *help = lv_label_create(screen_parent);
-    lv_obj_set_width(help, 620);
-    lv_obj_set_style_text_align(help, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_text(help, "Scanning and connections are always explicit.\n"
-                            "Only connect to devices you own; pairing is not automated.\n"
-                            "Discovery is capped at 8 devices, 16 services, and 32 characteristics.\n"
-                            "A saved snapshot includes nearby device names and addresses.");
     status_label = lv_label_create(screen_parent);
     lv_obj_set_width(status_label, 620);
     lv_label_set_long_mode(status_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(status_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(status_label, lv_color_hex(0xB8C4D4), 0);
     char status[sizeof(status_text)];
     bool connected_snapshot;
     portENTER_CRITICAL(&tool_lock);
@@ -1331,7 +1335,7 @@ void ble_tool_show(lv_obj_t *parent, bool available, bool sd_available,
     bool pending = connecting || connected || stopping;
     portEXIT_CRITICAL(&tool_lock);
     set_status(pending ? "Previous BLE connection is still stopping..." :
-               available ? "Ready; scanning and connections are opt-in" :
+               available ? "Ready" :
                "Bluetooth hardware is unavailable");
     render();
     ui_timer = lv_timer_create(tick, 200, NULL);
