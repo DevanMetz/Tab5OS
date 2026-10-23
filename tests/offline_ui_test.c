@@ -311,9 +311,9 @@ static void spi_checks(void)
     spi_copy_enabled(false);
     assert(click("COPY RX")); /* Direct events must also validate disabled controls. */
     assert(!payload_clipboard_peek());
-    assert(click("PASTE\nBYTES")); assert(has_text(content, "Byte clipboard is empty"));
+    assert(click("PASTE")); assert(has_text(content, "Byte clipboard is empty"));
     assert(payload_clipboard_store((const uint8_t *)"\x00\x00\xc0\x3f", 4));
-    assert(click("PASTE\nBYTES"));
+    assert(click("PASTE"));
     assert(!strcmp(lv_textarea_get_text(nth(&lv_textarea_class, 0)), "00 00 C0 3F"));
     assert(click("COPY RX")); spi_expect_copy((const uint8_t *)"\x00\x00\xc0\x3f", 4);
     assert(!spi_host_starts && !spi_host_transfers && !spi_host_gpio_writes);
@@ -322,7 +322,7 @@ static void spi_checks(void)
     const size_t rejected[] = {0, 33, 128};
     for (size_t i = 0; i < sizeof(rejected) / sizeof(rejected[0]); i++) {
         assert(payload_clipboard_store(bytes, rejected[i]));
-        assert(click("PASTE\nBYTES")); assert(has_text(content, "draft unchanged"));
+        assert(click("PASTE")); assert(has_text(content, "draft unchanged"));
         assert(!strcmp(lv_textarea_get_text(nth(&lv_textarea_class, 0)), "00 00 C0 3F"));
     }
     assert(!spi_host_starts && !spi_host_transfers && !spi_host_gpio_writes);
@@ -340,7 +340,7 @@ static void spi_checks(void)
     set_input(0, excessive); /* UI retains the 96th character: parser must reject. */
     assert(strlen(lv_textarea_get_text(nth(&lv_textarea_class, 0))) == 96);
     assert(click("TRANSFER")); assert(!spi_host_transfers);
-    assert(payload_clipboard_store(bytes, 32)); assert(click("PASTE\nBYTES"));
+    assert(payload_clipboard_store(bytes, 32)); assert(click("PASTE"));
     assert(!spi_host_transfers && spi_host_starts == 1);
     for (size_t i = 0; i < 32; i++) spi_host_reply[i] = (uint8_t)(255 - i);
     spi_host_reply_length = 32;
@@ -1236,7 +1236,7 @@ int main(int argc, char **argv)
         reset_content();
         spi_tool_show(content);
         refresh();
-        assert(click("PASTE\nBYTES"));
+        assert(click("PASTE"));
         assert(!spi_tool_busy() && spi_host_starts == spi_starts && spi_host_transfers == spi_transfers);
         spi_tool_stop();
         spi_tool_stop();
