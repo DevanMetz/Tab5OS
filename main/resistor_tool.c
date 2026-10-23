@@ -26,7 +26,6 @@ static lv_obj_t *keyboard;
 static lv_obj_t *result_label;
 static lv_obj_t *range_label;
 static lv_obj_t *detail_label;
-static lv_obj_t *note_label;
 
 static const resistor_color_t tolerances[] = {
     RESISTOR_BROWN, RESISTOR_RED, RESISTOR_GREEN, RESISTOR_BLUE,
@@ -95,11 +94,12 @@ static void calculate(void)
                     "Zero-ohm jumper marking.\nActual resistance and current rating depend on the part." :
                     "Tolerance: not established by this marking.\nCheck the part's datasheet for limits.");
     lv_label_set_text(range_label, text);
-    const char *kind = data.kind == RESISTOR_BANDS ? (mode == 0 ? "Two significant digits" : "Three significant digits") :
-        data.kind == RESISTOR_NUMERIC ? "Numeric code: last digit is the exponent" :
-        data.kind == RESISTOR_R_DECIMAL ? "R marks the decimal point in ohms" :
-        data.kind == RESISTOR_EIA96 ? "EIA-96: indexed significant value + multiplier" : "Zero marking";
-    snprintf(text, sizeof(text), "%s\n%u x 10^(%d) = %.12g ohm", kind,
+    const char *kind = data.kind == RESISTOR_BANDS ? "" :
+        data.kind == RESISTOR_NUMERIC ? "Numeric code\n" :
+        data.kind == RESISTOR_R_DECIMAL ? "R decimal\n" :
+        data.kind == RESISTOR_EIA96 ? "EIA-96: indexed significant value\n" : "Zero marking\n";
+    snprintf(text, sizeof(text), "%s%u x 10^(%d) = %.12g ohm",
+             kind,
              data.significand, data.exponent10, data.ohms);
     lv_label_set_text(detail_label, text);
 }
@@ -115,7 +115,7 @@ static void update_bands(void)
         visible(stripe_numbers[i], i < count);
         if (i >= count) continue;
         char caption[48];
-        snprintf(caption, sizeof(caption), "Band %u / %s", i + 1,
+        snprintf(caption, sizeof(caption), "%u / %s", i + 1,
                  i < count - 2 ? "digit" : i == count - 2 ? "multiplier" : "tolerance");
         lv_label_set_text(band_captions[i], caption);
         unsigned selection = (unsigned)choices[mode][i];
@@ -156,11 +156,6 @@ static void update_mode(void)
     visible(keyboard, false);
     lv_keyboard_set_textarea(keyboard, NULL);
     if (mode < 2) update_bands();
-    lv_label_set_text(note_label, mode < 2 ?
-        "Read from the first digit toward the separated tolerance band.\n"
-        "Four/five-band convention only; extra bands and unusual markings need a datasheet." :
-        "Examples: 103 = 10 kohm, 4R7 = 4.7 ohm, 10C = 12.4 kohm.\n"
-        "EIA-96 letters: A-H, X, Y, Z. Manufacturer-specific codes may differ.");
     calculate();
 }
 
@@ -252,7 +247,7 @@ void resistor_tool_stop(void)
     if (keyboard) lv_keyboard_set_textarea(keyboard, NULL);
     keyboard = NULL;
     mode_select = band_panel = smd_panel = code_field = NULL;
-    result_label = range_label = detail_label = note_label = NULL;
+    result_label = range_label = detail_label = NULL;
     for (unsigned i = 0; i < 5; i++) {
         band_blocks[i] = band_captions[i] = band_select[i] = NULL;
         stripes[i] = stripe_numbers[i] = NULL;
@@ -267,10 +262,9 @@ void resistor_tool_show(lv_obj_t *parent)
     lv_obj_set_style_pad_row(column, 16, 0);
     lv_obj_set_style_text_font(column, &lv_font_montserrat_28, 0);
     label(column, "Resistor Lab", false);
-    label(column, "Decode color bands or a printed SMD marking.\nOffline reference; selections update the result immediately.", true);
     mode_select = lv_dropdown_create(column);
     readable_options(mode_select);
-    lv_obj_set_size(mode_select, 640, 62);
+    lv_obj_set_size(mode_select, 640, 72);
     lv_dropdown_set_options(mode_select, "4 color bands\n5 color bands\nSMD marking");
     lv_dropdown_set_selected(mode_select, mode);
     lv_obj_add_event_cb(mode_select, mode_changed, LV_EVENT_VALUE_CHANGED, NULL);
@@ -291,31 +285,32 @@ void resistor_tool_show(lv_obj_t *parent)
         lv_label_set_text(stripe_numbers[i], text);
     }
     for (unsigned i = 0; i < 3; i++) {
-        band_rows[i] = plain(band_panel, 640, 88);
+        band_rows[i] = plain(band_panel, 640, 116);
         lv_obj_set_flex_flow(band_rows[i], LV_FLEX_FLOW_ROW);
         lv_obj_set_style_pad_column(band_rows[i], 20, 0);
     }
     for (unsigned i = 0; i < 5; i++) {
-        band_blocks[i] = plain(band_rows[i / 2], 310, 88);
+        band_blocks[i] = plain(band_rows[i / 2], 310, 116);
         lv_obj_set_flex_flow(band_blocks[i], LV_FLEX_FLOW_COLUMN);
         lv_obj_set_style_pad_row(band_blocks[i], 6, 0);
-        band_captions[i] = label(band_blocks[i], "", true);
+        band_captions[i] = label(band_blocks[i], "", false);
         lv_obj_set_width(band_captions[i], 310);
         band_select[i] = lv_dropdown_create(band_blocks[i]);
         readable_options(band_select[i]);
-        lv_obj_set_size(band_select[i], 310, 62);
+        lv_obj_set_size(band_select[i], 310, 72);
         lv_obj_add_event_cb(band_select[i], band_changed, LV_EVENT_VALUE_CHANGED, (void *)(uintptr_t)i);
     }
     smd_panel = plain(column, 640, LV_SIZE_CONTENT);
     lv_obj_set_flex_flow(smd_panel, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_style_pad_row(smd_panel, 12, 0);
-    label(smd_panel, "Printed code (up to four characters)", true);
+    label(smd_panel, "Printed code", false);
     code_field = lv_textarea_create(smd_panel);
-    lv_obj_set_size(code_field, 640, 62);
+    lv_obj_set_size(code_field, 640, 72);
     /* Preserve pasted newlines; they are invalid marking characters. */
     /* Preserve an extra character and rejected Unicode so truncation cannot
      * silently turn an invalid longer code into a valid shorter code. */
     lv_textarea_set_max_length(code_field, RESISTOR_CODE_MAX + 1);
+    lv_textarea_set_placeholder_text(code_field, "SMD marking");
     lv_textarea_set_text(code_field, saved_code);
     lv_obj_add_event_cb(code_field, code_event, LV_EVENT_ALL, NULL);
     keyboard = lv_keyboard_create(smd_panel);
@@ -325,16 +320,24 @@ void resistor_tool_show(lv_obj_t *parent)
     lv_keyboard_set_mode(keyboard, LV_KEYBOARD_MODE_USER_1);
     lv_obj_add_event_cb(keyboard, keyboard_done, LV_EVENT_READY, NULL);
     lv_obj_add_event_cb(keyboard, keyboard_done, LV_EVENT_CANCEL, NULL);
-    result_label = label(column, "", false);
-    range_label = label(column, "", false);
-    detail_label = label(column, "", true);
-    note_label = label(column, "", true);
+    lv_obj_t *result = plain(column, 640, LV_SIZE_CONTENT);
+    lv_obj_set_flex_flow(result, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_all(result, 24, 0);
+    lv_obj_set_style_pad_row(result, 16, 0);
+    lv_obj_set_style_bg_color(result, lv_color_hex(0x202938), 0);
+    lv_obj_set_style_bg_opa(result, LV_OPA_COVER, 0);
+    lv_obj_set_style_radius(result, 20, 0);
+    result_label = label(result, "", false);
+    lv_obj_set_width(result_label, 592);
+    lv_obj_set_style_text_font(result_label, &lv_font_montserrat_48, 0);
+    range_label = label(result, "", false);
+    lv_obj_set_width(range_label, 592);
+    detail_label = label(result, "", false);
+    lv_obj_set_width(detail_label, 592);
     lv_obj_t *example = lv_button_create(column);
-    lv_obj_set_size(example, 640, 62);
+    lv_obj_set_size(example, 640, 72);
     lv_obj_t *caption = lv_label_create(example);
     lv_label_set_text(caption, "Example"); lv_obj_center(caption);
     lv_obj_add_event_cb(example, example_clicked, LV_EVENT_CLICKED, NULL);
-    label(column, "Markings do not establish power/voltage ratings or prove a part is healthy.\n"
-                  "Confirm ambiguous parts with a meter and datasheet. Inputs stay in RAM until restart.", true);
     update_mode();
 }
