@@ -5,6 +5,7 @@
 #include "payload_clipboard.h"
 #include "byte_tool.h"
 #include "src/display/lv_display_private.h"
+#include "src/core/lv_global.h"
 #include "src/stdlib/builtin/lv_tlsf.h"
 #include <assert.h>
 #include <errno.h>
@@ -146,18 +147,31 @@ static void wait_action(bool with_ui)
         }
     }
 }
+static unsigned transient_animations(bool diagnostic)
+{
+    unsigned count = 0;
+    lv_anim_t *animation;
+    LV_LL_READ(&LV_GLOBAL_DEFAULT()->anim_state.anim_ll, animation) {
+        if (animation->repeat_cnt == LV_ANIM_REPEAT_INFINITE) continue;
+        count++;
+        if (diagnostic)
+            fprintf(stderr, "Pending animation: duration=%ld elapsed=%ld repeats=%lu\n",
+                    (long)animation->duration, (long)animation->act_time, (unsigned long)animation->repeat_cnt);
+    }
+    return count;
+}
 static void settle_ui(void)
 {
     lv_obj_update_layout(content);
-    uint16_t animations = lv_anim_count_running();
-    int64_t stable_since = esp_timer_get_time(), until = stable_since + 1500000;
-    /* Theme transitions include a delay; wait for their allocation count to
-     * settle across the 400 ms maximum scroll duration. Cursor blinking remains
-     * active. Do not delete animations to make a memory comparison pass. */
+    int64_t stable_since = esp_timer_get_time(), until = stable_since + 3000000;
+    /* Wait for finite theme/scroll animations to finish, then remain idle for
+     * 500 ms. Infinite cursor blinking stays active; no animations are deleted
+     * to make a memory comparison pass. */
     while (esp_timer_get_time() - stable_since < 500000) {
+        if (esp_timer_get_time() >= until) transient_animations(true);
         assert(esp_timer_get_time() < until); pump();
-        uint16_t current = lv_anim_count_running();
-        if (current != animations) { animations = current; stable_since = esp_timer_get_time(); }
+        if (transient_animations(false) || lv_obj_is_scrolling(area(5)) || lv_obj_is_scrolling(content))
+            stable_since = esp_timer_get_time();
     }
     assert(!lv_obj_is_scrolling(area(5)) && !lv_obj_is_scrolling(content));
 }
