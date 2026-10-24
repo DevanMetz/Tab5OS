@@ -103,7 +103,12 @@ static void check_bounds(lv_obj_t *o)
     /* Textarea internal labels intentionally scroll inside their field. */
     if (lv_obj_check_type(o, &lv_textarea_class) || lv_obj_check_type(o, &lv_keyboard_class) ||
         lv_obj_check_type(o, &lv_button_class) || lv_obj_get_parent(o) == content) {
-        if (a.x1 < 28 || a.x2 > 691 || a.y1 < 128 || a.y2 > 1251) {
+        /* Larger controls and the keyboard extend the vertically scrollable
+         * app. Keep horizontal bounds strict and require vertical reachability. */
+        lv_area_t viewport; lv_obj_get_content_coords(content, &viewport);
+        int32_t top = viewport.y1 - LV_MAX(0, lv_obj_get_scroll_top(content));
+        int32_t bottom = viewport.y2 + LV_MAX(0, lv_obj_get_scroll_bottom(content));
+        if (a.x1 < viewport.x1 || a.x2 > viewport.x2 || a.y1 < top || a.y2 > bottom) {
             fprintf(stderr, "Object overflow: (%ld,%ld)-(%ld,%ld)\n", (long)a.x1, (long)a.y1, (long)a.x2, (long)a.y2);
             assert(0);
         }
