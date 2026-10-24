@@ -1637,12 +1637,12 @@ void mqtt_tool_show(lv_obj_t *parent, bool wifi_connected, bool sd_available,
 
     lv_obj_t *credentials = row(parent, 78);
     username_area = lv_textarea_create(credentials);
-    lv_obj_set_size(username_area, 312, 64);
+    lv_obj_set_size(username_area, 312, 72);
     lv_textarea_set_one_line(username_area, true);
     lv_textarea_set_max_length(username_area, MQTT_CREDENTIAL_MAX + 1);
     lv_textarea_set_placeholder_text(username_area, "Username");
     password_area = lv_textarea_create(credentials);
-    lv_obj_set_size(password_area, 312, 64);
+    lv_obj_set_size(password_area, 312, 72);
     lv_textarea_set_one_line(password_area, true);
     lv_textarea_set_password_mode(password_area, true);
     lv_textarea_set_max_length(password_area, MQTT_CREDENTIAL_MAX + 1);
@@ -1729,7 +1729,9 @@ void mqtt_tool_show(lv_obj_t *parent, bool wifi_connected, bool sd_available,
     lv_textarea_set_placeholder_text(history_area, "No messages");
 
     /* One-line textareas derive their height from the font; apply the touch
-     * height after enabling one-line mode so LVGL does not shrink them. */
+     * height after enabling one-line mode so LVGL does not shrink them.
+     * Leave room for the 30 px font line, 32 px padding and theme border; a
+     * shorter viewport repeatedly scrolls between the top and bottom of it. */
     lv_obj_t *fields[] = {uri_area, username_area, password_area, topic_area, payload_area, history_area};
     for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
         lv_obj_set_style_text_font(fields[i], &lv_font_montserrat_28, 0);
@@ -1737,10 +1739,10 @@ void mqtt_tool_show(lv_obj_t *parent, bool wifi_connected, bool sd_available,
         lv_obj_set_style_radius(fields[i], 12, 0);
     }
     lv_obj_set_style_text_color(history_area, lv_color_hex(0x475569), LV_PART_TEXTAREA_PLACEHOLDER);
-    lv_obj_set_size(uri_area, 640, 64);
-    lv_obj_set_size(username_area, 312, 64);
-    lv_obj_set_size(password_area, 312, 64);
-    lv_obj_set_size(topic_area, 640, 64);
+    lv_obj_set_size(uri_area, 640, 72);
+    lv_obj_set_size(username_area, 312, 72);
+    lv_obj_set_size(password_area, 312, 72);
+    lv_obj_set_size(topic_area, 640, 72);
 
     keyboard = lv_keyboard_create(parent);
     lv_obj_set_size(keyboard, 640, 360);

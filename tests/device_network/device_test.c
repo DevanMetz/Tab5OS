@@ -67,6 +67,7 @@ static void expect(const char *text)
 static void click(const char *text)
 {
     lv_obj_t *label = find_text(content, text, true);
+    if (!label) { fprintf(stderr, "Missing button: %s\n", text); dump_text(content); }
     assert(label);
     lv_obj_t *button = lv_obj_get_parent(label);
     assert(!lv_obj_has_state(button, LV_STATE_DISABLED));
@@ -102,7 +103,12 @@ static void check_bounds(lv_obj_t *o)
     /* Textarea internal labels intentionally scroll inside their field. */
     if (lv_obj_check_type(o, &lv_textarea_class) || lv_obj_check_type(o, &lv_keyboard_class) ||
         lv_obj_check_type(o, &lv_button_class) || lv_obj_get_parent(o) == content) {
-        if (a.x1 < 28 || a.x2 > 691 || a.y1 < 128 || a.y2 > 1251) {
+        /* Larger controls and the keyboard extend the vertically scrollable
+         * app. Keep horizontal bounds strict and require vertical reachability. */
+        lv_area_t viewport; lv_obj_get_content_coords(content, &viewport);
+        int32_t top = viewport.y1 - LV_MAX(0, lv_obj_get_scroll_top(content));
+        int32_t bottom = viewport.y2 + LV_MAX(0, lv_obj_get_scroll_bottom(content));
+        if (a.x1 < viewport.x1 || a.x2 > viewport.x2 || a.y1 < top || a.y2 > bottom) {
             fprintf(stderr, "Object overflow: (%ld,%ld)-(%ld,%ld)\n", (long)a.x1, (long)a.y1, (long)a.x2, (long)a.y2);
             assert(0);
         }
@@ -260,7 +266,7 @@ static void ntp_case(const char *scenario, const char *port)
         for (size_t i = 0; i < sizeof(bad_hosts) / sizeof(bad_hosts[0]); i++) {
             input(0, bad_hosts[i]);
             assert(!strcmp(lv_textarea_get_text(nth(&lv_textarea_class, 0)), bad_hosts[i]));
-            click("SAMPLE 4"); expect("full decimal IPv4");
+            click("Sample 4"); expect("full decimal IPv4");
             assert(host_sockets_opened == 0 && host_tasks_started == 0 && !busy());
         }
         input(0, "127.0.0.1");
@@ -268,41 +274,41 @@ static void ntp_case(const char *scenario, const char *port)
         for (size_t i = 0; i < sizeof(bad_ports) / sizeof(bad_ports[0]); i++) {
             input(1, bad_ports[i]);
             assert(!strcmp(lv_textarea_get_text(nth(&lv_textarea_class, 1)), bad_ports[i]));
-            click("SAMPLE 4"); expect("1 to 65535");
+            click("Sample 4"); expect("1 to 65535");
             assert(host_sockets_opened == 0 && host_tasks_started == 0);
         }
         clean_app(); open_app();
         assert(!strcmp(lv_textarea_get_text(nth(&lv_textarea_class, 1)), "000001"));
-        click("SAMPLE 4"); expect("1 to 65535");
+        click("Sample 4"); expect("1 to 65535");
         char unicode[65];
         for (unsigned i = 0; i < 16; i++) memcpy(unicode + 4 * i, "\xf0\x9f\x94\xa5", 4);
         unicode[64] = 0;
         input(0, unicode); clean_app(); open_app();
         assert(!strcmp(lv_textarea_get_text(nth(&lv_textarea_class, 0)), unicode));
-        click("SAMPLE 4"); expect("full decimal IPv4");
+        click("Sample 4"); expect("full decimal IPv4");
         input(0, "127.0.0.1"); unicode[24] = 0;
         input(1, unicode); clean_app(); open_app();
         assert(!strcmp(lv_textarea_get_text(nth(&lv_textarea_class, 1)), unicode));
-        click("SAMPLE 4"); expect("1 to 65535");
+        click("Sample 4"); expect("1 to 65535");
         assert(host_sockets_opened == 0 && host_tasks_started == 0 && !busy());
         return;
     }
     if (!strcmp(scenario, "ntp-gates")) {
-        InterlockedExchange(&host_online, 0); click("SAMPLE 4"); expect("Connect to Wi-Fi");
+        InterlockedExchange(&host_online, 0); click("Sample 4"); expect("Connect to Wi-Fi");
         assert(host_sockets_opened == 0);
         InterlockedExchange(&host_online, 1);
         struct timeval time; host_gettimeofday(&time, NULL);
         InterlockedExchange64(&host_wall_offset_us, -(int64_t)time.tv_sec * 1000000);
-        click("SAMPLE 4"); expect("Tablet clock is not set"); assert(host_sockets_opened == 0);
+        click("Sample 4"); expect("Tablet clock is not set"); assert(host_sockets_opened == 0);
         InterlockedExchange64(&host_wall_offset_us, 0);
-        input(0, "999.0.0.1"); click("SAMPLE 4"); expect("full decimal IPv4");
-        input(0, "127.0.0.1"); input(1, "0"); click("SAMPLE 4"); expect("1 to 65535");
+        input(0, "999.0.0.1"); click("Sample 4"); expect("full decimal IPv4");
+        input(0, "127.0.0.1"); input(1, "0"); click("Sample 4"); expect("1 to 65535");
         assert(host_sockets_opened == 0); return;
     }
     if (!strcmp(scenario, "ntp-repeated")) {
         DWORD before = 0, after = 0; lv_mem_monitor_t memory_before, memory_after;
         for (unsigned i = 0; i < 25; i++) {
-            click("SAMPLE 4"); pump_for(200); expect("1 valid");
+            click("Sample 4"); pump_for(200); expect("1 valid");
             clean_app(); finish();
             if (i == 0) { GetProcessHandleCount(GetCurrentProcess(), &before); lv_mem_monitor(&memory_before); }
             open_app(); expect("Cancelled; UDP socket closed.");
@@ -313,15 +319,15 @@ static void ntp_case(const char *scenario, const char *port)
         open_app(); return;
     }
     int64_t started = esp_timer_get_time();
-    click("SAMPLE 4");
+    click("Sample 4");
     if (!strcmp(scenario, "ntp-stop") || !strcmp(scenario, "ntp-home")) {
         pump_for(250); assert(busy()); int64_t cancel_at = esp_timer_get_time();
-        if (!strcmp(scenario, "ntp-stop")) click("STOP"); else clean_app();
+        if (!strcmp(scenario, "ntp-stop")) click("Stop"); else clean_app();
         finish(); assert(esp_timer_get_time() - cancel_at < 1200000);
         if (!strcmp(scenario, "ntp-home")) open_app();
         expect("Cancelled; UDP socket closed.");
         printf("cancel_ms=%lld ", (long long)((esp_timer_get_time() - cancel_at) / 1000));
-        click("SAMPLE 4"); finish(); expect("KoD RATE");
+        click("Sample 4"); finish(); expect("KoD RATE");
     } else if (!strcmp(scenario, "ntp-clockstep") || !strcmp(scenario, "ntp-clockgap")) {
         pump_for(200);
         if (!strcmp(scenario, "ntp-clockgap")) expect("1 valid");
@@ -616,13 +622,13 @@ static void queued_check(bool condition, const char *message)
 }
 static void launch_job(void)
 {
-    if (ntp) click("SAMPLE 4");
+    if (ntp) click("Sample 4");
     else if (udp) start_udp();
     else start_wol();
 }
 static void force_launch(void)
 {
-    lv_obj_t *label = find_text(content, ntp ? "SAMPLE 4" : "SEND", true);
+    lv_obj_t *label = find_text(content, ntp ? "Sample 4" : "SEND", true);
     assert(label);
     lv_obj_send_event(lv_obj_get_parent(label), LV_EVENT_CLICKED, NULL);
 }
@@ -704,7 +710,7 @@ static void queued_case(const char *scenario, const char *port)
     bool home = strstr(scenario, "-home") != NULL;
     LONG sockets = host_sockets_opened;
     hold_job();
-    if (cancel) click(ntp ? "STOP" : "CANCEL");
+    if (cancel) click(ntp ? "Stop" : "CANCEL");
     if (home) {
         clean_app(); open_app();
         assert(busy());
