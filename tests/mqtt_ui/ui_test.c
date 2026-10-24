@@ -278,6 +278,12 @@ static void setup(void)
 }
 static void geometry(void)
 {
+    for (unsigned i = 0; i < 4; i++) {
+        lv_obj_t *field = area(i);
+        const lv_font_t *font = lv_obj_get_style_text_font(field, LV_PART_MAIN);
+        assert(lv_textarea_get_one_line(field));
+        assert(lv_obj_get_content_height(field) >= lv_font_get_line_height(font));
+    }
     const char *controls[] = {"CONNECT", "SUBSCRIBE", "PUBLISH", "SAVE PROFILE", "DELETE PROFILE", "CLEAR", "COPY RX",
                               "PAYLOAD: TEXT", "PASTE BYTES"};
     for (unsigned i = 0; i < sizeof(controls) / sizeof(controls[0]); i++) {
