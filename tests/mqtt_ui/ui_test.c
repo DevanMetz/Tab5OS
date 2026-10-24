@@ -161,6 +161,37 @@ static void settle_ui(void)
     }
     assert(!lv_obj_is_scrolling(area(5)) && !lv_obj_is_scrolling(content));
 }
+typedef struct {
+    size_t block_bytes;
+    uint32_t count, capacity;
+} display_memory_t;
+
+static display_memory_t display_memory(void)
+{
+    lv_array_t *events = &lv_display_get_default()->event_list.array;
+    size_t requested = (size_t)events->capacity * events->element_size;
+    size_t block_bytes = lv_tlsf_block_size(events->data);
+    /* After Home only the two permanent display callbacks remain. TLSF can
+     * absorb an unsplittable tail in this resized array without a new leak. */
+    assert(requested == 16 && block_bytes >= requested && block_bytes - requested <= 32);
+    assert(lv_mem_test() == LV_RESULT_OK);
+    return (display_memory_t){block_bytes, events->size, events->capacity};
+}
+
+static void assert_home_memory(const lv_mem_monitor_t *before, const lv_mem_monitor_t *after,
+                               display_memory_t display_before)
+{
+    display_memory_t display_after = display_memory();
+    printf("Home memory: free=%zu -> %zu, allocations=%zu -> %zu, display_array=%zu -> %zu\n",
+           before->free_size, after->free_size, before->used_cnt, after->used_cnt,
+           display_before.block_bytes, display_after.block_bytes); fflush(stdout);
+    assert(display_before.count == display_after.count && display_before.capacity == display_after.capacity);
+    /* Account for the measured array block only; every other byte and live
+     * allocation must match. A blanket heap tolerance would hide real leaks. */
+    assert(before->free_size + display_before.block_bytes == after->free_size + display_after.block_bytes);
+    assert(before->used_cnt == after->used_cnt);
+}
+
 static void wait_logging(LONG entries, bool with_ui)
 {
     int64_t until = esp_timer_get_time() + 1000000;
@@ -453,6 +484,7 @@ static bool run_profile_case(void)
     /* Warm-up and measured cycles end after Save/Home; ending warm-up after
      * Load/Home leaves a different small LVGL allocator tail in the parent. */
     lv_mem_monitor_t before, after; lv_mem_monitor(&before);
+    display_memory_t display_before = display_memory();
     DWORD handles_before, handles_after; assert(GetProcessHandleCount(GetCurrentProcess(), &handles_before));
     LONG tasks = host_tasks_started;
     for (unsigned i = 0; i < 25; i++) {
@@ -463,7 +495,7 @@ static bool run_profile_case(void)
     lv_mem_monitor(&after); assert(GetProcessHandleCount(GetCurrentProcess(), &handles_after));
     printf("Profile memory before assertion: free=%zu -> %zu, allocations=%zu -> %zu, animations=%u\n",
            before.free_size, after.free_size, before.used_cnt, after.used_cnt, lv_anim_count_running()); fflush(stdout);
-    assert(before.free_size == after.free_size && before.used_cnt == after.used_cnt);
+    assert_home_memory(&before, &after, display_before);
     assert(handles_before == handles_after && host_tasks_started == tasks && host_active_tasks == 1);
     printf("25 profile reload/delete/save cycles: LVGL free=%zu -> %zu, allocations=%zu -> %zu, handles=%lu -> %lu, standby workers=%ld\n",
            before.free_size, after.free_size, before.used_cnt, after.used_cnt,
@@ -475,7 +507,8 @@ static void lifecycle(void)
     bool logged = !strcmp(mode, "logged-lifecycle");
     connect_session(); if (logged) click("SD LOG\nOFF"); click("PUBLISH"); wait_action(false);
     mqtt_host_receive("fixture/rx", "bounded preview"); close_app(); finish(false);
-    lv_mem_monitor_t before, after; lv_mem_monitor(&before); DWORD handles_before, handles_after;
+    lv_mem_monitor_t before, after; lv_mem_monitor(&before);
+    display_memory_t display_before = display_memory(); DWORD handles_before, handles_after;
     assert(GetProcessHandleCount(GetCurrentProcess(), &handles_before));
     LONG tasks_before = host_tasks_started;
     for (unsigned i = 0; i < 25; i++) {
@@ -486,7 +519,7 @@ static void lifecycle(void)
     lv_mem_monitor(&after); assert(GetProcessHandleCount(GetCurrentProcess(), &handles_after));
     printf("Session memory: free=%zu -> %zu, allocations=%zu -> %zu, animations=%u\n",
            before.free_size, after.free_size, before.used_cnt, after.used_cnt, lv_anim_count_running()); fflush(stdout);
-    assert(before.free_size == after.free_size && before.used_cnt == after.used_cnt);
+    assert_home_memory(&before, &after, display_before);
     assert(handles_before == handles_after && host_tasks_started == tasks_before);
     printf("25 sessions: LVGL free=%zu -> %zu, allocations=%zu, handles=%lu -> %lu, standby workers=%ld\n",
            before.free_size, after.free_size, after.used_cnt, (unsigned long)handles_before, (unsigned long)handles_after, host_active_tasks);
@@ -927,10 +960,7 @@ static bool run_paste_case(void)
     }
     assert(!strcmp(mode, "paste-soak"));
     close_app(); finish(false); lv_mem_monitor_t before, after; lv_mem_monitor(&before);
-    lv_array_t *events = &lv_display_get_default()->event_list.array;
-    size_t first_display = lv_tlsf_block_size(events->data);
-    uint32_t event_count = events->size, event_capacity = events->capacity;
-    assert((size_t)event_capacity * events->element_size == 16);
+    display_memory_t display_before = display_memory();
     DWORD before_handles, after_handles; assert(GetProcessHandleCount(GetCurrentProcess(), &before_handles));
     LONG tasks = host_tasks_started;
     for (unsigned i = 0; i < 25; ++i) {
@@ -941,13 +971,7 @@ static bool run_paste_case(void)
         close_app(); finish(false);
     }
     lv_mem_monitor(&after); assert(GetProcessHandleCount(GetCurrentProcess(), &after_handles));
-    size_t last_display = lv_tlsf_block_size(events->data);
-    printf("PASTE_MEMORY free=%zu -> %zu used=%zu -> %zu display_array=%zu -> %zu requested=16 handles=%lu -> %lu\n",
-           before.free_size, after.free_size, before.used_cnt, after.used_cnt, first_display, last_display,
-           before_handles, after_handles); fflush(stdout);
-    assert(first_display >= 16 && first_display - 16 <= 32 && last_display >= 16 && last_display - 16 <= 32);
-    assert(before.free_size + first_display == after.free_size + last_display && before.used_cnt == after.used_cnt);
-    assert(events->size == event_count && events->capacity == event_capacity && lv_mem_test() == LV_RESULT_OK);
+    assert_home_memory(&before, &after, display_before);
     assert(before_handles == after_handles && tasks == host_tasks_started && !mqtt_host_allocations);
     return true;
 }
@@ -1043,12 +1067,8 @@ static bool run_copy_case(void)
     }
     if (!strcmp(mode, "copy-soak")) {
         click("CLEAR"); settle_ui(); close_app(); finish(false); lv_mem_monitor_t before, after;
-        lv_mem_monitor(&before); DWORD handles_before, handles_after;
-        lv_array_t *display_events = &lv_display_get_default()->event_list.array;
-        size_t before_display_bytes = lv_tlsf_block_size(display_events->data);
-        uint32_t before_events = display_events->size, before_capacity = display_events->capacity;
-        assert((size_t)display_events->capacity * display_events->element_size == 16);
-        assert(before_display_bytes >= 16 && before_display_bytes - 16 <= 32);
+        lv_mem_monitor(&before); display_memory_t display_before = display_memory();
+        DWORD handles_before, handles_after;
         assert(GetProcessHandleCount(GetCurrentProcess(), &handles_before)); LONG tasks = host_tasks_started;
         for (unsigned i = 0; i < 25; ++i) {
             open_app(); connect_session(); event = copy_message(bytes, 128); mqtt_host_data(&event);
@@ -1056,15 +1076,7 @@ static bool run_copy_case(void)
             close_app(); finish(false);
         }
         lv_mem_monitor(&after); assert(GetProcessHandleCount(GetCurrentProcess(), &handles_after));
-        printf("COPY_MEMORY free=%zu -> %zu used=%zu -> %zu display_array=%zu -> %zu requested=%zu handles=%lu -> %lu\n",
-               before.free_size, after.free_size, before.used_cnt, after.used_cnt,
-               before_display_bytes, lv_tlsf_block_size(display_events->data),
-               (size_t)display_events->capacity * display_events->element_size, handles_before, handles_after);
-        fflush(stdout);
-        size_t after_display_bytes = lv_tlsf_block_size(display_events->data);
-        assert(after_display_bytes >= 16 && after_display_bytes - 16 <= 32);
-        assert(before.free_size + before_display_bytes == after.free_size + after_display_bytes && before.used_cnt == after.used_cnt);
-        assert(display_events->size == before_events && display_events->capacity == before_capacity && lv_mem_test() == LV_RESULT_OK);
+        assert_home_memory(&before, &after, display_before);
         assert(handles_before == handles_after && host_tasks_started == tasks);
         printf("25 copied receives: LVGL free=%zu -> %zu, handles=%lu -> %lu\n", before.free_size, after.free_size, handles_before, handles_after);
     }
@@ -1196,6 +1208,7 @@ static bool run_receive_case(void)
         }
         click("CLEAR"); settle_ui(); lv_mem_monitor_t live_before, live_after, before, after;
         lv_mem_monitor(&live_before); close_app(); finish(false); lv_mem_monitor(&before);
+        display_memory_t display_before = display_memory();
         DWORD handles_before, handles_after; assert(GetProcessHandleCount(GetCurrentProcess(), &handles_before));
         LONG tasks = host_tasks_started; open_app(); connect_session(); click("SD LOG\nOFF");
         for (unsigned i = 0; i < 50; i++) {
@@ -1206,7 +1219,7 @@ static bool run_receive_case(void)
         click("CLEAR"); settle_ui(); lv_mem_monitor(&live_after);
         assert(live_before.used_cnt == live_after.used_cnt && mqtt_host_allocations == 3);
         close_app(); finish(false); lv_mem_monitor(&after); assert(GetProcessHandleCount(GetCurrentProcess(), &handles_after));
-        assert(before.free_size == after.free_size && before.used_cnt == after.used_cnt);
+        assert_home_memory(&before, &after, display_before);
         assert(handles_before == handles_after && host_tasks_started == tasks);
         printf("50 fragmented receives: LVGL free=%zu -> %zu, handles=%lu -> %lu, standby workers=%ld\n",
                before.free_size, after.free_size, (unsigned long)handles_before, (unsigned long)handles_after, host_active_tasks);
@@ -1558,7 +1571,8 @@ static bool run_action_case(void)
         click("CLEAR"); settle_ui();
         lv_mem_monitor_t before, after, warm_ui, used_ui;
         lv_mem_monitor(&warm_ui); close_app(); finish(false);
-        lv_mem_monitor(&before); DWORD handles_before, handles_after;
+        lv_mem_monitor(&before); display_memory_t display_before = display_memory();
+        DWORD handles_before, handles_after;
         assert(GetProcessHandleCount(GetCurrentProcess(), &handles_before)); LONG tasks = host_tasks_started;
         open_app(); connect_session();
         for (unsigned i = 0; i < 50; i++) { click(i % 2 ? "PUBLISH" : "SUBSCRIBE"); wait_action(true); }
@@ -1570,7 +1584,7 @@ static bool run_action_case(void)
         printf("Action memory after Home: free=%zu -> %zu, allocations=%zu -> %zu; active UI allocations=%zu -> %zu\n",
                before.free_size, after.free_size, before.used_cnt, after.used_cnt,
                warm_ui.used_cnt, used_ui.used_cnt); fflush(stdout);
-        assert(before.free_size == after.free_size && before.used_cnt == after.used_cnt);
+        assert_home_memory(&before, &after, display_before);
         assert(handles_before == handles_after && host_tasks_started == tasks && !mqtt_host_allocations);
         printf("50 actions: LVGL free=%zu -> %zu, handles=%lu -> %lu, standby workers=%ld\n",
                before.free_size, after.free_size, (unsigned long)handles_before, (unsigned long)handles_after, host_active_tasks);
